@@ -1,0 +1,36 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Protocol", "src\SlimeAudio.Protocol\SlimeAudio.Protocol.csproj", "{C915098F-0EDE-4444-B60A-9844F43638B0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Tray", "src\SlimeAudio.Tray\SlimeAudio.Tray.csproj", "{5175D4CA-71AF-4029-9D44-F4E0B05226FD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Send", "src\SlimeAudio.Send\SlimeAudio.Send.csproj", "{84749D7C-9DCD-4D29-9132-C286293E57A4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Protocol.Tests", "tests\SlimeAudio.Protocol.Tests\SlimeAudio.Protocol.Tests.csproj", "{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C915098F-0EDE-4444-B60A-9844F43638B0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C915098F-0EDE-4444-B60A-9844F43638B0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C915098F-0EDE-4444-B60A-9844F43638B0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C915098F-0EDE-4444-B60A-9844F43638B0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5175D4CA-71AF-4029-9D44-F4E0B05226FD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5175D4CA-71AF-4029-9D44-F4E0B05226FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5175D4CA-71AF-4029-9D44-F4E0B05226FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5175D4CA-71AF-4029-9D44-F4E0B05226FD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{84749D7C-9DCD-4D29-9132-C286293E57A4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{84749D7C-9DCD-4D29-9132-C286293E57A4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{84749D7C-9DCD-4D29-9132-C286293E57A4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{84749D7C-9DCD-4D29-9132-C286293E57A4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

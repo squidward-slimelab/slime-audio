@@ -75,6 +75,15 @@ Mutating commands support `dry_run`. Destructive commands, such as playlist remo
 
 Secrets are redacted from subprocess output before returning JSON.
 
+## Slime Audio
+
+`apps/SlimeAudio` contains the Windows tray receiver and sender CLI for LAN TTS / audio broadcast experiments.
+
+- `SlimeAudio.Tray`: tray app that listens on UDP `47777`.
+- `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
+
+GitHub Actions builds win-x64 artifacts from `.github/workflows/slime-audio.yml`.
+
 ## Tests
 
 ```bash
