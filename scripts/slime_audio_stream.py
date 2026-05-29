@@ -164,6 +164,44 @@ def convert_to_stream_wav(input_path: Path, output_path: Path, backend: str, sam
     return "gstreamer"
 
 
+def run_multicast_stream(
+    input_path: Path,
+    group: str,
+    port: int,
+    backend: str,
+    sample_rate: int,
+    channels: int,
+) -> None:
+    if backend == "vlc":
+        raise SystemExit("multicast mode currently uses gstreamer; use --backend auto or --backend gstreamer")
+    subprocess.run(
+        [
+            "gst-launch-1.0",
+            "-q",
+            "filesrc",
+            f"location={input_path}",
+            "!",
+            "decodebin",
+            "!",
+            "audioconvert",
+            "!",
+            "audioresample",
+            "!",
+            f"audio/x-raw,format=S16BE,channels={channels},rate={sample_rate}",
+            "!",
+            "rtpL16pay",
+            "pt=96",
+            "!",
+            "udpsink",
+            f"host={group}",
+            f"port={port}",
+            "auto-multicast=true",
+            "ttl-mc=2",
+        ],
+        check=True,
+    )
+
+
 def stream_wav_synced(wav_path: Path, targets: list[Receiver], delay_ms: int, packet_delay_ms: int) -> None:
     with wave.open(str(wav_path), "rb") as audio:
         channels = audio.getnchannels()
@@ -225,6 +263,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--discover-timeout-ms", type=int, default=2500)
     parser.add_argument("--backend", choices=["auto", "vlc", "gstreamer"], default="auto")
+    parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
+    parser.add_argument("--multicast-group", default="239.77.77.77")
+    parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--delay-ms", type=int, default=2500)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
     parser.add_argument("--sample-rate", type=int, default=48000)
@@ -243,6 +284,17 @@ def main() -> int:
     if args.dry_run:
         for target in targets:
             print(f"target {target.endpoint}\t{target.machine_name}\t{target.version}")
+        if args.mode == "multicast":
+            print(f"multicast {args.multicast_group}:{args.multicast_port}")
+        return 0
+
+    if args.mode == "multicast":
+        print(
+            f"multicast backend=gstreamer file={args.file} "
+            f"group={args.multicast_group}:{args.multicast_port} targets={len(targets)}",
+            flush=True,
+        )
+        run_multicast_stream(args.file, args.multicast_group, args.multicast_port, args.backend, args.sample_rate, args.channels)
         return 0
 
     with tempfile.TemporaryDirectory(prefix="slime-audio-stream-") as tmp:

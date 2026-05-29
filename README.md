@@ -112,6 +112,12 @@ python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 
 All targets receive one shared session id and start timestamp, so connected rooms begin together. Use `--dry-run` to see resolved receivers without sending audio.
 
+For multi-room music, use multicast mode after starting the shared stream listener from each tray app. This is one live RTP source instead of separate per-host packet playback.
+
+```bash
+python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
+```
+
 ## Daemon
 
 ```bash

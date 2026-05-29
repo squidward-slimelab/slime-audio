@@ -80,7 +80,13 @@ python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPON
 python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 ```
 
-The streamer prefers VLC/cvlc when installed and falls back to GStreamer. All selected receivers get one shared session id and start timestamp for synced playback.
+The streamer prefers VLC/cvlc when installed and falls back to GStreamer. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one live RTP source.
+
+From each tray app, choose `Start shared stream listener`, then run:
+
+```bash
+python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
+```
 
 ## Timed Spotify Drops
 

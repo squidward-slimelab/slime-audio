@@ -54,6 +54,13 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(packet[4], 1)
         self.assertEqual(len(packet), 43 + 3)
 
+    def test_resolve_targets_deduplicates_all_and_named_target(self):
+        discovered = [
+            Receiver("192.168.0.163:47777", "192.168.0.163", 47777, "SPATULA", "user", "0.3.0"),
+        ]
+
+        self.assertEqual(len(resolve_targets(["all", "SPATULA"], discovered)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
