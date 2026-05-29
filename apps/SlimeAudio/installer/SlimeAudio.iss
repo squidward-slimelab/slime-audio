@@ -43,7 +43,7 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
-  Exec(ExpandConstant('{cmd}'), '/C taskkill /IM {#MyAppExeName} /F /T >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /IM {#MyAppExeName} /F >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
 end;
 

@@ -45,13 +45,14 @@ The app stays in the system tray. The installer also adds a Start Menu shortcut 
 
 The tray menu includes:
 
+- `Slime Audio <version>`
 - `Status`
 - `Start shared stream listener`
 - `Stop shared stream listener`
 - `Check for updates`
 - `Quit`
 
-`Check for updates` downloads the latest GitHub release installer and runs it silently. The installer stops any running `SlimeAudio.Tray.exe` before replacing files, then launches the updated tray app.
+`Check for updates` compares the running tray version against the latest GitHub release. If an update is available, it downloads the installer and runs it silently. The installer stops any running `SlimeAudio.Tray.exe` before replacing files, then launches the updated tray app.
 
 ## Discover Receivers
 

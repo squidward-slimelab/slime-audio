@@ -65,12 +65,13 @@ internal sealed class TrayContext : ApplicationContext
         _icon = new NotifyIcon
         {
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application,
-            Text = TrimForTray($"Slime Audio listening on UDP {_receiver.Port}"),
+            Text = TrimForTray(DefaultStatus),
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip(),
         };
         _receiver.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
         _multicast.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
+        _icon.ContextMenuStrip.Items.Add($"Slime Audio {VersionInfo.DisplayVersion}", null, (_, _) => MessageBox.Show(DefaultStatus, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Start shared stream listener", null, (_, _) => _multicast.Start());
         _icon.ContextMenuStrip.Items.Add("Stop shared stream listener", null, (_, _) => _multicast.Stop());
@@ -78,6 +79,8 @@ internal sealed class TrayContext : ApplicationContext
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
         _receiver.Start();
     }
+
+    private string DefaultStatus => $"Slime Audio {VersionInfo.DisplayVersion} listening on UDP {_receiver.Port}";
 
     private async Task CheckForUpdates()
     {
@@ -228,7 +231,7 @@ internal sealed class AudioReceiver : IDisposable
         var text = Encoding.UTF8.GetString(result.Buffer).Trim();
         if (text == ControlMessages.Discover)
         {
-            var response = DiscoveryResponse.Current(Port, Application.ProductVersion).ToJson();
+            var response = DiscoveryResponse.Current(Port, VersionInfo.DisplayVersion).ToJson();
             var bytes = Encoding.UTF8.GetBytes(response);
             _udp?.Send(bytes, bytes.Length, result.RemoteEndPoint);
             StatusChanged?.Invoke(this, $"Discovery response sent to {result.RemoteEndPoint.Address}");
