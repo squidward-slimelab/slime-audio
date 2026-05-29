@@ -11,6 +11,7 @@ Download the Windows installer from GitHub releases.
 - `SlimeAudio.Tray`: Windows tray app that listens on UDP `47777`.
 - `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
 - `scripts/slime_audio_drops.py`: watches Spotify playback and sends timed phrase drops during specific songs.
+- `scripts/slime_audio_stream.py`: decodes a local audio file and streams it to any combo of discovered receivers with one synced start timestamp.
 - `SlimeAudioSetup.exe`: real Windows installer with Start Menu shortcut and optional startup launch.
 - LAN discovery: `SlimeAudio.Send.exe discover`
 - Updates: tray menu `Check for updates`, or `SlimeAudio.Send.exe update --target HOST:47777`
@@ -99,6 +100,17 @@ python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
 ```
 
 Use `track_uri` for exact matching. `track_id` and `track_name` also work for quick local plans.
+
+## Local File Streaming
+
+Stream any local audio file through the same SlimeAudio UDP path as voice. The script discovers receivers, accepts receiver names, `host:port`, or `all`, decodes with VLC when installed, and falls back to GStreamer.
+
+```bash
+python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT
+python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
+```
+
+All targets receive one shared session id and start timestamp, so connected rooms begin together. Use `--dry-run` to see resolved receivers without sending audio.
 
 ## Daemon
 

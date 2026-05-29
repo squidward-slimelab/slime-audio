@@ -71,6 +71,17 @@ SlimeAudio.Send.exe --file .\tts.wav --target SPATULA:47777 --target SPONGEBOT:4
 
 Both receivers buffer the stream and start at the same UTC timestamp. Real sync quality depends on the laptops having sane clocks, so keep Windows time sync enabled.
 
+## Stream Local Files
+
+From the repo root, `scripts/slime_audio_stream.py` decodes a local audio file and sends it through the same UDP protocol as voice. It can target any combo of connected receivers by discovered machine name, explicit `host:port`, or `all`.
+
+```bash
+python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT
+python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
+```
+
+The streamer prefers VLC/cvlc when installed and falls back to GStreamer. All selected receivers get one shared session id and start timestamp for synced playback.
+
 ## Timed Spotify Drops
 
 For agent DJ/sample-drop mode, use the Python drop runner from the repo root. It pre-renders phrases, polls `spogo status`, checks the current Spotify track and progress, and sends SlimeAudio packets only while Spotify is playing. The runner defaults to 5 second status polling and backs off up to 30 seconds on failures; local probing showed 5 seconds was clean and 1.5 seconds was too aggressive.
