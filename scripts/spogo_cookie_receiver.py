@@ -30,7 +30,7 @@ PAGE = """<!doctype html>
   <h1>spogo cookie login</h1>
   <p class="note">Paste Spotify cookie values from DevTools. This page submits once, writes spogo cookies locally, then shuts itself down.</p>
   <p class="note warn">Do not paste passwords. Use only <code>sp_dc</code>, optional <code>sp_key</code>, and recommended <code>sp_t</code>.</p>
-  <form method="post" action="/submit?token={token}">
+  <form method="post" action="/submit?token=__TOKEN__">
     <label for="sp_dc">sp_dc required</label>
     <input id="sp_dc" name="sp_dc" autocomplete="off" autofocus required>
     <label for="sp_key">sp_key optional</label>
@@ -69,7 +69,7 @@ def main() -> int:
             if parsed.path != "/" or parse_qs(parsed.query).get("token", [""])[0] != token:
                 self.write("not found", status=404)
                 return
-            self.write(PAGE.format(token=html.escape(token)), content_type="text/html")
+            self.write(PAGE.replace("__TOKEN__", html.escape(token)), content_type="text/html")
 
         def do_POST(self) -> None:
             if expired():
