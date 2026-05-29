@@ -84,7 +84,7 @@ internal sealed class TrayContext : ApplicationContext
         try
         {
             _icon.Text = TrimForTray("Slime Audio checking for updates");
-            var message = await UpdateService.OpenLatestInstallerAsync();
+            var message = await UpdateService.DownloadAndRunLatestInstallerAsync();
             _icon.Text = TrimForTray(message);
         }
         catch (Exception ex)
@@ -239,7 +239,7 @@ internal sealed class AudioReceiver : IDisposable
             {
                 try
                 {
-                    var message = await UpdateService.OpenLatestInstallerAsync().ConfigureAwait(false);
+                    var message = await UpdateService.DownloadAndRunLatestInstallerAsync().ConfigureAwait(false);
                     StatusChanged?.Invoke(this, message);
                 }
                 catch (Exception ex)

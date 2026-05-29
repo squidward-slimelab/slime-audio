@@ -7,8 +7,9 @@ namespace SlimeAudio.Tray;
 internal static class UpdateService
 {
     private const string LatestReleaseUrl = "https://api.github.com/repos/squidward-slimelab/slime-audio/releases/latest";
+    private const string InstallerName = "SlimeAudioSetup.exe";
 
-    public static async Task<string> OpenLatestInstallerAsync()
+    public static async Task<string> DownloadAndRunLatestInstallerAsync()
     {
         using var http = new HttpClient();
         http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("SlimeAudio", Application.ProductVersion));
@@ -20,7 +21,7 @@ internal static class UpdateService
         foreach (var asset in json.RootElement.GetProperty("assets").EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString();
-            if (!string.Equals(name, "SlimeAudioSetup.exe", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(name, InstallerName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -31,10 +32,21 @@ internal static class UpdateService
                 break;
             }
 
-            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-            return $"Opened update installer: {url}";
+            var installerPath = Path.Combine(Path.GetTempPath(), $"SlimeAudioSetup-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.exe");
+            await DownloadFileAsync(http, url, installerPath).ConfigureAwait(false);
+            Process.Start(new ProcessStartInfo(installerPath) { UseShellExecute = true });
+            return $"Started update installer: {installerPath}";
         }
 
-        throw new InvalidOperationException("Latest release does not include SlimeAudioSetup.exe");
+        throw new InvalidOperationException($"Latest release does not include {InstallerName}");
+    }
+
+    private static async Task DownloadFileAsync(HttpClient http, string url, string outputPath)
+    {
+        using var response = await http.GetAsync(url).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        await using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        await using var output = File.Create(outputPath);
+        await input.CopyToAsync(output).ConfigureAwait(false);
     }
 }

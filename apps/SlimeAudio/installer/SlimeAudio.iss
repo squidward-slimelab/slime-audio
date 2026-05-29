@@ -25,6 +25,9 @@ PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=..\assets\slime-audio.ico
 
+[InstallDelete]
+Type: files; Name: "{app}\SlimeAudio.Tray.exe"
+
 [Files]
 Source: "..\..\..\artifacts\slime-audio-tray-win-x64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -37,3 +40,12 @@ Name: "startup"; Description: "Start Slime Audio when I sign in"; GroupDescripti
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch Slime Audio"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /IM {#MyAppExeName} /F /T >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := '';
+end;
