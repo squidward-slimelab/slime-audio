@@ -85,7 +85,7 @@ internal static class VersionInfo
         var version = typeof(VersionInfo).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
             .InformationalVersion;
-        return string.IsNullOrWhiteSpace(version) ? Application.ProductVersion : version;
+        return Normalize(string.IsNullOrWhiteSpace(version) ? Application.ProductVersion : version);
     }
 
     private static string Normalize(string value)

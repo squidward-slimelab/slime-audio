@@ -36,8 +36,8 @@ jobs:
           }
           "SLIME_AUDIO_VERSION=$version" >> $env:GITHUB_ENV
           "SLIME_AUDIO_ASSEMBLY_VERSION=$($version.Split('+')[0])" >> $env:GITHUB_ENV
-      - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Tray/SlimeAudio.Tray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -o artifacts/slime-audio-tray-win-x64
-      - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Send/SlimeAudio.Send.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -o artifacts/slime-audio-send-win-x64
+      - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Tray/SlimeAudio.Tray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -p:IncludeSourceRevisionInInformationalVersion=false -o artifacts/slime-audio-tray-win-x64
+      - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Send/SlimeAudio.Send.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -p:IncludeSourceRevisionInInformationalVersion=false -o artifacts/slime-audio-send-win-x64
       - run: choco install innosetup --no-progress -y
       - name: Build installer
         shell: pwsh
