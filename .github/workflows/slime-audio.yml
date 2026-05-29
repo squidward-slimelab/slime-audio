@@ -26,7 +26,18 @@ jobs:
       - run: dotnet test apps/SlimeAudio/SlimeAudio.sln -c Release --no-restore
       - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Tray/SlimeAudio.Tray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -o artifacts/slime-audio-tray-win-x64
       - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Send/SlimeAudio.Send.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -o artifacts/slime-audio-send-win-x64
+      - run: choco install innosetup --no-progress -y
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $env:SLIME_AUDIO_VERSION = "${{ github.ref_name }}"
+          if ($env:SLIME_AUDIO_VERSION.StartsWith("v")) {
+            $env:SLIME_AUDIO_VERSION = $env:SLIME_AUDIO_VERSION.Substring(1)
+          }
+          iscc apps/SlimeAudio/installer/SlimeAudio.iss
       - uses: actions/upload-artifact@v4
         with:
           name: slime-audio-win-x64
-          path: artifacts/**
+          path: |
+            artifacts/installer/SlimeAudioSetup.exe
+            artifacts/slime-audio-send-win-x64/SlimeAudio.Send.exe

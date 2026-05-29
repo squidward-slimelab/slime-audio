@@ -24,6 +24,15 @@ Publish the tray app on Windows:
 dotnet publish apps/SlimeAudio/src/SlimeAudio.Tray/SlimeAudio.Tray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
+Build the Windows installer:
+
+```powershell
+choco install innosetup -y
+iscc apps/SlimeAudio/installer/SlimeAudio.iss
+```
+
+GitHub Actions publishes `SlimeAudioSetup.exe`.
+
 ## Run Receiver
 
 On each Windows speaker device:
@@ -32,7 +41,7 @@ On each Windows speaker device:
 SlimeAudio.Tray.exe --port 47777
 ```
 
-The app stays in the system tray.
+The app stays in the system tray. The installer also adds a Start Menu shortcut and can optionally start the tray app when Windows signs in.
 
 ## Send WAV Audio
 
