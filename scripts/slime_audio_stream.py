@@ -317,6 +317,7 @@ def stream_live_synced(
     channels: int,
     delay_ms: int,
     chunk_ms: int,
+    effect: tuple[int, int, int, int, float, float] | None = None,
 ) -> None:
     decoder, selected_backend = open_decoder_stdout(input_path, backend, sample_rate, channels)
     if decoder.stdout is None:
@@ -330,6 +331,17 @@ def stream_live_synced(
         target.endpoint: int(sender_start_ms + target.clock_offset_ms)
         for target in targets
     }
+    if effect is not None:
+        effect_offset_ms, fade_in_ms, hold_ms, fade_out_ms, volume, lowpass_hz = effect
+        send_effect_control(
+            targets,
+            delay_ms=lead_ms + effect_offset_ms,
+            fade_in_ms=fade_in_ms,
+            hold_ms=hold_ms,
+            fade_out_ms=fade_out_ms,
+            volume=volume,
+            lowpass_hz=lowpass_hz,
+        )
     chunk_frames = max(1, sample_rate * chunk_ms // 1000)
     frame_bytes = channels * 2
     chunk_bytes = chunk_frames * frame_bytes
@@ -477,6 +489,8 @@ def main() -> int:
     parser.add_argument("--effect-fade-in-ms", type=int, default=350)
     parser.add_argument("--effect-hold-ms", type=int, default=1400)
     parser.add_argument("--effect-fade-out-ms", type=int, default=600)
+    parser.add_argument("--effect-during-stream", action="store_true", help="Send a synced effect envelope aligned to this stream's start.")
+    parser.add_argument("--effect-start-offset-ms", type=int, default=-250)
     args = parser.parse_args()
 
     if args.start_listeners and args.stop_listeners:
@@ -539,7 +553,17 @@ def main() -> int:
                 send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
         return 0
 
-    stream_live_synced(args.file, targets, args.backend, args.sample_rate, args.channels, args.delay_ms, args.chunk_ms)
+    effect = None
+    if args.effect_during_stream:
+        effect = (
+            args.effect_start_offset_ms,
+            args.effect_fade_in_ms,
+            args.effect_hold_ms,
+            args.effect_fade_out_ms,
+            args.effect_volume,
+            args.effect_lowpass_hz,
+        )
+    stream_live_synced(args.file, targets, args.backend, args.sample_rate, args.channels, args.delay_ms, args.chunk_ms, effect)
 
     return 0
 
