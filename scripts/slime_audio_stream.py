@@ -29,6 +29,8 @@ class Receiver:
     machine_name: str
     user_name: str
     version: str
+    rtt_ms: float = 0.0
+    clock_offset_ms: float = 0.0
 
 
 def discover_receivers(port: int = DEFAULT_PORT, timeout_ms: int = 2500) -> list[Receiver]:
@@ -36,27 +38,30 @@ def discover_receivers(port: int = DEFAULT_PORT, timeout_ms: int = 2500) -> list
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.settimeout(0.5)
+        sent_ms = time.time() * 1000
         sock.sendto(DISCOVER_MESSAGE, ("255.255.255.255", port))
-        deadline = socket.getdefaulttimeout()
-
-        import time
-
         stop_at = time.monotonic() + (timeout_ms / 1000)
         while time.monotonic() < stop_at:
             try:
                 payload, address = sock.recvfrom(4096)
+                received_ms = time.time() * 1000
             except TimeoutError:
                 continue
             except socket.timeout:
                 continue
-            response = parse_discovery_response(payload, address[0])
+            response = parse_discovery_response(payload, address[0], sent_ms, received_ms)
             if response is not None:
                 found[response.endpoint] = response
 
     return sorted(found.values(), key=lambda receiver: receiver.machine_name.casefold())
 
 
-def parse_discovery_response(payload: bytes, host: str) -> Receiver | None:
+def parse_discovery_response(
+    payload: bytes,
+    host: str,
+    sent_ms: float | None = None,
+    received_ms: float | None = None,
+) -> Receiver | None:
     try:
         data = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -65,6 +70,10 @@ def parse_discovery_response(payload: bytes, host: str) -> Receiver | None:
         return None
 
     port = int(data.get("Port") or DEFAULT_PORT)
+    rtt_ms = max(0.0, (received_ms - sent_ms)) if sent_ms is not None and received_ms is not None else 0.0
+    receiver_time = float(data.get("UnixTimeMs") or 0)
+    midpoint_ms = ((sent_ms + received_ms) / 2) if sent_ms is not None and received_ms is not None else 0.0
+    clock_offset_ms = receiver_time - midpoint_ms if receiver_time and midpoint_ms else 0.0
     return Receiver(
         endpoint=f"{host}:{port}",
         host=host,
@@ -72,6 +81,8 @@ def parse_discovery_response(payload: bytes, host: str) -> Receiver | None:
         machine_name=str(data.get("MachineName") or host),
         user_name=str(data.get("UserName") or ""),
         version=str(data.get("Version") or ""),
+        rtt_ms=rtt_ms,
+        clock_offset_ms=clock_offset_ms,
     )
 
 
@@ -166,6 +177,63 @@ def convert_to_stream_wav(input_path: Path, output_path: Path, backend: str, sam
     return "gstreamer"
 
 
+def open_decoder_stdout(
+    input_path: Path,
+    backend: str,
+    sample_rate: int,
+    channels: int,
+) -> tuple[subprocess.Popen[bytes], str]:
+    if backend in {"auto", "vlc"}:
+        vlc = shutil.which("cvlc") or shutil.which("vlc")
+        if vlc is not None:
+            return (
+                subprocess.Popen(
+                    [
+                        vlc,
+                        "-I",
+                        "dummy",
+                        "--no-video",
+                        "--play-and-exit",
+                        str(input_path),
+                        (
+                            f"--sout=#transcode{{acodec=s16l,channels={channels},samplerate={sample_rate}}}:"
+                            "std{access=file,mux=raw,dst=-}"
+                        ),
+                        "vlc://quit",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ),
+                "vlc",
+            )
+        if backend == "vlc":
+            raise FileNotFoundError("cvlc/vlc is not installed")
+
+    return (
+        subprocess.Popen(
+            [
+                "gst-launch-1.0",
+                "-q",
+                "filesrc",
+                f"location={input_path}",
+                "!",
+                "decodebin",
+                "!",
+                "audioconvert",
+                "!",
+                "audioresample",
+                "!",
+                f"audio/x-raw,format=S16LE,channels={channels},rate={sample_rate}",
+                "!",
+                "fdsink",
+                "fd=1",
+            ],
+            stdout=subprocess.PIPE,
+        ),
+        "gstreamer",
+    )
+
+
 def run_multicast_stream(
     input_path: Path,
     group: str,
@@ -240,6 +308,95 @@ def stream_wav_synced(wav_path: Path, targets: list[Receiver], delay_ms: int, pa
     )
 
 
+def stream_live_synced(
+    input_path: Path,
+    targets: list[Receiver],
+    backend: str,
+    sample_rate: int,
+    channels: int,
+    delay_ms: int,
+    chunk_ms: int,
+) -> None:
+    decoder, selected_backend = open_decoder_stdout(input_path, backend, sample_rate, channels)
+    if decoder.stdout is None:
+        raise RuntimeError("decoder stdout was not captured")
+
+    session = uuid.uuid4()
+    max_rtt = max((target.rtt_ms for target in targets), default=0.0)
+    lead_ms = max(delay_ms, int(max_rtt + 1200))
+    sender_start_ms = int((time.time() * 1000) + lead_ms)
+    target_start_ms = {
+        target.endpoint: int(sender_start_ms + target.clock_offset_ms)
+        for target in targets
+    }
+    chunk_frames = max(1, sample_rate * chunk_ms // 1000)
+    frame_bytes = channels * 2
+    chunk_bytes = chunk_frames * frame_bytes
+    endpoints = [(target, (target.host, target.port)) for target in targets]
+    started = time.monotonic()
+    sequence = 0
+    bytes_sent = 0
+
+    print(
+        f"live backend={selected_backend} session={session} lead_ms={lead_ms} "
+        f"targets={','.join(f'{target.machine_name}(rtt={target.rtt_ms:.1f}ms,offset={target.clock_offset_ms:.1f}ms)' for target in targets)}",
+        flush=True,
+    )
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            while True:
+                payload = decoder.stdout.read(chunk_bytes)
+                if not payload:
+                    break
+                if len(payload) % frame_bytes:
+                    payload = payload[: len(payload) - (len(payload) % frame_bytes)]
+                if not payload:
+                    continue
+                for target, endpoint in endpoints:
+                    packet = encode_audio_packet(
+                        session,
+                        sequence,
+                        target_start_ms[target.endpoint],
+                        sample_rate,
+                        channels,
+                        payload,
+                    )
+                    sock.sendto(packet, endpoint)
+                bytes_sent += len(payload)
+                sequence += 1
+                next_send = started + ((bytes_sent / frame_bytes) / sample_rate)
+                sleep_for = next_send - time.monotonic()
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+
+            for target, endpoint in endpoints:
+                end = encode_audio_packet(
+                    session,
+                    sequence,
+                    target_start_ms[target.endpoint],
+                    sample_rate,
+                    channels,
+                    b"",
+                    packet_type=2,
+                )
+                sock.sendto(end, endpoint)
+    finally:
+        try:
+            decoder.stdout.close()
+        except Exception:
+            pass
+        return_code = decoder.wait(timeout=5)
+        if return_code not in (0, None):
+            raise subprocess.CalledProcessError(return_code, selected_backend)
+
+    print(
+        f"sent live session={session} bytes={bytes_sent} "
+        f"targets={','.join(target.endpoint for target in targets)}",
+        flush=True,
+    )
+
+
 def send_control(targets: list[Receiver], payload: bytes, label: str) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         for target in targets:
@@ -277,6 +434,7 @@ def main() -> int:
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--delay-ms", type=int, default=2500)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
+    parser.add_argument("--chunk-ms", type=int, default=50)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true")
@@ -296,7 +454,10 @@ def main() -> int:
 
     if args.dry_run:
         for target in targets:
-            print(f"target {target.endpoint}\t{target.machine_name}\t{target.version}")
+            print(
+                f"target {target.endpoint}\t{target.machine_name}\t{target.version}"
+                f"\trtt={target.rtt_ms:.1f}ms\toffset={target.clock_offset_ms:.1f}ms"
+            )
         if args.mode == "multicast":
             print(f"multicast {args.multicast_group}:{args.multicast_port}")
         return 0
@@ -331,11 +492,7 @@ def main() -> int:
                 send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
         return 0
 
-    with tempfile.TemporaryDirectory(prefix="slime-audio-stream-") as tmp:
-        wav_path = Path(tmp) / "stream.wav"
-        backend = convert_to_stream_wav(args.file, wav_path, args.backend, args.sample_rate, args.channels)
-        print(f"decoded backend={backend} file={args.file} targets={len(targets)}")
-        stream_wav_synced(wav_path, targets, args.delay_ms, args.packet_delay_ms)
+    stream_live_synced(args.file, targets, args.backend, args.sample_rate, args.channels, args.delay_ms, args.chunk_ms)
 
     return 0
 

@@ -21,14 +21,16 @@ class SlimeAudioStreamTests(unittest.TestCase):
     def test_parse_discovery_response(self):
         payload = (
             b'{"App":"slime-audio","MachineName":"SPATULA","UserName":"slimeq",'
-            b'"Version":"0.3.0","Port":47777,"UnixTimeMs":1}'
+            b'"Version":"0.3.0","Port":47777,"UnixTimeMs":1500}'
         )
 
-        receiver = parse_discovery_response(payload, "192.168.0.163")
+        receiver = parse_discovery_response(payload, "192.168.0.163", 1000, 1200)
 
         self.assertIsNotNone(receiver)
         self.assertEqual(receiver.endpoint, "192.168.0.163:47777")
         self.assertEqual(receiver.machine_name, "SPATULA")
+        self.assertEqual(receiver.rtt_ms, 200)
+        self.assertEqual(receiver.clock_offset_ms, 400)
 
     def test_parse_discovery_response_rejects_other_apps(self):
         self.assertIsNone(parse_discovery_response(b'{"App":"nope"}', "127.0.0.1"))
