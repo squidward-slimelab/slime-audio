@@ -38,9 +38,6 @@ Name: "{userstartup}\Slime Audio"; Filename: "{app}\{#MyAppExeName}"; Tasks: sta
 [Tasks]
 Name: "startup"; Description: "Start Slime Audio when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
 
-[Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Slime Audio"; Flags: nowait postinstall
-
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -48,4 +45,14 @@ var
 begin
   Exec(ExpandConstant('{cmd}'), '/C taskkill /IM {#MyAppExeName} /F /T >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    Exec(ExpandConstant('{app}\{#MyAppExeName}'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ResultCode);
+  end;
 end;
