@@ -15,6 +15,7 @@ Download the Windows installer from GitHub releases.
 - `SlimeAudioSetup.exe`: real Windows installer with Start Menu shortcut and optional startup launch.
 - LAN discovery: `SlimeAudio.Send.exe discover`
 - Updates: tray menu `Check for updates`, or `SlimeAudio.Send.exe update --target HOST:47777`
+- Shared stream listeners: server-controlled with `shared-start` / `shared-stop`, or automatic from `scripts/slime_audio_stream.py --mode multicast`.
 
 GitHub Actions builds win-x64 artifacts from `.github/workflows/slime-audio.yml`.
 
@@ -112,10 +113,12 @@ python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 
 All targets receive one shared session id and start timestamp, so connected rooms begin together. Use `--dry-run` to see resolved receivers without sending audio.
 
-For multi-room music, use multicast mode after starting the shared stream listener from each tray app. This is one live RTP source instead of separate per-host packet playback.
+For multi-room music, use multicast mode. This is one live RTP source instead of separate per-host packet playback. The streamer starts shared stream listeners on the selected receivers before playback; add `--stop-listeners-when-done` when you want it to shut them down after the file exits.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
+python3 scripts/slime_audio_stream.py --target all --start-listeners
+python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
 ## Daemon

@@ -20,6 +20,28 @@ if (args.Length > 0 && args[0] == "update")
     return await SendControl(updateOptions.Targets, ControlMessages.Update);
 }
 
+if (args.Length > 0 && args[0] == "shared-start")
+{
+    var controlOptions = Options.ParseUpdate(args.Skip(1).ToArray());
+    if (controlOptions is null)
+    {
+        Options.PrintUsage();
+        return 2;
+    }
+    return await SendControl(controlOptions.Targets, ControlMessages.SharedStreamStart);
+}
+
+if (args.Length > 0 && args[0] == "shared-stop")
+{
+    var controlOptions = Options.ParseUpdate(args.Skip(1).ToArray());
+    if (controlOptions is null)
+    {
+        Options.PrintUsage();
+        return 2;
+    }
+    return await SendControl(controlOptions.Targets, ControlMessages.SharedStreamStop);
+}
+
 var sendArgs = args.Length > 0 && args[0] == "send" ? args.Skip(1).ToArray() : args;
 var options = Options.Parse(sendArgs);
 if (options is null)
@@ -215,6 +237,8 @@ internal sealed record Options(string File, IReadOnlyList<string> Targets, int D
         Console.Error.WriteLine("usage:");
         Console.Error.WriteLine("  SlimeAudio.Send discover [--port 47777] [--timeout-ms 2500]");
         Console.Error.WriteLine("  SlimeAudio.Send update --target SPATULA:47777");
+        Console.Error.WriteLine("  SlimeAudio.Send shared-start --target SPATULA:47777 [--target SPONGEBOT:47777]");
+        Console.Error.WriteLine("  SlimeAudio.Send shared-stop --target SPATULA:47777 [--target SPONGEBOT:47777]");
         Console.Error.WriteLine("  SlimeAudio.Send send --file bumper.wav --target SPATULA:47777 [--target SPONGEBOT:47777] [--delay-ms 1500]");
     }
 }

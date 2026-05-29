@@ -13,8 +13,8 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         var port = TryParsePort(args) ?? 47777;
         var multicast = MulticastOptions.Parse(args);
-        using var receiver = new AudioReceiver(port);
         using var multicastReceiver = new MulticastReceiver(multicast);
+        using var receiver = new AudioReceiver(port, multicastReceiver);
         Application.Run(new TrayContext(receiver, multicastReceiver));
     }
 
@@ -169,15 +169,17 @@ internal sealed class MulticastReceiver : IDisposable
 internal sealed class AudioReceiver : IDisposable
 {
     private readonly CancellationTokenSource _stop = new();
+    private readonly MulticastReceiver _multicast;
     private readonly Dictionary<Guid, PlaybackSession> _sessions = new();
     private UdpClient? _udp;
 
     public int Port { get; }
     public event EventHandler<string>? StatusChanged;
 
-    public AudioReceiver(int port)
+    public AudioReceiver(int port, MulticastReceiver multicast)
     {
         Port = port;
+        _multicast = multicast;
     }
 
     public void Start()
@@ -247,6 +249,18 @@ internal sealed class AudioReceiver : IDisposable
                     StatusChanged?.Invoke(this, $"Update failed: {ex.Message}");
                 }
             });
+            return true;
+        }
+
+        if (text == ControlMessages.SharedStreamStart)
+        {
+            _multicast.Start();
+            return true;
+        }
+
+        if (text == ControlMessages.SharedStreamStop)
+        {
+            _multicast.Stop();
             return true;
         }
 

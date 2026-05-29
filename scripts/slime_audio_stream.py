@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Iterable
 
 DISCOVER_MESSAGE = b"SLIME_AUDIO_DISCOVER_V1"
+SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
+SHARED_STREAM_STOP_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_STOP_V1"
 DEFAULT_PORT = 47777
 
 
@@ -238,6 +240,13 @@ def stream_wav_synced(wav_path: Path, targets: list[Receiver], delay_ms: int, pa
     )
 
 
+def send_control(targets: list[Receiver], payload: bytes, label: str) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for target in targets:
+            sock.sendto(payload, (target.host, target.port))
+            print(f"{label} {target.endpoint}\t{target.machine_name}\t{target.version}")
+
+
 def encode_audio_packet(
     session: uuid.UUID,
     sequence: int,
@@ -258,7 +267,7 @@ def encode_audio_packet(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stream a local audio file to SlimeAudio receivers with synced start.")
-    parser.add_argument("file", type=Path)
+    parser.add_argument("file", nargs="?", type=Path)
     parser.add_argument("--target", action="append", required=True, help="Receiver name, host:port, or all")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--discover-timeout-ms", type=int, default=2500)
@@ -271,10 +280,14 @@ def main() -> int:
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--start-listeners", action="store_true", help="Start shared stream listeners on the selected targets and exit.")
+    parser.add_argument("--stop-listeners", action="store_true", help="Stop shared stream listeners on the selected targets and exit.")
+    parser.add_argument("--no-auto-listeners", action="store_true", help="Do not auto-start shared stream listeners before multicast playback.")
+    parser.add_argument("--stop-listeners-when-done", action="store_true", help="Stop shared stream listeners after multicast playback exits.")
     args = parser.parse_args()
 
-    if not args.file.exists():
-        raise SystemExit(f"file not found: {args.file}")
+    if args.start_listeners and args.stop_listeners:
+        raise SystemExit("--start-listeners and --stop-listeners are mutually exclusive")
 
     discovered = discover_receivers(args.port, args.discover_timeout_ms)
     targets = resolve_targets(args.target, discovered, args.port)
@@ -288,13 +301,34 @@ def main() -> int:
             print(f"multicast {args.multicast_group}:{args.multicast_port}")
         return 0
 
+    if args.start_listeners:
+        send_control(targets, SHARED_STREAM_START_MESSAGE, "started listener")
+        return 0
+
+    if args.stop_listeners:
+        send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
+        return 0
+
+    if args.file is None:
+        raise SystemExit("file is required unless --start-listeners or --stop-listeners is set")
+
+    if not args.file.exists():
+        raise SystemExit(f"file not found: {args.file}")
+
     if args.mode == "multicast":
+        if not args.no_auto_listeners:
+            send_control(targets, SHARED_STREAM_START_MESSAGE, "started listener")
+            time.sleep(max(args.delay_ms, 0) / 1000)
         print(
             f"multicast backend=gstreamer file={args.file} "
             f"group={args.multicast_group}:{args.multicast_port} targets={len(targets)}",
             flush=True,
         )
-        run_multicast_stream(args.file, args.multicast_group, args.multicast_port, args.backend, args.sample_rate, args.channels)
+        try:
+            run_multicast_stream(args.file, args.multicast_group, args.multicast_port, args.backend, args.sample_rate, args.channels)
+        finally:
+            if args.stop_listeners_when_done:
+                send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
         return 0
 
     with tempfile.TemporaryDirectory(prefix="slime-audio-stream-") as tmp:

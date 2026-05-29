@@ -46,6 +46,8 @@ The app stays in the system tray. The installer also adds a Start Menu shortcut 
 The tray menu includes:
 
 - `Status`
+- `Start shared stream listener`
+- `Stop shared stream listener`
 - `Check for updates`
 - `Quit`
 
@@ -61,6 +63,13 @@ Remote update prompt:
 
 ```powershell
 SlimeAudio.Send.exe update --target SPATULA:47777
+```
+
+Remote shared stream controls:
+
+```powershell
+SlimeAudio.Send.exe shared-start --target SPATULA:47777 --target SPONGEBOT:47777
+SlimeAudio.Send.exe shared-stop --target SPATULA:47777 --target SPONGEBOT:47777
 ```
 
 ## Send WAV Audio
@@ -82,12 +91,12 @@ python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPON
 python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 ```
 
-The streamer prefers VLC/cvlc when installed and falls back to GStreamer. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one live RTP source.
-
-From each tray app, choose `Start shared stream listener`, then run:
+The streamer prefers VLC/cvlc when installed and falls back to GStreamer. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one live RTP source. Multicast mode starts the selected receivers' shared stream listeners before playback.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
+python3 scripts/slime_audio_stream.py --target all --start-listeners
+python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
 ## Timed Spotify Drops
