@@ -45,4 +45,15 @@ public sealed class AudioPacketTests
         Assert.NotNull(decoded);
         Assert.Equal(original, decoded);
     }
+
+    [Fact]
+    public void EffectEnvelopeRoundTripsAsControlMessage()
+    {
+        var original = new EffectEnvelope(1_780_035_600_000, 350, 1200, 500, 0.45f, 1400f);
+
+        var decoded = EffectEnvelope.FromControlMessage(original.ToControlMessage());
+
+        Assert.NotNull(decoded);
+        Assert.Equal(original, decoded);
+    }
 }

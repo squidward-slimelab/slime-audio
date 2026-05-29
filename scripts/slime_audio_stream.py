@@ -18,6 +18,7 @@ from typing import Iterable
 DISCOVER_MESSAGE = b"SLIME_AUDIO_DISCOVER_V1"
 SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
 SHARED_STREAM_STOP_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_STOP_V1"
+EFFECT_MESSAGE_PREFIX = b"SLIME_AUDIO_EFFECT_V1 "
 DEFAULT_PORT = 47777
 
 
@@ -404,6 +405,34 @@ def send_control(targets: list[Receiver], payload: bytes, label: str) -> None:
             print(f"{label} {target.endpoint}\t{target.machine_name}\t{target.version}")
 
 
+def send_effect_control(
+    targets: list[Receiver],
+    delay_ms: int,
+    fade_in_ms: int,
+    hold_ms: int,
+    fade_out_ms: int,
+    volume: float,
+    lowpass_hz: float,
+) -> None:
+    sender_start_ms = int((time.time() * 1000) + delay_ms)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for target in targets:
+            payload = {
+                "StartUnixTimeMs": int(sender_start_ms + target.clock_offset_ms),
+                "FadeInMs": fade_in_ms,
+                "HoldMs": hold_ms,
+                "FadeOutMs": fade_out_ms,
+                "Volume": volume,
+                "LowPassHz": lowpass_hz,
+            }
+            data = EFFECT_MESSAGE_PREFIX + json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            sock.sendto(data, (target.host, target.port))
+            print(
+                f"effect {target.endpoint}\t{target.machine_name}\tstart={payload['StartUnixTimeMs']}"
+                f"\tvolume={volume}\tlowpass={lowpass_hz}"
+            )
+
+
 def encode_audio_packet(
     session: uuid.UUID,
     sequence: int,
@@ -442,6 +471,12 @@ def main() -> int:
     parser.add_argument("--stop-listeners", action="store_true", help="Stop shared stream listeners on the selected targets and exit.")
     parser.add_argument("--no-auto-listeners", action="store_true", help="Do not auto-start shared stream listeners before multicast playback.")
     parser.add_argument("--stop-listeners-when-done", action="store_true", help="Stop shared stream listeners after multicast playback exits.")
+    parser.add_argument("--effect", action="store_true", help="Send a synced music effect envelope and exit.")
+    parser.add_argument("--effect-volume", type=float, default=0.45)
+    parser.add_argument("--effect-lowpass-hz", type=float, default=1400.0)
+    parser.add_argument("--effect-fade-in-ms", type=int, default=350)
+    parser.add_argument("--effect-hold-ms", type=int, default=1400)
+    parser.add_argument("--effect-fade-out-ms", type=int, default=600)
     args = parser.parse_args()
 
     if args.start_listeners and args.stop_listeners:
@@ -468,6 +503,18 @@ def main() -> int:
 
     if args.stop_listeners:
         send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
+        return 0
+
+    if args.effect:
+        send_effect_control(
+            targets,
+            args.delay_ms,
+            args.effect_fade_in_ms,
+            args.effect_hold_ms,
+            args.effect_fade_out_ms,
+            args.effect_volume,
+            args.effect_lowpass_hz,
+        )
         return 0
 
     if args.file is None:

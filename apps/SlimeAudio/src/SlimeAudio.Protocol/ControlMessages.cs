@@ -8,6 +8,7 @@ public static class ControlMessages
     public const string Update = "SLIME_AUDIO_UPDATE_V1";
     public const string SharedStreamStart = "SLIME_AUDIO_SHARED_STREAM_START_V1";
     public const string SharedStreamStop = "SLIME_AUDIO_SHARED_STREAM_STOP_V1";
+    public const string EffectPrefix = "SLIME_AUDIO_EFFECT_V1 ";
 }
 
 public sealed record DiscoveryResponse(
@@ -33,6 +34,34 @@ public sealed record DiscoveryResponse(
         try
         {
             return JsonSerializer.Deserialize<DiscoveryResponse>(json);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+}
+
+public sealed record EffectEnvelope(
+    long StartUnixTimeMs,
+    int FadeInMs,
+    int HoldMs,
+    int FadeOutMs,
+    float Volume,
+    float LowPassHz)
+{
+    public string ToControlMessage() => ControlMessages.EffectPrefix + JsonSerializer.Serialize(this);
+
+    public static EffectEnvelope? FromControlMessage(string message)
+    {
+        if (!message.StartsWith(ControlMessages.EffectPrefix, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<EffectEnvelope>(message[ControlMessages.EffectPrefix.Length..]);
         }
         catch (JsonException)
         {

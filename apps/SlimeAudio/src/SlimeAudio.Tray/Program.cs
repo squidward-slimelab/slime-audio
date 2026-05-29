@@ -267,6 +267,17 @@ internal sealed class AudioReceiver : IDisposable
             return true;
         }
 
+        var effect = EffectEnvelope.FromControlMessage(text);
+        if (effect is not null)
+        {
+            foreach (var session in _sessions.Values)
+            {
+                session.Apply(effect);
+            }
+            StatusChanged?.Invoke(this, "Applied audio effect envelope");
+            return true;
+        }
+
         return false;
     }
 
