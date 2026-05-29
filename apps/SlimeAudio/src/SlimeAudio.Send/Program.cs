@@ -42,6 +42,17 @@ if (args.Length > 0 && args[0] == "shared-stop")
     return await SendControl(controlOptions.Targets, ControlMessages.SharedStreamStop);
 }
 
+if (args.Length > 0 && args[0] == "reset-audio")
+{
+    var controlOptions = Options.ParseUpdate(args.Skip(1).ToArray());
+    if (controlOptions is null)
+    {
+        Options.PrintUsage();
+        return 2;
+    }
+    return await SendControl(controlOptions.Targets, ControlMessages.ResetAudio);
+}
+
 var sendArgs = args.Length > 0 && args[0] == "send" ? args.Skip(1).ToArray() : args;
 var options = Options.Parse(sendArgs);
 if (options is null)

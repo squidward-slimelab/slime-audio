@@ -8,6 +8,7 @@ public static class ControlMessages
     public const string Update = "SLIME_AUDIO_UPDATE_V1";
     public const string SharedStreamStart = "SLIME_AUDIO_SHARED_STREAM_START_V1";
     public const string SharedStreamStop = "SLIME_AUDIO_SHARED_STREAM_STOP_V1";
+    public const string ResetAudio = "SLIME_AUDIO_RESET_AUDIO_V1";
     public const string EffectPrefix = "SLIME_AUDIO_EFFECT_V1 ";
 }
 

@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from slime_audio_stream import (
     DEFAULT_LIVE_DELAY_MS,
     EFFECT_MESSAGE_PREFIX,
+    RESET_AUDIO_MESSAGE,
     Receiver,
     SHARED_STREAM_START_MESSAGE,
     SHARED_STREAM_STOP_MESSAGE,
@@ -70,6 +71,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
     def test_shared_stream_control_messages_match_protocol(self):
         self.assertEqual(SHARED_STREAM_START_MESSAGE, b"SLIME_AUDIO_SHARED_STREAM_START_V1")
         self.assertEqual(SHARED_STREAM_STOP_MESSAGE, b"SLIME_AUDIO_SHARED_STREAM_STOP_V1")
+        self.assertEqual(RESET_AUDIO_MESSAGE, b"SLIME_AUDIO_RESET_AUDIO_V1")
         self.assertEqual(EFFECT_MESSAGE_PREFIX, b"SLIME_AUDIO_EFFECT_V1 ")
 
     def test_default_live_delay_keeps_audible_buffer(self):

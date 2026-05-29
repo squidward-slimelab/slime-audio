@@ -18,6 +18,7 @@ from typing import Iterable
 DISCOVER_MESSAGE = b"SLIME_AUDIO_DISCOVER_V1"
 SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
 SHARED_STREAM_STOP_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_STOP_V1"
+RESET_AUDIO_MESSAGE = b"SLIME_AUDIO_RESET_AUDIO_V1"
 EFFECT_MESSAGE_PREFIX = b"SLIME_AUDIO_EFFECT_V1 "
 DEFAULT_PORT = 47777
 DEFAULT_LIVE_DELAY_MS = 7000
@@ -482,6 +483,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--start-listeners", action="store_true", help="Start shared stream listeners on the selected targets and exit.")
     parser.add_argument("--stop-listeners", action="store_true", help="Stop shared stream listeners on the selected targets and exit.")
+    parser.add_argument("--reset-audio", action="store_true", help="Reset active playback sessions on the selected targets and exit.")
     parser.add_argument("--no-auto-listeners", action="store_true", help="Do not auto-start shared stream listeners before multicast playback.")
     parser.add_argument("--stop-listeners-when-done", action="store_true", help="Stop shared stream listeners after multicast playback exits.")
     parser.add_argument("--effect", action="store_true", help="Send a synced music effect envelope and exit.")
@@ -494,8 +496,9 @@ def main() -> int:
     parser.add_argument("--effect-start-offset-ms", type=int, default=-250)
     args = parser.parse_args()
 
-    if args.start_listeners and args.stop_listeners:
-        raise SystemExit("--start-listeners and --stop-listeners are mutually exclusive")
+    control_count = sum(1 for enabled in (args.start_listeners, args.stop_listeners, args.reset_audio) if enabled)
+    if control_count > 1:
+        raise SystemExit("--start-listeners, --stop-listeners, and --reset-audio are mutually exclusive")
 
     discovered = discover_receivers(args.port, args.discover_timeout_ms)
     targets = resolve_targets(args.target, discovered, args.port)
@@ -518,6 +521,10 @@ def main() -> int:
 
     if args.stop_listeners:
         send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
+        return 0
+
+    if args.reset_audio:
+        send_control(targets, RESET_AUDIO_MESSAGE, "reset audio")
         return 0
 
     if args.effect:

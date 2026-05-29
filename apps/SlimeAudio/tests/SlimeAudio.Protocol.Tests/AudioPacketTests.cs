@@ -56,4 +56,10 @@ public sealed class AudioPacketTests
         Assert.NotNull(decoded);
         Assert.Equal(original, decoded);
     }
+
+    [Fact]
+    public void ResetAudioControlMessageIsStable()
+    {
+        Assert.Equal("SLIME_AUDIO_RESET_AUDIO_V1", ControlMessages.ResetAudio);
+    }
 }

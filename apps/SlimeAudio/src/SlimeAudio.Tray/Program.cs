@@ -267,6 +267,12 @@ internal sealed class AudioReceiver : IDisposable
             return true;
         }
 
+        if (text == ControlMessages.ResetAudio)
+        {
+            ResetAudio();
+            return true;
+        }
+
         var effect = EffectEnvelope.FromControlMessage(text);
         if (effect is not null)
         {
@@ -301,6 +307,17 @@ internal sealed class AudioReceiver : IDisposable
         {
             StatusChanged?.Invoke(this, $"Playing synced audio session {packet.SessionId:N}");
         }
+    }
+
+    private void ResetAudio()
+    {
+        _multicast.Stop();
+        foreach (var session in _sessions.Values)
+        {
+            session.Dispose();
+        }
+        _sessions.Clear();
+        StatusChanged?.Invoke(this, "Audio engine reset");
     }
 
     public void Dispose()
