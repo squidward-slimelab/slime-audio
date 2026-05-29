@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import shutil
 import subprocess
 from dataclasses import asdict
@@ -20,7 +21,8 @@ class SpogoRunner:
         self.timeout = timeout
 
     def run(self, planned: PlannedCommand) -> dict[str, Any]:
-        command = [self.binary, "--json", "--no-color", *planned.argv]
+        binary = self._binary_path()
+        command = [binary, "--json", "--no-color", *planned.argv]
 
         if planned.dry_run:
             return {
@@ -30,7 +32,7 @@ class SpogoRunner:
                 "command": command,
             }
 
-        if shutil.which(self.binary) is None:
+        if binary is None:
             raise SpogoUnavailable(f"{self.binary} is not installed or not on PATH")
 
         completed = subprocess.run(
@@ -52,6 +54,14 @@ class SpogoRunner:
             "stdout": redact(payload if payload is not None else stdout),
             "stderr": stderr,
         }
+
+    def _binary_path(self) -> str | None:
+        if found := shutil.which(self.binary):
+            return found
+        local = Path.home() / ".local" / "bin" / self.binary
+        if local.exists():
+            return str(local)
+        return None
 
 
 def _parse_json(text: str) -> Any | None:

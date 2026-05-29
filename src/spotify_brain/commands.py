@@ -75,9 +75,10 @@ def _argv_for(action: str, args: dict[str, Any]) -> list[str]:
         return ["device", "list"]
     if action == "search":
         query = _required_str(args, "query")
-        argv = ["search", query]
-        if kind := args.get("type"):
-            argv.extend(["--type", str(kind)])
+        kind = str(args.get("type") or "track")
+        if kind not in {"track", "album", "artist", "playlist", "episode", "show"}:
+            raise CommandError(f"unsupported search type: {kind}")
+        argv = ["search", kind, query]
         if limit := args.get("limit"):
             argv.extend(["--limit", str(limit)])
         return argv
@@ -89,7 +90,7 @@ def _argv_for(action: str, args: dict[str, Any]) -> list[str]:
     if action == "next":
         return ["next"]
     if action == "previous":
-        return ["previous"]
+        return ["prev"]
     if action == "queue":
         return ["queue", "add", _required_str(args, "uri")]
     if action == "volume":
@@ -104,9 +105,9 @@ def _argv_for(action: str, args: dict[str, Any]) -> list[str]:
     if action == "playlist-remove":
         return ["playlist", "remove", _required_str(args, "playlist_id"), *_required_list(args, "uris")]
     if action == "library-save":
-        return ["library", "save", *_required_list(args, "uris")]
+        return ["library", "tracks", "add", *_required_list(args, "uris")]
     if action == "library-remove":
-        return ["library", "remove", *_required_list(args, "uris")]
+        return ["library", "tracks", "remove", *_required_list(args, "uris")]
     raise CommandError(f"unplanned action: {action}")
 
 
