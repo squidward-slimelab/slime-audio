@@ -257,9 +257,15 @@ async def prepare_drop(drop: Drop, plan: DropPlan, directory: Path) -> Path:
     return wav_path
 
 
-def send_drop(wav_path: Path, targets: list[Target], delay_ms: int) -> None:
+def send_drop(wav_path: Path, targets: list[Target], delay_ms: int) -> bool:
+    ok = True
     for target in targets:
-        send_wav(wav_path, target.host, target.port, delay_ms)
+        try:
+            send_wav(wav_path, target.host, target.port, delay_ms)
+        except OSError as exc:
+            ok = False
+            log_event(f"send failed target={target.host}:{target.port} error={exc}")
+    return ok
 
 
 async def run_plan(plan: DropPlan, spogo: str, max_minutes: float | None) -> int:
@@ -308,8 +314,8 @@ async def run_plan(plan: DropPlan, spogo: str, max_minutes: float | None) -> int
                 if delay_ms is None:
                     continue
                 log_event(f"firing drop={drop.id} delay_ms={delay_ms} progress_ms={status.get('progress_ms')} track={item.get('name')}")
-                send_drop(prepared[drop.id], plan.targets, delay_ms)
-                fired.add(drop.id)
+                if send_drop(prepared[drop.id], plan.targets, delay_ms):
+                    fired.add(drop.id)
 
             await asyncio.sleep(next_poll_ms / 1000)
 
