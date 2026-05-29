@@ -71,6 +71,32 @@ SlimeAudio.Send.exe --file .\tts.wav --target SPATULA:47777 --target SPONGEBOT:4
 
 Both receivers buffer the stream and start at the same UTC timestamp. Real sync quality depends on the laptops having sane clocks, so keep Windows time sync enabled.
 
+## Timed Spotify Drops
+
+For agent DJ/sample-drop mode, use the Python drop runner from the repo root. It pre-renders phrases, polls `spogo status`, checks the current Spotify track and progress, and sends SlimeAudio packets only while Spotify is playing. The runner defaults to 5 second status polling and backs off up to 30 seconds on failures; local probing showed 5 seconds was clean and 1.5 seconds was too aggressive.
+
+If Spotify returns stale `progress_ms: 0`, timed drops do not fire by default until the runner has a reliable song clock from either non-zero Spotify progress or an observed track change.
+
+```json
+{
+  "target": "SPATULA:47777",
+  "volume": 1.7,
+  "poll_ms": 5000,
+  "require_known_progress": true,
+  "drops": [
+    {
+      "track_uri": "spotify:track:3hmCHZFkgE4tkJKSqpOUhz",
+      "at": "1:12",
+      "text": "ride this bit. drums are doing expensive furniture things."
+    }
+  ]
+}
+```
+
+```bash
+python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
+```
+
 ## Design Notes
 
 - No remote volume control. Room volume is human-side until we have microphones or real SPL sensing.

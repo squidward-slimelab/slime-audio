@@ -20,7 +20,7 @@ async def synthesize(text: str, mp3_path: Path, voice: str, rate: str) -> None:
     await communicate.save(str(mp3_path))
 
 
-def convert_to_wav(mp3_path: Path, wav_path: Path) -> None:
+def convert_to_wav(mp3_path: Path, wav_path: Path, volume: float) -> None:
     subprocess.run(
         [
             "gst-launch-1.0",
@@ -29,6 +29,9 @@ def convert_to_wav(mp3_path: Path, wav_path: Path) -> None:
             f"location={mp3_path}",
             "!",
             "decodebin",
+            "!",
+            "volume",
+            f"volume={volume}",
             "!",
             "audioconvert",
             "!",
@@ -91,6 +94,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=47777)
     parser.add_argument("--voice", default="en-US-GuyNeural")
     parser.add_argument("--rate", default="-8%")
+    parser.add_argument("--volume", type=float, default=1.0)
     parser.add_argument("--delay-ms", type=int, default=1800)
     args = parser.parse_args()
 
@@ -98,7 +102,7 @@ def main() -> int:
         mp3_path = Path(tmp) / "tts.mp3"
         wav_path = Path(tmp) / "tts.wav"
         asyncio.run(synthesize(args.text, mp3_path, args.voice, args.rate))
-        convert_to_wav(mp3_path, wav_path)
+        convert_to_wav(mp3_path, wav_path, args.volume)
         send_wav(wav_path, args.host, args.port, args.delay_ms)
     return 0
 

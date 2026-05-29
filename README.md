@@ -10,6 +10,7 @@ Download the Windows installer from GitHub releases.
 
 - `SlimeAudio.Tray`: Windows tray app that listens on UDP `47777`.
 - `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
+- `scripts/slime_audio_drops.py`: watches Spotify playback and sends timed phrase drops during specific songs.
 - `SlimeAudioSetup.exe`: real Windows installer with Start Menu shortcut and optional startup launch.
 - LAN discovery: `SlimeAudio.Send.exe discover`
 - Updates: tray menu `Check for updates`, or `SlimeAudio.Send.exe update --target HOST:47777`
@@ -64,6 +65,40 @@ For a no-install smoke test from the repo:
 ```bash
 PYTHONPATH=src python3 -m spotify_brain run status --dry-run
 ```
+
+## Timed Sample Drops
+
+Timed drops are local and playback-aware. Write the phrases once in a JSON plan, then run the dropper while Spotify plays. It polls `spogo status`, matches the active track, and only sends drops while `is_playing` is true. If Spotify is paused, drops wait or skip instead of talking over silence.
+
+Spotify sometimes reports `progress_ms: 0` even when a song is already playing. By default, the runner will not fire timed drops until it has a reliable song clock: either Spotify reports a non-zero progress value, or the runner observes a track change and can treat that as the start. This avoids arming a plan from stale status and dropping samples at the wrong point in a song.
+
+Spotify documents its Web API limit as a rolling 30 second window, but does not publish a fixed request count. In local SPATULA probing, 5 second status polling was clean, 3 second status polling was clean in a short test, and 1.5 second polling correlated with `RESOURCE_EXHAUSTED` failures. The drop runner defaults to 5 seconds and backs off up to 30 seconds on status failures.
+
+```json
+{
+  "target": "SPATULA:47777",
+  "voice": "en-US-GuyNeural",
+  "rate": "-14%",
+  "volume": 1.7,
+  "poll_ms": 5000,
+  "max_poll_ms": 30000,
+  "require_known_progress": true,
+  "drops": [
+    {
+      "id": "pocket",
+      "track_uri": "spotify:track:3hmCHZFkgE4tkJKSqpOUhz",
+      "at": "0:42.500",
+      "text": "small checkpoint. youre in the pocket now."
+    }
+  ]
+}
+```
+
+```bash
+python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
+```
+
+Use `track_uri` for exact matching. `track_id` and `track_name` also work for quick local plans.
 
 ## Daemon
 
