@@ -149,7 +149,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
     parser.add_argument("--backend", choices=["auto", "vlc", "gstreamer"], default="auto")
     parser.add_argument("--discover-timeout-ms", type=int, default=4000)
-    parser.add_argument("--delay-ms", type=int, default=2200)
+    parser.add_argument("--delay-ms", type=int, default=7000)
     parser.add_argument("--chunk-ms", type=int, default=50)
     parser.add_argument("--retry-seconds", type=int, default=5)
     parser.add_argument("--multicast-group", default="239.77.77.77")

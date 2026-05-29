@@ -20,6 +20,7 @@ SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
 SHARED_STREAM_STOP_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_STOP_V1"
 EFFECT_MESSAGE_PREFIX = b"SLIME_AUDIO_EFFECT_V1 "
 DEFAULT_PORT = 47777
+DEFAULT_LIVE_DELAY_MS = 7000
 
 
 @dataclass(frozen=True)
@@ -473,7 +474,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
-    parser.add_argument("--delay-ms", type=int, default=2500)
+    parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
     parser.add_argument("--chunk-ms", type=int, default=50)
     parser.add_argument("--sample-rate", type=int, default=48000)
