@@ -35,8 +35,6 @@ internal sealed class TrayContext : ApplicationContext
     public TrayContext(AudioReceiver receiver)
     {
         _receiver = receiver;
-        _receiver.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
-
         _icon = new NotifyIcon
         {
             Icon = SystemIcons.Application,
@@ -44,6 +42,7 @@ internal sealed class TrayContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip(),
         };
+        _receiver.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
         _receiver.Start();
