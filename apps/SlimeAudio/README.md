@@ -51,7 +51,7 @@ The tray menu includes:
 - `Check for updates`
 - `Quit`
 
-`Check for updates` downloads the latest GitHub release installer and runs it. The installer stops any running `SlimeAudio.Tray.exe` before replacing files, then launches the updated tray app.
+`Check for updates` downloads the latest GitHub release installer and runs it silently. The installer stops any running `SlimeAudio.Tray.exe` before replacing files, then launches the updated tray app.
 
 ## Discover Receivers
 

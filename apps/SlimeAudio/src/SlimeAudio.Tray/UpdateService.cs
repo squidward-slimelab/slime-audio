@@ -33,9 +33,17 @@ internal static class UpdateService
             }
 
             var installerPath = Path.Combine(Path.GetTempPath(), $"SlimeAudioSetup-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.exe");
+            var logPath = Path.ChangeExtension(installerPath, ".log");
             await DownloadFileAsync(http, url, installerPath).ConfigureAwait(false);
-            Process.Start(new ProcessStartInfo(installerPath) { UseShellExecute = true });
-            return $"Started update installer: {installerPath}";
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = installerPath,
+                Arguments = $"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL /LOG=\"{logPath}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            });
+            return $"Started silent update installer: {installerPath}";
         }
 
         throw new InvalidOperationException($"Latest release does not include {InstallerName}");

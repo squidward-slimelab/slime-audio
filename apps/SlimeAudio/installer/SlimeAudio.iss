@@ -39,7 +39,7 @@ Name: "{userstartup}\Slime Audio"; Filename: "{app}\{#MyAppExeName}"; Tasks: sta
 Name: "startup"; Description: "Start Slime Audio when I sign in"; GroupDescription: "Startup:"; Flags: unchecked
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Slime Audio"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch Slime Audio"; Flags: nowait postinstall
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
