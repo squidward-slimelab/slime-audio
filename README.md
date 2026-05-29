@@ -11,6 +11,8 @@ Download the Windows installer from GitHub releases.
 - `SlimeAudio.Tray`: Windows tray app that listens on UDP `47777`.
 - `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
 - `SlimeAudioSetup.exe`: real Windows installer with Start Menu shortcut and optional startup launch.
+- LAN discovery: `SlimeAudio.Send.exe discover`
+- Updates: tray menu `Check for updates`, or `SlimeAudio.Send.exe update --target HOST:47777`
 
 GitHub Actions builds win-x64 artifacts from `.github/workflows/slime-audio.yml`.
 

@@ -23,6 +23,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=..\assets\slime-audio.ico
 
 [Files]
 Source: "..\..\..\artifacts\slime-audio-tray-win-x64\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

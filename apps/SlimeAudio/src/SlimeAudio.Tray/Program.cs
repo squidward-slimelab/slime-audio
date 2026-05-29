@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Text;
 using SlimeAudio.Protocol;
 
 namespace SlimeAudio.Tray;
@@ -37,15 +38,30 @@ internal sealed class TrayContext : ApplicationContext
         _receiver = receiver;
         _icon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application,
             Text = TrimForTray($"Slime Audio listening on UDP {_receiver.Port}"),
             Visible = true,
             ContextMenuStrip = new ContextMenuStrip(),
         };
         _receiver.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
+        _icon.ContextMenuStrip.Items.Add("Check for updates", null, async (_, _) => await CheckForUpdates());
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
         _receiver.Start();
+    }
+
+    private async Task CheckForUpdates()
+    {
+        try
+        {
+            _icon.Text = TrimForTray("Slime Audio checking for updates");
+            var message = await UpdateService.OpenLatestInstallerAsync();
+            _icon.Text = TrimForTray(message);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "Slime Audio update failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -95,6 +111,11 @@ internal sealed class AudioReceiver : IDisposable
             try
             {
                 var result = await _udp.ReceiveAsync(_stop.Token).ConfigureAwait(false);
+                if (TryHandleControl(result))
+                {
+                    continue;
+                }
+
                 if (!AudioPacket.TryDecode(result.Buffer, out var packet))
                 {
                     continue;
@@ -110,6 +131,38 @@ internal sealed class AudioReceiver : IDisposable
                 StatusChanged?.Invoke(this, $"Slime Audio error: {ex.Message}");
             }
         }
+    }
+
+    private bool TryHandleControl(UdpReceiveResult result)
+    {
+        var text = Encoding.UTF8.GetString(result.Buffer).Trim();
+        if (text == ControlMessages.Discover)
+        {
+            var response = DiscoveryResponse.Current(Port, Application.ProductVersion).ToJson();
+            var bytes = Encoding.UTF8.GetBytes(response);
+            _udp?.Send(bytes, bytes.Length, result.RemoteEndPoint);
+            StatusChanged?.Invoke(this, $"Discovery response sent to {result.RemoteEndPoint.Address}");
+            return true;
+        }
+
+        if (text == ControlMessages.Update)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var message = await UpdateService.OpenLatestInstallerAsync().ConfigureAwait(false);
+                    StatusChanged?.Invoke(this, message);
+                }
+                catch (Exception ex)
+                {
+                    StatusChanged?.Invoke(this, $"Update failed: {ex.Message}");
+                }
+            });
+            return true;
+        }
+
+        return false;
     }
 
     private void Handle(AudioPacket packet)

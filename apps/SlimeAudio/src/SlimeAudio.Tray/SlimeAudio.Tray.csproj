@@ -6,7 +6,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>SlimeAudio.Tray</AssemblyName>
+    <ApplicationIcon>..\..\..\assets\slime-audio.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Content Include="..\..\..\assets\slime-audio.ico" Link="slime-audio.ico" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\SlimeAudio.Protocol\SlimeAudio.Protocol.csproj" />
     <PackageReference Include="NAudio" Version="2.2.1" />

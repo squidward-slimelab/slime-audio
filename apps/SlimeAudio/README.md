@@ -43,6 +43,24 @@ SlimeAudio.Tray.exe --port 47777
 
 The app stays in the system tray. The installer also adds a Start Menu shortcut and can optionally start the tray app when Windows signs in.
 
+The tray menu includes:
+
+- `Status`
+- `Check for updates`
+- `Quit`
+
+## Discover Receivers
+
+```powershell
+SlimeAudio.Send.exe discover
+```
+
+Remote update prompt:
+
+```powershell
+SlimeAudio.Send.exe update --target SPATULA:47777
+```
+
 ## Send WAV Audio
 
 First pass supports PCM 16-bit WAV files.

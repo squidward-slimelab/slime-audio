@@ -34,4 +34,15 @@ public sealed class AudioPacketTests
     {
         Assert.False(AudioPacket.TryDecode([0, 1, 2, 3], out _));
     }
+
+    [Fact]
+    public void DiscoveryResponseRoundTrips()
+    {
+        var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123);
+
+        var decoded = DiscoveryResponse.FromJson(original.ToJson());
+
+        Assert.NotNull(decoded);
+        Assert.Equal(original, decoded);
+    }
 }
