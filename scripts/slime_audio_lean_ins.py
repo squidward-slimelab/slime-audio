@@ -57,6 +57,7 @@ def append_lean_in(
     text: str,
     voice: str | None,
     rate: str | None,
+    volume: float,
     duck_volume: float,
     lowpass_hz: float,
     duck_ms: int,
@@ -70,6 +71,7 @@ def append_lean_in(
         text=text,
         voice=voice,
         rate=rate,
+        volume=volume,
         duck_volume=duck_volume,
         lowpass_hz=lowpass_hz,
         duck_ms=duck_ms,
@@ -91,6 +93,7 @@ def main() -> int:
     parser.add_argument("--phrases-file", type=Path)
     parser.add_argument("--voice")
     parser.add_argument("--rate")
+    parser.add_argument("--volume", type=float, default=1.0, help="Voice gain multiplier applied during session mixdown.")
     parser.add_argument("--duck-volume", type=float, default=0.45)
     parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     parser.add_argument("--duck-ms", type=int, default=3500)
@@ -118,6 +121,7 @@ def main() -> int:
                 text=text,
                 voice=args.voice,
                 rate=args.rate,
+                volume=args.volume,
                 duck_volume=args.duck_volume,
                 lowpass_hz=args.lowpass_hz,
                 duck_ms=args.duck_ms,
@@ -131,6 +135,7 @@ def main() -> int:
                         "session": str(args.session),
                         "start_ms": event_start_ms,
                         "text": text,
+                        "volume": args.volume,
                         "duck_volume": args.duck_volume,
                         "lowpass_hz": args.lowpass_hz,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

@@ -66,6 +66,7 @@ class MicLeanIn:
     text: str
     voice: str | None = None
     rate: str | None = None
+    volume: float = 1.0
     effects: list[Automation] = field(default_factory=list)
 
     @property
@@ -181,6 +182,7 @@ def parse_mic_lean_in(payload: dict[str, Any]) -> MicLeanIn:
         text=text,
         voice=str(payload["voice"]) if payload.get("voice") else None,
         rate=str(payload["rate"]) if payload.get("rate") else None,
+        volume=float(payload.get("volume", 1.0)),
         effects=effects,
     )
 
@@ -343,6 +345,7 @@ def template_session() -> dict[str, Any]:
                 "id": "squid-drop-1",
                 "start": "00:44.000",
                 "text": "incoming, try to act normal",
+                "volume": 1.4,
                 "ducking": {
                     "target": "master",
                     "param": "duck_volume",
@@ -435,6 +438,7 @@ def add_mic_lean_in(
     text: str,
     voice: str | None,
     rate: str | None,
+    volume: float,
     duck_volume: float | None,
     lowpass_hz: float | None,
     duck_ms: int,
@@ -446,6 +450,7 @@ def add_mic_lean_in(
         lean_in["voice"] = voice
     if rate is not None:
         lean_in["rate"] = rate
+    lean_in["volume"] = volume
     if duck_volume is not None:
         start_ms = parse_ms(start, f"mic lean-in {lean_id} start")
         lean_in["ducking"] = {
@@ -545,6 +550,7 @@ def main() -> int:
     add_mic_parser.add_argument("--text", required=True)
     add_mic_parser.add_argument("--voice")
     add_mic_parser.add_argument("--rate")
+    add_mic_parser.add_argument("--volume", type=float, default=1.0)
     add_mic_parser.add_argument("--duck-volume", type=float)
     add_mic_parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     add_mic_parser.add_argument("--duck-ms", type=int, default=2500)
@@ -596,6 +602,7 @@ def main() -> int:
             text=args.text,
             voice=args.voice,
             rate=args.rate,
+            volume=args.volume,
             duck_volume=args.duck_volume,
             lowpass_hz=args.lowpass_hz,
             duck_ms=args.duck_ms,

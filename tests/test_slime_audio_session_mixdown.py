@@ -35,6 +35,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
                                 "id": "lean",
                                 "start": "00:10.000",
                                 "text": "quick note",
+                                "volume": 1.8,
                                 "ducking": {
                                     "target": "master",
                                     "param": "duck_volume",
@@ -55,6 +56,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             filters = build_filter_complex(session, {"lean": Path("/tmp/lean.wav")}, 48_000, 2)
 
         self.assertIn("adelay=10000:all=1", filters)
+        self.assertIn("volume=1.800000,adelay=10000:all=1", filters)
         self.assertIn("volume=enable='between(t,9.750,13.000)':volume=0.450000", filters)
         self.assertIn("lowpass=enable='between(t,9.750,13.000)':f=1400.000", filters)
         self.assertIn("amix=inputs=2", filters)

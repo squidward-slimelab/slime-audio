@@ -142,9 +142,11 @@ def build_filter_complex(session: MixSession, lean_in_audio: dict[str, Path], sa
         input_index = next_input
         next_input += 1
         label = f"lean{index}"
+        volume = max(0.0, float(lean_in.volume))
         filters.append(
             f"[{input_index}:a]"
             "asetpts=PTS-STARTPTS,"
+            f"volume={volume:.6f},"
             f"adelay={lean_in.start_ms}:all=1,"
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
             f"[{label}]"

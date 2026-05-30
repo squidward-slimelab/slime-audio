@@ -32,6 +32,8 @@ class SlimeAudioLeanInTests(unittest.TestCase):
                     "00:12.000",
                     "--text",
                     "quick note",
+                    "--volume",
+                    "1.7",
                     "--duck-volume",
                     "0.4",
                     "--lowpass-hz",
@@ -52,10 +54,12 @@ class SlimeAudioLeanInTests(unittest.TestCase):
         self.assertEqual(len(session.mic_lean_ins), 1)
         lean_in = session.mic_lean_ins[0]
         self.assertEqual(lean_in.start_ms, 12_000)
+        self.assertEqual(lean_in.volume, 1.7)
         self.assertEqual([effect.param for effect in lean_in.effects], ["duck_volume", "lowpass_hz"])
         self.assertEqual(lean_in.effects[0].points[0].value, 0.4)
         self.assertEqual(lean_in.effects[1].points[0].value, 1200)
         self.assertEqual(log[-1]["event"], "lean_in_planned")
+        self.assertEqual(log[-1]["volume"], 1.7)
 
     def test_script_source_does_not_use_packet_audio_transport(self):
         source = Path(slime_audio_lean_ins.__file__).read_text(encoding="utf-8")

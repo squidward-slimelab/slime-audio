@@ -173,16 +173,16 @@ python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
 python3 scripts/slime_audio_session.py summary runtime/mix-session.json
 python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000
-python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --duck-volume 0.45
+python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45
 python3 scripts/slime_audio_session.py automate runtime/mix-session.json --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]'
-python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --duck-volume 0.45 --lowpass-hz 1400
+python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --lowpass-hz 1400
 python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --output runtime/mix-session-render.wav
 python3 scripts/slime_audio_stream.py runtime/mix-session-render.wav --target all --mode snapcast
 ```
 
 The first implementation validates and edits the session format. The playback engine should consume this format next, keeping the current FFmpeg multicast path stable while adding a mutable schedule/control API.
 
-Lean-ins are session events, not packet-mode side streams. A lean-in carries the spoken text plus paired `duck_volume` and `lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
+Lean-ins are scheduled session events, not immediate side streams. A lean-in has an exact mix timeline `start`, spoken text, voice `volume`, and paired `duck_volume`/`lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
 
 ## Candidate Selection And Set Constraints
 
