@@ -12,6 +12,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLAYLIST = REPO_ROOT / "runtime" / "playlist.txt"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "playlist-state.json"
+DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
 
 
 def load_playlist(path: Path) -> list[str]:
@@ -35,6 +36,14 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def append_history(path: Path | None, event: dict[str, Any]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
 def state_matches_playlist(state: dict[str, Any], tracks: list[str]) -> bool:
@@ -119,11 +128,36 @@ def run_playlist(args: argparse.Namespace) -> int:
         state["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         state["playlist"] = str(args.playlist)
         write_state(args.state, state)
+        append_history(
+            args.history_log,
+            {
+                "event": "track_started",
+                "index": index,
+                "playlist": str(args.playlist),
+                "state": str(args.state),
+                "target": args.target,
+                "timestamp": state["started_at"],
+                "track": track,
+            },
+        )
 
         print(f"[{state['started_at']}] streaming {index + 1}/{len(order)} {track}", flush=True)
         result = subprocess.run(stream_command(args, track), cwd=REPO_ROOT, check=False)
         if result.returncode != 0:
             print(f"stream failed rc={result.returncode} path={track}", flush=True)
+            append_history(
+                args.history_log,
+                {
+                    "event": "track_failed",
+                    "index": index,
+                    "playlist": str(args.playlist),
+                    "returncode": result.returncode,
+                    "state": str(args.state),
+                    "target": args.target,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "track": track,
+                },
+            )
             time.sleep(args.retry_seconds)
             continue
 
@@ -135,6 +169,18 @@ def run_playlist(args: argparse.Namespace) -> int:
         state["current"] = None
         state["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         write_state(args.state, state)
+        append_history(
+            args.history_log,
+            {
+                "event": "track_completed",
+                "index": index - 1,
+                "playlist": str(args.playlist),
+                "state": str(args.state),
+                "target": args.target,
+                "timestamp": state["completed_at"],
+                "track": track,
+            },
+        )
 
     print("playlist done", flush=True)
     return 0
@@ -152,6 +198,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay-ms", type=int, default=7000)
     parser.add_argument("--chunk-ms", type=int, default=50)
     parser.add_argument("--retry-seconds", type=int, default=5)
+    parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--no-auto-listeners", action="store_true")
