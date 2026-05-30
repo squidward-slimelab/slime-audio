@@ -147,23 +147,30 @@ def stop_active_stream() -> None:
 
     try:
         process.wait(timeout=5)
+    except ProcessLookupError:
+        pass
     except subprocess.TimeoutExpired:
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             return
-        process.wait()
+        try:
+            process.wait()
+        except ProcessLookupError:
+            pass
     finally:
         _active_stream = None
 
 
 def run_stream(command: list[str]) -> int:
     global _active_stream
-    _active_stream = subprocess.Popen(command, cwd=REPO_ROOT, start_new_session=True)
+    process = subprocess.Popen(command, cwd=REPO_ROOT, start_new_session=True)
+    _active_stream = process
     try:
-        return _active_stream.wait()
+        return process.wait()
     finally:
-        stop_active_stream()
+        if _active_stream is process:
+            stop_active_stream()
 
 
 def install_signal_handlers() -> None:
