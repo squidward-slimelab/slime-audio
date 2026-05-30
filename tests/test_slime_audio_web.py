@@ -77,6 +77,9 @@ class SlimeAudioWebTests(unittest.TestCase):
 
         self.assertEqual(web.choose_state_path(explicit), explicit)
 
+    def test_choose_session_path_returns_none_for_missing_explicit_path(self):
+        self.assertIsNone(web.choose_session_path(Path("/tmp/missing-session.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -87,13 +87,8 @@ function eventEnd(event) {
   return event.end_ms ?? eventStart(event) + inferredDuration(event);
 }
 
-function inferredDuration(event, data = state.data) {
+function inferredDuration(event) {
   if (event.duration_ms) return event.duration_ms;
-  const current = currentEvent(data?.session?.events || [], data);
-  if (current && current.id === event.id) {
-    const elapsed = activeElapsedMs(data);
-    return Math.max(FALLBACK_TRACK_MS, elapsed + 60000);
-  }
   return FALLBACK_TRACK_MS;
 }
 
@@ -108,7 +103,7 @@ function nowPositionMs(data, events) {
   const current = currentEvent(events, data);
   if (!current) return state.lastPositionMs;
   const elapsed = activeElapsedMs(data);
-  const position = eventStart(current) + Math.min(elapsed, inferredDuration(current, data));
+  const position = eventStart(current) + Math.min(elapsed, inferredDuration(current));
   state.lastPositionMs = position;
   return position;
 }
@@ -167,7 +162,7 @@ function laneInfo(lane) {
 }
 
 function timelineScale(events) {
-  const max = Math.max(60000, nowPositionMs(state.data, events) + 60000, ...events.map(eventEnd));
+  const max = Math.max(60000, ...events.map(eventEnd));
   const stageWidth = Math.max(MIN_STAGE_WIDTH, Math.ceil(max / 1000) * 5);
   return { max, stageWidth };
 }
@@ -356,12 +351,8 @@ function updatePlayhead() {
   const events = state.data?.session?.events || [];
   if (!state.playhead || !state.scale || !events.length) return;
   const position = nowPositionMs(state.data, events);
-  if (position + 60000 > state.scale.max) {
-    state.timelineSignature = null;
-    render();
-    return;
-  }
-  const left = (position / state.scale.max) * state.scale.stageWidth;
+  const boundedPosition = Math.min(position, state.scale.max);
+  const left = (boundedPosition / state.scale.max) * state.scale.stageWidth;
   state.playhead.style.left = `${left}px`;
   autoFollowPlayhead(left);
   updateNow(state.data);

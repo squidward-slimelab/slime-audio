@@ -217,6 +217,19 @@ def choose_state_path(explicit: Path | None) -> Path:
     return candidates[0] if candidates else DEFAULT_STATE
 
 
+def choose_session_path(explicit: Path | None) -> Path | None:
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    if DEFAULT_SESSION.exists():
+        return DEFAULT_SESSION
+    candidates = sorted(
+        (path for path in (REPO_ROOT / "runtime").glob("*session*.json") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
 def automation_payload(automation: dict[str, Any], owner: str | None = None) -> dict[str, Any]:
     points = automation.get("points") or []
     parsed_points = [
@@ -301,10 +314,10 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--state", type=Path)
-    parser.add_argument("--session", type=Path, default=DEFAULT_SESSION)
+    parser.add_argument("--session", type=Path)
     args = parser.parse_args()
 
-    session_path = args.session if args.session.exists() else None
+    session_path = choose_session_path(args.session)
     state_path = choose_state_path(args.state)
     server = SlimeAudioServer((args.host, args.port), state_path, session_path)
     print(f"slime-audio web listening on http://{args.host}:{args.port} state={state_path}", flush=True)
