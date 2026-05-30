@@ -209,9 +209,16 @@ internal sealed class AudioReceiver : IDisposable
 {
     private readonly CancellationTokenSource _stop = new();
     private readonly MulticastReceiver _multicast;
+    private readonly object _sessionsLock = new();
     private readonly Dictionary<Guid, PlaybackSession> _sessions = new();
     private bool _streamMuted;
     private UdpClient? _udp;
+    private long _decodeFailures;
+    private long _droppedMutedPackets;
+    private long _lastPacketUnixTimeMs;
+    private long _receivedBytes;
+    private long _receivedPackets;
+    private long _resetCount;
 
     public int Port { get; }
     public bool StreamMuted => _streamMuted;
@@ -249,6 +256,7 @@ internal sealed class AudioReceiver : IDisposable
 
                 if (!AudioPacket.TryDecode(result.Buffer, out var packet))
                 {
+                    Interlocked.Increment(ref _decodeFailures);
                     continue;
                 }
                 Handle(packet);
@@ -269,7 +277,7 @@ internal sealed class AudioReceiver : IDisposable
         var text = Encoding.UTF8.GetString(result.Buffer).Trim();
         if (text == ControlMessages.Discover)
         {
-            var response = DiscoveryResponse.Current(Port, VersionInfo.DisplayVersion, StreamMuted).ToJson();
+            var response = DiscoveryResponse.Current(Port, VersionInfo.DisplayVersion, StreamMuted, Diagnostics()).ToJson();
             var bytes = Encoding.UTF8.GetBytes(response);
             _udp?.Send(bytes, bytes.Length, result.RemoteEndPoint);
             StatusChanged?.Invoke(this, $"Discovery response sent to {result.RemoteEndPoint.Address}");
@@ -314,7 +322,12 @@ internal sealed class AudioReceiver : IDisposable
         var effect = EffectEnvelope.FromControlMessage(text);
         if (effect is not null)
         {
-            foreach (var session in _sessions.Values)
+            List<PlaybackSession> sessions;
+            lock (_sessionsLock)
+            {
+                sessions = _sessions.Values.ToList();
+            }
+            foreach (var session in sessions)
             {
                 session.Apply(effect);
             }
@@ -329,14 +342,23 @@ internal sealed class AudioReceiver : IDisposable
     {
         if (StreamMuted)
         {
+            Interlocked.Increment(ref _droppedMutedPackets);
             return;
         }
 
-        if (!_sessions.TryGetValue(packet.SessionId, out var session))
+        Interlocked.Increment(ref _receivedPackets);
+        Interlocked.Add(ref _receivedBytes, packet.Payload.Length);
+        Interlocked.Exchange(ref _lastPacketUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+
+        PlaybackSession session;
+        lock (_sessionsLock)
         {
-            session = new PlaybackSession(packet);
-            _sessions[packet.SessionId] = session;
-            StatusChanged?.Invoke(this, $"Buffered session {packet.SessionId:N}");
+            if (!_sessions.TryGetValue(packet.SessionId, out session!))
+            {
+                session = new PlaybackSession(packet);
+                _sessions[packet.SessionId] = session;
+                StatusChanged?.Invoke(this, $"Buffered session {packet.SessionId:N}");
+            }
         }
 
         if (packet.Type == AudioPacketType.End)
@@ -373,20 +395,77 @@ internal sealed class AudioReceiver : IDisposable
 
     private void ResetAudio()
     {
+        Interlocked.Increment(ref _resetCount);
         _multicast.Stop();
-        foreach (var session in _sessions.Values)
+        List<PlaybackSession> sessions;
+        lock (_sessionsLock)
+        {
+            sessions = _sessions.Values.ToList();
+            _sessions.Clear();
+        }
+        foreach (var session in sessions)
         {
             session.Dispose();
         }
-        _sessions.Clear();
         StatusChanged?.Invoke(this, "Audio engine reset");
+    }
+
+    private AudioDiagnostics Diagnostics()
+    {
+        long missingFrames = 0;
+        long readCalls = 0;
+        var maxBufferedPackets = 0;
+        var maxBufferedPacketSpan = 0;
+        var latestSequence = -1;
+        string? latestSessionId = null;
+
+        List<KeyValuePair<Guid, PlaybackSession>> sessions;
+        lock (_sessionsLock)
+        {
+            sessions = _sessions.ToList();
+        }
+
+        foreach (var pair in sessions)
+        {
+            var diagnostics = pair.Value.Diagnostics;
+            missingFrames += diagnostics.MissingFrames;
+            readCalls += diagnostics.ReadCalls;
+            maxBufferedPackets = Math.Max(maxBufferedPackets, diagnostics.BufferedPackets);
+            maxBufferedPacketSpan = Math.Max(maxBufferedPacketSpan, diagnostics.BufferedPacketSpan);
+            if (diagnostics.LatestSequence > latestSequence)
+            {
+                latestSequence = diagnostics.LatestSequence;
+                latestSessionId = pair.Key.ToString("N");
+            }
+        }
+
+        return new AudioDiagnostics(
+            sessions.Count,
+            Interlocked.Read(ref _receivedPackets),
+            Interlocked.Read(ref _receivedBytes),
+            Interlocked.Read(ref _droppedMutedPackets),
+            Interlocked.Read(ref _decodeFailures),
+            Interlocked.Read(ref _resetCount),
+            missingFrames,
+            readCalls,
+            Interlocked.Read(ref _lastPacketUnixTimeMs),
+            maxBufferedPackets,
+            maxBufferedPacketSpan,
+            latestSequence,
+            latestSessionId);
     }
 
     public void Dispose()
     {
         _stop.Cancel();
         _udp?.Dispose();
-        foreach (var session in _sessions.Values)
+        List<PlaybackSession> sessions;
+        lock (_sessionsLock)
+        {
+            sessions = _sessions.Values.ToList();
+            _sessions.Clear();
+        }
+        foreach (var session in sessions)
         {
             session.Dispose();
         }

@@ -38,13 +38,29 @@ public sealed class AudioPacketTests
     [Fact]
     public void DiscoveryResponseRoundTrips()
     {
-        var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123, StreamMuted: true);
+        var diagnostics = new AudioDiagnostics(
+            ActiveSessions: 1,
+            ReceivedPackets: 42,
+            ReceivedBytes: 1234,
+            DroppedMutedPackets: 2,
+            DecodeFailures: 3,
+            ResetCount: 4,
+            MissingFrames: 5,
+            ReadCalls: 6,
+            LastPacketUnixTimeMs: 456,
+            MaxBufferedPackets: 10,
+            MaxBufferedPacketSpan: 12,
+            LatestSequence: 99,
+            LatestSessionId: "abc");
+        var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123, StreamMuted: true, Diagnostics: diagnostics);
 
         var decoded = DiscoveryResponse.FromJson(original.ToJson());
 
         Assert.NotNull(decoded);
         Assert.Equal(original, decoded);
         Assert.True(decoded.StreamMuted);
+        Assert.Equal(42, decoded.Diagnostics?.ReceivedPackets);
+        Assert.Equal(5, decoded.Diagnostics?.MissingFrames);
     }
 
     [Fact]

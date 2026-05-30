@@ -64,6 +64,8 @@ internal sealed class PlaybackSession : IDisposable
         _effects.Apply(envelope);
     }
 
+    public PlaybackSessionDiagnostics Diagnostics => _clockedSource.Diagnostics;
+
     private void Start()
     {
         if (_output.PlaybackState != PlaybackState.Playing)
@@ -77,6 +79,14 @@ internal sealed class PlaybackSession : IDisposable
         _output.Dispose();
     }
 }
+
+internal sealed record PlaybackSessionDiagnostics(
+    long MissingFrames,
+    long ReadCalls,
+    int BufferedPackets,
+    int BufferedPacketSpan,
+    int LatestSequence,
+    long CurrentFrame);
 
 internal sealed class ClockedPacketSampleProvider : ISampleProvider
 {
@@ -92,6 +102,10 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
     private int _packetFrames;
     private int _lastCleanupPacket = -1;
     private long? _nextFrame;
+    private long _missingFrames;
+    private long _readCalls;
+    private int _latestSequence = -1;
+    private long _lastCurrentFrame;
 
     public WaveFormat WaveFormat { get; }
 
@@ -113,6 +127,7 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
         lock (_lock)
         {
             _packets[packet.Sequence] = packet.Payload;
+            _latestSequence = Math.Max(_latestSequence, packet.Sequence);
             if (_packetFrames <= 0)
             {
                 _packetFrames = Math.Max(1, packet.Payload.Length / _blockAlign);
@@ -132,6 +147,8 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
         var framesRequested = count / channels;
         var targetFrame = ClockFrame();
         var firstFrame = SmoothFrame(targetFrame);
+        Interlocked.Increment(ref _readCalls);
+        Interlocked.Exchange(ref _lastCurrentFrame, firstFrame);
 
         lock (_lock)
         {
@@ -147,12 +164,14 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
                 var packetFrame = (int)(streamFrame % _packetFrames);
                 if (!_packets.TryGetValue(packetSequence, out var payload))
                 {
+                    Interlocked.Increment(ref _missingFrames);
                     continue;
                 }
 
                 var byteIndex = packetFrame * _blockAlign;
                 if (byteIndex + _blockAlign > payload.Length)
                 {
+                    Interlocked.Increment(ref _missingFrames);
                     continue;
                 }
 
@@ -174,6 +193,25 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
         }
 
         return count;
+    }
+
+    public PlaybackSessionDiagnostics Diagnostics
+    {
+        get
+        {
+            lock (_lock)
+            {
+                var min = _packets.Count == 0 ? 0 : _packets.Keys.Min();
+                var max = _packets.Count == 0 ? 0 : _packets.Keys.Max();
+                return new PlaybackSessionDiagnostics(
+                    Interlocked.Read(ref _missingFrames),
+                    Interlocked.Read(ref _readCalls),
+                    _packets.Count,
+                    _packets.Count == 0 ? 0 : max - min + 1,
+                    _latestSequence,
+                    Interlocked.Read(ref _lastCurrentFrame));
+            }
+        }
     }
 
     private long ClockFrame()

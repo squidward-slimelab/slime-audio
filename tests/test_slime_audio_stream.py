@@ -14,6 +14,7 @@ from slime_audio_stream import (
     SHARED_STREAM_START_MESSAGE,
     SHARED_STREAM_STOP_MESSAGE,
     encode_audio_packet,
+    format_diagnostics,
     parse_discovery_response,
     parse_endpoint,
     resolve_targets,
@@ -24,7 +25,8 @@ class SlimeAudioStreamTests(unittest.TestCase):
     def test_parse_discovery_response(self):
         payload = (
             b'{"App":"slime-audio","MachineName":"SPATULA","UserName":"slimeq",'
-            b'"Version":"0.3.0","Port":47777,"UnixTimeMs":1500,"StreamMuted":true}'
+            b'"Version":"0.3.0","Port":47777,"UnixTimeMs":1500,"StreamMuted":true,'
+            b'"Diagnostics":{"ActiveSessions":1,"ReceivedPackets":42,"MissingFrames":7,"LastPacketUnixTimeMs":1100}}'
         )
 
         receiver = parse_discovery_response(payload, "192.168.0.163", 1000, 1200)
@@ -35,6 +37,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(receiver.rtt_ms, 200)
         self.assertEqual(receiver.clock_offset_ms, 400)
         self.assertTrue(receiver.stream_muted)
+        self.assertEqual(receiver.diagnostics["ReceivedPackets"], 42)
 
     def test_parse_discovery_response_rejects_other_apps(self):
         self.assertIsNone(parse_discovery_response(b'{"App":"nope"}', "127.0.0.1"))
@@ -86,6 +89,27 @@ class SlimeAudioStreamTests(unittest.TestCase):
 
     def test_default_live_delay_keeps_audible_buffer(self):
         self.assertGreaterEqual(DEFAULT_LIVE_DELAY_MS, 7000)
+
+    def test_format_diagnostics(self):
+        text = format_diagnostics(
+            {
+                "ActiveSessions": 1,
+                "ReceivedPackets": 42,
+                "MissingFrames": 7,
+                "ReadCalls": 3,
+                "MaxBufferedPackets": 12,
+                "MaxBufferedPacketSpan": 13,
+                "LatestSequence": 99,
+                "LastPacketUnixTimeMs": 1_000,
+                "ResetCount": 2,
+                "DecodeFailures": 0,
+            },
+            now_ms=1_250,
+        )
+
+        self.assertIn("diag_packets=42", text)
+        self.assertIn("diag_missing_frames=7", text)
+        self.assertIn("diag_last_packet_age_ms=250", text)
 
 
 if __name__ == "__main__":

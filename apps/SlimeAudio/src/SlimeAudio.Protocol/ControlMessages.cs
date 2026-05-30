@@ -19,16 +19,18 @@ public sealed record DiscoveryResponse(
     string Version,
     int Port,
     long UnixTimeMs,
-    bool StreamMuted = false)
+    bool StreamMuted = false,
+    AudioDiagnostics? Diagnostics = null)
 {
-    public static DiscoveryResponse Current(int port, string version, bool streamMuted = false) => new(
+    public static DiscoveryResponse Current(int port, string version, bool streamMuted = false, AudioDiagnostics? diagnostics = null) => new(
         "slime-audio",
         Environment.MachineName,
         Environment.UserName,
         version,
         port,
         DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-        streamMuted);
+        streamMuted,
+        diagnostics);
 
     public string ToJson() => JsonSerializer.Serialize(this);
 
@@ -44,6 +46,21 @@ public sealed record DiscoveryResponse(
         }
     }
 }
+
+public sealed record AudioDiagnostics(
+    int ActiveSessions,
+    long ReceivedPackets,
+    long ReceivedBytes,
+    long DroppedMutedPackets,
+    long DecodeFailures,
+    long ResetCount,
+    long MissingFrames,
+    long ReadCalls,
+    long LastPacketUnixTimeMs,
+    int MaxBufferedPackets,
+    int MaxBufferedPacketSpan,
+    int LatestSequence,
+    string? LatestSessionId);
 
 public sealed record EffectEnvelope(
     long StartUnixTimeMs,

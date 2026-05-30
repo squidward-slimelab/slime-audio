@@ -35,6 +35,27 @@ class Receiver:
     rtt_ms: float = 0.0
     clock_offset_ms: float = 0.0
     stream_muted: bool = False
+    diagnostics: dict | None = None
+
+
+def format_diagnostics(diagnostics: dict | None, now_ms: float | None = None) -> str:
+    if not diagnostics:
+        return "diag=none"
+    now_ms = now_ms if now_ms is not None else time.time() * 1000
+    last_packet_ms = float(diagnostics.get("LastPacketUnixTimeMs") or 0)
+    last_packet_age_ms = max(0.0, now_ms - last_packet_ms) if last_packet_ms else 0.0
+    return (
+        f"diag_sessions={diagnostics.get('ActiveSessions', 0)}"
+        f"\tdiag_packets={diagnostics.get('ReceivedPackets', 0)}"
+        f"\tdiag_missing_frames={diagnostics.get('MissingFrames', 0)}"
+        f"\tdiag_reads={diagnostics.get('ReadCalls', 0)}"
+        f"\tdiag_buffered_packets={diagnostics.get('MaxBufferedPackets', 0)}"
+        f"\tdiag_packet_span={diagnostics.get('MaxBufferedPacketSpan', 0)}"
+        f"\tdiag_latest_seq={diagnostics.get('LatestSequence', -1)}"
+        f"\tdiag_last_packet_age_ms={last_packet_age_ms:.0f}"
+        f"\tdiag_resets={diagnostics.get('ResetCount', 0)}"
+        f"\tdiag_decode_failures={diagnostics.get('DecodeFailures', 0)}"
+    )
 
 
 def discover_receivers(port: int = DEFAULT_PORT, timeout_ms: int = 2500) -> list[Receiver]:
@@ -88,6 +109,7 @@ def parse_discovery_response(
         rtt_ms=rtt_ms,
         clock_offset_ms=clock_offset_ms,
         stream_muted=bool(data.get("StreamMuted") or False),
+        diagnostics=data.get("Diagnostics") if isinstance(data.get("Diagnostics"), dict) else None,
     )
 
 
@@ -526,11 +548,13 @@ def main() -> int:
         raise SystemExit("no targets resolved")
 
     if args.dry_run:
+        now_ms = time.time() * 1000
         for target in targets:
             print(
                 f"target {target.endpoint}\t{target.machine_name}\t{target.version}"
                 f"\trtt={target.rtt_ms:.1f}ms\toffset={target.clock_offset_ms:.1f}ms"
                 f"\tstream_muted={str(target.stream_muted).lower()}"
+                f"\t{format_diagnostics(target.diagnostics, now_ms)}"
             )
         if args.mode == "multicast":
             print(f"multicast {args.multicast_group}:{args.multicast_port}")
