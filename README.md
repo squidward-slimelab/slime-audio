@@ -175,9 +175,12 @@ python3 scripts/slime_audio_session.py summary runtime/mix-session.json
 python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000
 python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --duck-volume 0.45
 python3 scripts/slime_audio_session.py automate runtime/mix-session.json --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]'
+python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --duck-volume 0.45 --lowpass-hz 1400
 ```
 
 The first implementation validates and edits the session format. The playback engine should consume this format next, keeping the current FFmpeg multicast path stable while adding a mutable schedule/control API.
+
+Lean-ins are session events, not packet-mode side streams. A lean-in carries the spoken text plus paired `duck_volume` and `lowpass_hz` automation so the Snapcast-era mixer can render the voice and music effect together instead of relying on the old receiver packet path.
 
 ## Candidate Selection And Set Constraints
 

@@ -66,7 +66,11 @@ class MicLeanIn:
     text: str
     voice: str | None = None
     rate: str | None = None
-    ducking: Automation | None = None
+    effects: list[Automation] = field(default_factory=list)
+
+    @property
+    def ducking(self) -> Automation | None:
+        return next((effect for effect in self.effects if effect.param == "duck_volume"), None)
 
 
 @dataclass(frozen=True)
@@ -163,14 +167,21 @@ def parse_mic_lean_in(payload: dict[str, Any]) -> MicLeanIn:
         raise ValueError("mic lean-in id is required")
     if not text:
         raise ValueError(f"mic lean-in {lean_id} text is required")
+    effects: list[Automation] = []
     ducking_payload = payload.get("ducking")
+    if isinstance(ducking_payload, dict):
+        effects.append(parse_automation(ducking_payload, default_target="master"))
+    lowpass_payload = payload.get("lowpass")
+    if isinstance(lowpass_payload, dict):
+        effects.append(parse_automation(lowpass_payload, default_target="master"))
+    effects.extend(parse_automation(item, default_target="master") for item in payload.get("effects", []))
     return MicLeanIn(
         id=lean_id,
         start_ms=parse_ms(payload.get("start_ms", payload.get("start", 0)), f"mic lean-in {lean_id} start"),
         text=text,
         voice=str(payload["voice"]) if payload.get("voice") else None,
         rate=str(payload["rate"]) if payload.get("rate") else None,
-        ducking=parse_automation(ducking_payload, default_target="master") if isinstance(ducking_payload, dict) else None,
+        effects=effects,
     )
 
 
@@ -248,8 +259,8 @@ def validate_session(session: MixSession) -> None:
     for lean_in in session.mic_lean_ins:
         if lean_in.start_ms < 0:
             errors.append(f"mic lean-in {lean_in.id} starts before zero")
-        if lean_in.ducking is not None:
-            validate_automation(lean_in.ducking, session.event_ids, errors, prefix=f"mic lean-in {lean_in.id}")
+        for effect in lean_in.effects:
+            validate_automation(effect, session.event_ids, errors, prefix=f"mic lean-in {lean_in.id}")
 
     for automation in session.automations:
         validate_automation(automation, session.event_ids, errors, prefix="session")
@@ -292,7 +303,11 @@ def session_summary(session: MixSession) -> dict[str, Any]:
         "decks": session.decks,
         "clip_count": len(session.clips),
         "mic_lean_in_count": len(session.mic_lean_ins),
-        "automation_count": len(session.automations) + sum(len(clip.automations) for clip in session.clips),
+        "automation_count": (
+            len(session.automations)
+            + sum(len(clip.automations) for clip in session.clips)
+            + sum(len(lean_in.effects) for lean_in in session.mic_lean_ins)
+        ),
         "clips_by_deck": clips_by_deck,
     }
 
@@ -334,6 +349,14 @@ def template_session() -> dict[str, Any]:
                     "points": [
                         {"at": "00:43.750", "value": 0.45},
                         {"at": "00:47.000", "value": 1.0},
+                    ],
+                },
+                "lowpass": {
+                    "target": "master",
+                    "param": "lowpass_hz",
+                    "points": [
+                        {"at": "00:43.750", "value": 1400},
+                        {"at": "00:47.000", "value": 22050},
                     ],
                 },
             }
@@ -413,6 +436,7 @@ def add_mic_lean_in(
     voice: str | None,
     rate: str | None,
     duck_volume: float | None,
+    lowpass_hz: float | None,
     duck_ms: int,
 ) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
@@ -432,6 +456,15 @@ def add_mic_lean_in(
                 {"at": start_ms + duck_ms, "value": 1.0},
             ],
         }
+        if lowpass_hz is not None:
+            lean_in["lowpass"] = {
+                "target": "master",
+                "param": "lowpass_hz",
+                "points": [
+                    {"at": max(0, start_ms - 250), "value": lowpass_hz},
+                    {"at": start_ms + duck_ms, "value": 22050},
+                ],
+            }
     next_payload.setdefault("mic_lean_ins", []).append(lean_in)
     parse_session(next_payload)
     return next_payload
@@ -513,6 +546,7 @@ def main() -> int:
     add_mic_parser.add_argument("--voice")
     add_mic_parser.add_argument("--rate")
     add_mic_parser.add_argument("--duck-volume", type=float)
+    add_mic_parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     add_mic_parser.add_argument("--duck-ms", type=int, default=2500)
 
     remove_parser = sub.add_parser("remove")
@@ -563,6 +597,7 @@ def main() -> int:
             voice=args.voice,
             rate=args.rate,
             duck_volume=args.duck_volume,
+            lowpass_hz=args.lowpass_hz,
             duck_ms=args.duck_ms,
         )
         write_payload(args.session, updated)
