@@ -97,6 +97,8 @@ def stream_command(args: argparse.Namespace, track: str) -> list[str]:
             str(args.chunk_ms),
             "--prebuffer-ms",
             str(args.prebuffer_ms),
+            "--packet-redundancy",
+            str(args.packet_redundancy),
             "--backend",
             args.backend,
         ]
@@ -254,6 +256,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay-ms", type=int, default=7000)
     parser.add_argument("--chunk-ms", type=int, default=7)
     parser.add_argument("--prebuffer-ms", type=int, default=15000)
+    parser.add_argument("--packet-redundancy", type=int, default=2)
     parser.add_argument("--retry-seconds", type=int, default=5)
     parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
     parser.add_argument("--dj-plan", action="store_true", help="Analyze tracks and write next-transition metadata to state/history.")

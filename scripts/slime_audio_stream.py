@@ -357,6 +357,7 @@ def stream_live_synced(
     delay_ms: int,
     chunk_ms: int,
     prebuffer_ms: int,
+    packet_redundancy: int,
     effect: tuple[int, int, int, int, float, float] | None = None,
     refresh_targets: Callable[[], list[Receiver]] | None = None,
     refresh_targets_ms: int = 0,
@@ -371,6 +372,7 @@ def stream_live_synced(
     sender_start_ms: int | None = None
     target_start_ms: dict[str, int] = {}
     chunk_frames = max(1, sample_rate * chunk_ms // 1000)
+    packet_redundancy = max(1, packet_redundancy)
     frame_bytes = channels * 2
     chunk_bytes = chunk_frames * frame_bytes
     prebuffer_frames = max(0, sample_rate * prebuffer_ms // 1000)
@@ -406,7 +408,7 @@ def stream_live_synced(
 
     print(
         f"live backend={selected_backend} session={session} lead_ms={lead_ms} "
-        f"prebuffer_ms={prebuffer_ms} "
+        f"prebuffer_ms={prebuffer_ms} packet_redundancy={packet_redundancy} "
         f"targets={','.join(f'{target.machine_name}(rtt={target.rtt_ms:.1f}ms,offset={target.clock_offset_ms:.1f}ms)' for target in targets)}",
         flush=True,
     )
@@ -467,7 +469,8 @@ def stream_live_synced(
                             channels,
                             payload,
                         )
-                        sock.sendto(packet, endpoint)
+                        for _ in range(packet_redundancy):
+                            sock.sendto(packet, endpoint)
                     bytes_sent += len(payload)
                     sequence += 1
                     next_send = started + ((bytes_sent / frame_bytes) / sample_rate)
@@ -486,7 +489,8 @@ def stream_live_synced(
                         b"",
                         packet_type=2,
                     )
-                    sock.sendto(end, endpoint)
+                    for _ in range(packet_redundancy):
+                        sock.sendto(end, endpoint)
     finally:
         try:
             decoder.stdout.close()
@@ -573,6 +577,7 @@ def main() -> int:
     parser.add_argument("--packet-delay-ms", type=int, default=45)
     parser.add_argument("--chunk-ms", type=int, default=7)
     parser.add_argument("--prebuffer-ms", type=int, default=DEFAULT_PREBUFFER_MS)
+    parser.add_argument("--packet-redundancy", type=int, default=2)
     parser.add_argument("--refresh-targets-ms", type=int, default=3000, help="For --target all packet streams, rediscover subscribers while playing.")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
@@ -686,6 +691,7 @@ def main() -> int:
         args.delay_ms,
         args.chunk_ms,
         args.prebuffer_ms,
+        args.packet_redundancy,
         effect,
         refresh_targets=refresh_targets,
         refresh_targets_ms=args.refresh_targets_ms,
