@@ -72,6 +72,7 @@ internal sealed class TrayContext : ApplicationContext
         };
         _receiver.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
         _multicast.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
+        _icon.ContextMenuStrip.Opening += (_, _) => UpdateMuteMenu();
         _icon.ContextMenuStrip.Items.Add($"Slime Audio {VersionInfo.DisplayVersion}", null, (_, _) => MessageBox.Show(DefaultStatus, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
         _muteItem = new ToolStripMenuItem("Mute stream here", null, (_, _) => ToggleMute())
