@@ -80,8 +80,10 @@ internal sealed class PlaybackSession : IDisposable
 
 internal sealed class ClockedPacketSampleProvider : ISampleProvider
 {
-    private const int PlaybackLatencyCompensationMs = 100;
+    private const int InitialPlaybackLatencyCompensationMs = 100;
     private const int CleanupSlackPackets = 200;
+    private const int DriftNudgeFrames = 2;
+    private const int DriftToleranceMs = 15;
     private readonly object _lock = new();
     private readonly Dictionary<int, byte[]> _packets = new();
     private readonly WaveFormat _sourceFormat;
@@ -89,6 +91,7 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
     private readonly long _startUnixTimeMs;
     private int _packetFrames;
     private int _lastCleanupPacket = -1;
+    private long? _nextFrame;
 
     public WaveFormat WaveFormat { get; }
 
@@ -127,9 +130,8 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
 
         var channels = Math.Max(1, _sourceFormat.Channels);
         var framesRequested = count / channels;
-        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        var firstFrame = (long)Math.Floor(
-            (nowMs + PlaybackLatencyCompensationMs - _startUnixTimeMs) * _sourceFormat.SampleRate / 1000.0);
+        var targetFrame = ClockFrame();
+        var firstFrame = SmoothFrame(targetFrame);
 
         lock (_lock)
         {
@@ -168,9 +170,34 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
             }
 
             Cleanup((int)Math.Max(0, firstFrame / _packetFrames));
+            _nextFrame = firstFrame + framesRequested;
         }
 
         return count;
+    }
+
+    private long ClockFrame()
+    {
+        var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        return (long)Math.Floor(
+            (nowMs + InitialPlaybackLatencyCompensationMs - _startUnixTimeMs) * _sourceFormat.SampleRate / 1000.0);
+    }
+
+    private long SmoothFrame(long targetFrame)
+    {
+        if (_nextFrame is not { } nextFrame)
+        {
+            return targetFrame;
+        }
+
+        var toleranceFrames = _sourceFormat.SampleRate * DriftToleranceMs / 1000;
+        var drift = targetFrame - nextFrame;
+        if (Math.Abs(drift) > toleranceFrames)
+        {
+            nextFrame += Math.Sign(drift) * Math.Min(Math.Abs(drift), DriftNudgeFrames);
+        }
+
+        return nextFrame;
     }
 
     private void Cleanup(int currentPacket)
