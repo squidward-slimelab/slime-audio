@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Diagnostics;
 using SlimeAudio.Protocol;
 
@@ -31,13 +32,14 @@ internal static class Program
     }
 }
 
-internal sealed record MulticastOptions(string Group, int Port, int SnapcastPort)
+internal sealed record MulticastOptions(string Group, int Port, int SnapcastPort, int SnapcastControlPort)
 {
     public static MulticastOptions Parse(string[] args)
     {
         var group = "239.77.77.77";
         var port = 47778;
         var snapcastPort = 1704;
+        var snapcastControlPort = 1705;
         for (var i = 0; i < args.Length - 1; i++)
         {
             if (args[i] == "--multicast-group")
@@ -52,8 +54,12 @@ internal sealed record MulticastOptions(string Group, int Port, int SnapcastPort
             {
                 snapcastPort = parsedSnapcastPort;
             }
+            else if (args[i] == "--snapcast-control-port" && int.TryParse(args[i + 1], out var parsedSnapcastControlPort))
+            {
+                snapcastControlPort = parsedSnapcastControlPort;
+            }
         }
-        return new MulticastOptions(group, port, snapcastPort);
+        return new MulticastOptions(group, port, snapcastPort, snapcastControlPort);
     }
 }
 
@@ -63,7 +69,10 @@ internal sealed class TrayContext : ApplicationContext
     private readonly MulticastReceiver _multicast;
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _muteItem;
+    private readonly ToolStripMenuItem _volumeMenu;
+    private readonly List<ToolStripMenuItem> _volumeItems = new();
     private bool _updatingMuteMenu;
+    private bool _updatingVolumeMenu;
 
     public TrayContext(AudioReceiver receiver, MulticastReceiver multicast)
     {
@@ -78,7 +87,11 @@ internal sealed class TrayContext : ApplicationContext
         };
         _receiver.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
         _multicast.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
-        _icon.ContextMenuStrip.Opening += (_, _) => UpdateMuteMenu();
+        _icon.ContextMenuStrip.Opening += (_, _) =>
+        {
+            UpdateMuteMenu();
+            UpdateVolumeMenu();
+        };
         _icon.ContextMenuStrip.Items.Add($"Slime Audio {VersionInfo.DisplayVersion}", null, (_, _) => MessageBox.Show(DefaultStatus, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
         _muteItem = new ToolStripMenuItem("Receive stream here")
@@ -87,6 +100,15 @@ internal sealed class TrayContext : ApplicationContext
         };
         _muteItem.CheckedChanged += (_, _) => ApplyMuteMenuChange();
         _icon.ContextMenuStrip.Items.Add(_muteItem);
+        _volumeMenu = new ToolStripMenuItem("Volume");
+        foreach (var percent in new[] { 100, 85, 70, 55, 40, 25, 10 })
+        {
+            var item = new ToolStripMenuItem($"{percent}%") { CheckOnClick = true, Tag = percent };
+            item.CheckedChanged += (_, _) => ApplyVolumeMenuChange(item);
+            _volumeItems.Add(item);
+            _volumeMenu.DropDownItems.Add(item);
+        }
+        _icon.ContextMenuStrip.Items.Add(_volumeMenu);
         _icon.ContextMenuStrip.Items.Add("Start local snapclient", null, (_, _) => _multicast.Start("127.0.0.1"));
         _icon.ContextMenuStrip.Items.Add("Stop shared stream listener", null, (_, _) => _multicast.Stop());
         _icon.ContextMenuStrip.Items.Add("Check for updates", null, async (_, _) => await CheckForUpdates());
@@ -120,6 +142,50 @@ internal sealed class TrayContext : ApplicationContext
         finally
         {
             _updatingMuteMenu = false;
+        }
+    }
+
+    private void ApplyVolumeMenuChange(ToolStripMenuItem item)
+    {
+        if (_updatingVolumeMenu || !item.Checked || item.Tag is not int percent)
+        {
+            return;
+        }
+
+        _ = SetVolumeAsync(percent);
+    }
+
+    private async Task SetVolumeAsync(int percent)
+    {
+        try
+        {
+            await _multicast.SetVolumeAsync(percent);
+            _icon.Text = TrimForTray($"Slime Audio volume {percent}%");
+        }
+        catch (Exception ex)
+        {
+            _icon.Text = TrimForTray($"Volume failed: {ex.Message}");
+        }
+        finally
+        {
+            UpdateVolumeMenu();
+        }
+    }
+
+    private void UpdateVolumeMenu()
+    {
+        _updatingVolumeMenu = true;
+        try
+        {
+            _volumeMenu.Text = $"Volume {_multicast.VolumePercent}%";
+            foreach (var item in _volumeItems)
+            {
+                item.Checked = item.Tag is int percent && percent == _multicast.VolumePercent;
+            }
+        }
+        finally
+        {
+            _updatingVolumeMenu = false;
         }
     }
 
@@ -157,11 +223,14 @@ internal sealed class MulticastReceiver : IDisposable
     private readonly MulticastOptions _options;
     private Process? _process;
     private string? _lastStatus;
+    private string? _serverHost;
+    private int _volumePercent = 100;
 
     public event EventHandler<string>? StatusChanged;
     public bool IsRunning => _process is { HasExited: false };
     public int? ExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
     public string? LastStatus => _lastStatus;
+    public int VolumePercent => _volumePercent;
 
     public MulticastReceiver(MulticastOptions options)
     {
@@ -178,6 +247,7 @@ internal sealed class MulticastReceiver : IDisposable
 
         try
         {
+            _serverHost = serverHost;
             var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
             _process = Process.Start(new ProcessStartInfo
             {
@@ -205,6 +275,7 @@ internal sealed class MulticastReceiver : IDisposable
                 process.BeginErrorReadLine();
             }
             SetStatus($"Snapclient connected to {serverHost}:{_options.SnapcastPort}");
+            _ = SetVolumeAsync(_volumePercent);
         }
         catch (Exception ex)
         {
@@ -221,6 +292,22 @@ internal sealed class MulticastReceiver : IDisposable
         _process?.Dispose();
         _process = null;
         SetStatus("Snapclient stopped");
+    }
+
+    public async Task SetVolumeAsync(int percent)
+    {
+        _volumePercent = Math.Clamp(percent, 0, 100);
+        if (string.IsNullOrWhiteSpace(_serverHost))
+        {
+            SetStatus($"Volume {_volumePercent}% saved for next stream");
+            return;
+        }
+        await SnapcastControl.SetVolumeAsync(
+            _serverHost,
+            _options.SnapcastControlPort,
+            Environment.MachineName,
+            _volumePercent).ConfigureAwait(false);
+        SetStatus($"Snapclient volume {_volumePercent}%");
     }
 
     private void SetStatus(string status)
@@ -240,6 +327,41 @@ internal sealed class MulticastReceiver : IDisposable
     public void Dispose()
     {
         Stop();
+    }
+}
+
+internal static class SnapcastControl
+{
+    public static async Task SetVolumeAsync(string host, int port, string clientId, int percent)
+    {
+        using var client = new TcpClient();
+        await client.ConnectAsync(host, port).WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        using var stream = client.GetStream();
+        var request = JsonSerializer.Serialize(new
+        {
+            id = 1,
+            jsonrpc = "2.0",
+            method = "Client.SetVolume",
+            @params = new
+            {
+                id = clientId,
+                volume = new
+                {
+                    muted = false,
+                    percent
+                }
+            }
+        }) + "\n";
+        var payload = Encoding.UTF8.GetBytes(request);
+        await stream.WriteAsync(payload).ConfigureAwait(false);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var buffer = new byte[4096];
+        var read = await stream.ReadAsync(buffer, timeout.Token).ConfigureAwait(false);
+        var response = Encoding.UTF8.GetString(buffer, 0, read);
+        if (response.Contains("\"error\"", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("snapcast rejected volume update");
+        }
     }
 }
 
