@@ -47,12 +47,15 @@ The tray menu includes:
 
 - `Slime Audio <version>`
 - `Status`
+- `Mute stream here` / `Unmute stream here`
 - `Start shared stream listener`
 - `Stop shared stream listener`
 - `Check for updates`
 - `Quit`
 
 `Check for updates` compares the running tray version against the latest GitHub release. If an update is available, it downloads the installer and runs it silently. The installer stops any running `SlimeAudio.Tray.exe` before replacing files, then launches the updated tray app.
+
+`Mute stream here` is a server-side subscription toggle. Muted clients advertise `StreamMuted` in discovery and the Python streamer skips them when resolving `--target all`; the local tray also resets active audio immediately.
 
 ## Discover Receivers
 
@@ -93,6 +96,8 @@ python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 ```
 
 The streamer prefers VLC/cvlc when installed and falls back to GStreamer. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one live RTP source. Multicast mode starts the selected receivers' shared stream listeners before playback.
+
+Receivers muted from the tray are excluded from `--target all` streams. Packet streams refresh discovered subscribers while playing, so muting a tray stops future packets within a few seconds instead of only taking effect on the next track. Use `--include-muted` only for diagnostics or intentional override.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast

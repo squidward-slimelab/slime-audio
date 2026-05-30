@@ -18,15 +18,17 @@ public sealed record DiscoveryResponse(
     string UserName,
     string Version,
     int Port,
-    long UnixTimeMs)
+    long UnixTimeMs,
+    bool StreamMuted = false)
 {
-    public static DiscoveryResponse Current(int port, string version) => new(
+    public static DiscoveryResponse Current(int port, string version, bool streamMuted = false) => new(
         "slime-audio",
         Environment.MachineName,
         Environment.UserName,
         version,
         port,
-        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        streamMuted);
 
     public string ToJson() => JsonSerializer.Serialize(this);
 

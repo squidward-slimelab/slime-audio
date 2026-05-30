@@ -24,7 +24,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
     def test_parse_discovery_response(self):
         payload = (
             b'{"App":"slime-audio","MachineName":"SPATULA","UserName":"slimeq",'
-            b'"Version":"0.3.0","Port":47777,"UnixTimeMs":1500}'
+            b'"Version":"0.3.0","Port":47777,"UnixTimeMs":1500,"StreamMuted":true}'
         )
 
         receiver = parse_discovery_response(payload, "192.168.0.163", 1000, 1200)
@@ -34,6 +34,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(receiver.machine_name, "SPATULA")
         self.assertEqual(receiver.rtt_ms, 200)
         self.assertEqual(receiver.clock_offset_ms, 400)
+        self.assertTrue(receiver.stream_muted)
 
     def test_parse_discovery_response_rejects_other_apps(self):
         self.assertIsNone(parse_discovery_response(b'{"App":"nope"}', "127.0.0.1"))
@@ -67,6 +68,15 @@ class SlimeAudioStreamTests(unittest.TestCase):
         ]
 
         self.assertEqual(len(resolve_targets(["all", "SPATULA"], discovered)), 1)
+
+    def test_resolve_targets_all_skips_muted_receivers(self):
+        discovered = [
+            Receiver("192.168.0.163:47777", "192.168.0.163", 47777, "SPATULA", "user", "0.3.0", stream_muted=True),
+            Receiver("192.168.0.123:47777", "192.168.0.123", 47777, "SPONGEBOT", "user", "0.3.0"),
+        ]
+
+        self.assertEqual([target.machine_name for target in resolve_targets(["all"], discovered)], ["SPONGEBOT"])
+        self.assertEqual(len(resolve_targets(["all"], discovered, include_muted=True)), 2)
 
     def test_shared_stream_control_messages_match_protocol(self):
         self.assertEqual(SHARED_STREAM_START_MESSAGE, b"SLIME_AUDIO_SHARED_STREAM_START_V1")

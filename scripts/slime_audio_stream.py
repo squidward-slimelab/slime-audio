@@ -13,7 +13,7 @@ import uuid
 import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 DISCOVER_MESSAGE = b"SLIME_AUDIO_DISCOVER_V1"
 SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
@@ -34,6 +34,7 @@ class Receiver:
     version: str
     rtt_ms: float = 0.0
     clock_offset_ms: float = 0.0
+    stream_muted: bool = False
 
 
 def discover_receivers(port: int = DEFAULT_PORT, timeout_ms: int = 2500) -> list[Receiver]:
@@ -86,10 +87,16 @@ def parse_discovery_response(
         version=str(data.get("Version") or ""),
         rtt_ms=rtt_ms,
         clock_offset_ms=clock_offset_ms,
+        stream_muted=bool(data.get("StreamMuted") or False),
     )
 
 
-def resolve_targets(values: Iterable[str], discovered: list[Receiver], default_port: int = DEFAULT_PORT) -> list[Receiver]:
+def resolve_targets(
+    values: Iterable[str],
+    discovered: list[Receiver],
+    default_port: int = DEFAULT_PORT,
+    include_muted: bool = False,
+) -> list[Receiver]:
     requested = list(values)
     if not requested:
         raise ValueError("at least one --target is required; use --target all for every discovered receiver")
@@ -101,7 +108,7 @@ def resolve_targets(values: Iterable[str], discovered: list[Receiver], default_p
     for value in requested:
         normalized = value.casefold()
         if normalized == "all":
-            targets.extend(discovered)
+            targets.extend(receiver for receiver in discovered if include_muted or not receiver.stream_muted)
         elif normalized in by_name:
             targets.append(by_name[normalized])
         elif normalized in by_endpoint:
@@ -320,6 +327,8 @@ def stream_live_synced(
     delay_ms: int,
     chunk_ms: int,
     effect: tuple[int, int, int, int, float, float] | None = None,
+    refresh_targets: Callable[[], list[Receiver]] | None = None,
+    refresh_targets_ms: int = 0,
 ) -> None:
     decoder, selected_backend = open_decoder_stdout(input_path, backend, sample_rate, channels)
     if decoder.stdout is None:
@@ -329,7 +338,7 @@ def stream_live_synced(
     max_rtt = max((target.rtt_ms for target in targets), default=0.0)
     lead_ms = max(delay_ms, int(max_rtt + 1200))
     sender_start_ms = int((time.time() * 1000) + lead_ms)
-    target_start_ms = {
+    target_start_ms: dict[str, int] = {
         target.endpoint: int(sender_start_ms + target.clock_offset_ms)
         for target in targets
     }
@@ -348,6 +357,8 @@ def stream_live_synced(
     frame_bytes = channels * 2
     chunk_bytes = chunk_frames * frame_bytes
     endpoints = [(target, (target.host, target.port)) for target in targets]
+    refresh_every = refresh_targets_ms / 1000 if refresh_targets is not None and refresh_targets_ms > 0 else 0
+    next_refresh = time.monotonic() + refresh_every if refresh_every else 0.0
     started = time.monotonic()
     sequence = 0
     bytes_sent = 0
@@ -368,6 +379,12 @@ def stream_live_synced(
                     payload = payload[: len(payload) - (len(payload) % frame_bytes)]
                 if not payload:
                     continue
+                if refresh_every and time.monotonic() >= next_refresh:
+                    refreshed = refresh_targets()
+                    for target in refreshed:
+                        target_start_ms.setdefault(target.endpoint, int(sender_start_ms + target.clock_offset_ms))
+                    endpoints = [(target, (target.host, target.port)) for target in refreshed]
+                    next_refresh = time.monotonic() + refresh_every
                 for target, endpoint in endpoints:
                     packet = encode_audio_packet(
                         session,
@@ -471,6 +488,7 @@ def main() -> int:
     parser.add_argument("--target", action="append", required=True, help="Receiver name, host:port, or all")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--discover-timeout-ms", type=int, default=2500)
+    parser.add_argument("--include-muted", action="store_true", help="Include receivers that asked the server not to stream to them.")
     parser.add_argument("--backend", choices=["auto", "vlc", "gstreamer"], default="auto")
     parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
     parser.add_argument("--multicast-group", default="239.77.77.77")
@@ -478,6 +496,7 @@ def main() -> int:
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
     parser.add_argument("--chunk-ms", type=int, default=50)
+    parser.add_argument("--refresh-targets-ms", type=int, default=3000, help="For --target all packet streams, rediscover subscribers while playing.")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true")
@@ -501,7 +520,8 @@ def main() -> int:
         raise SystemExit("--start-listeners, --stop-listeners, and --reset-audio are mutually exclusive")
 
     discovered = discover_receivers(args.port, args.discover_timeout_ms)
-    targets = resolve_targets(args.target, discovered, args.port)
+    include_muted = args.include_muted or args.start_listeners or args.stop_listeners or args.reset_audio or args.dry_run
+    targets = resolve_targets(args.target, discovered, args.port, include_muted=include_muted)
     if not targets:
         raise SystemExit("no targets resolved")
 
@@ -510,6 +530,7 @@ def main() -> int:
             print(
                 f"target {target.endpoint}\t{target.machine_name}\t{target.version}"
                 f"\trtt={target.rtt_ms:.1f}ms\toffset={target.clock_offset_ms:.1f}ms"
+                f"\tstream_muted={str(target.stream_muted).lower()}"
             )
         if args.mode == "multicast":
             print(f"multicast {args.multicast_group}:{args.multicast_port}")
@@ -571,7 +592,24 @@ def main() -> int:
             args.effect_volume,
             args.effect_lowpass_hz,
         )
-    stream_live_synced(args.file, targets, args.backend, args.sample_rate, args.channels, args.delay_ms, args.chunk_ms, effect)
+    refresh_targets = None
+    if args.mode == "packets" and any(target.casefold() == "all" for target in args.target) and args.refresh_targets_ms > 0:
+        def refresh_targets() -> list[Receiver]:
+            discovered_targets = discover_receivers(args.port, args.discover_timeout_ms)
+            return resolve_targets(args.target, discovered_targets, args.port, include_muted=args.include_muted)
+
+    stream_live_synced(
+        args.file,
+        targets,
+        args.backend,
+        args.sample_rate,
+        args.channels,
+        args.delay_ms,
+        args.chunk_ms,
+        effect,
+        refresh_targets=refresh_targets,
+        refresh_targets_ms=args.refresh_targets_ms,
+    )
 
     return 0
 

@@ -57,6 +57,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly AudioReceiver _receiver;
     private readonly MulticastReceiver _multicast;
     private readonly NotifyIcon _icon;
+    private readonly ToolStripMenuItem _muteItem;
 
     public TrayContext(AudioReceiver receiver, MulticastReceiver multicast)
     {
@@ -73,14 +74,33 @@ internal sealed class TrayContext : ApplicationContext
         _multicast.StatusChanged += (_, message) => _icon.Text = TrimForTray(message);
         _icon.ContextMenuStrip.Items.Add($"Slime Audio {VersionInfo.DisplayVersion}", null, (_, _) => MessageBox.Show(DefaultStatus, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
+        _muteItem = new ToolStripMenuItem("Mute stream here", null, (_, _) => ToggleMute())
+        {
+            CheckOnClick = false,
+        };
+        _icon.ContextMenuStrip.Items.Add(_muteItem);
         _icon.ContextMenuStrip.Items.Add("Start shared stream listener", null, (_, _) => _multicast.Start());
         _icon.ContextMenuStrip.Items.Add("Stop shared stream listener", null, (_, _) => _multicast.Stop());
         _icon.ContextMenuStrip.Items.Add("Check for updates", null, async (_, _) => await CheckForUpdates());
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
+        UpdateMuteMenu();
         _receiver.Start();
     }
 
     private string DefaultStatus => $"Slime Audio {VersionInfo.DisplayVersion} listening on UDP {_receiver.Port}";
+
+    private void ToggleMute()
+    {
+        _receiver.SetStreamMuted(!_receiver.StreamMuted);
+        UpdateMuteMenu();
+        _icon.Text = TrimForTray(_receiver.StreamMuted ? "Slime Audio stream muted here" : DefaultStatus);
+    }
+
+    private void UpdateMuteMenu()
+    {
+        _muteItem.Checked = _receiver.StreamMuted;
+        _muteItem.Text = _receiver.StreamMuted ? "Unmute stream here" : "Mute stream here";
+    }
 
     private async Task CheckForUpdates()
     {
@@ -174,9 +194,11 @@ internal sealed class AudioReceiver : IDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly MulticastReceiver _multicast;
     private readonly Dictionary<Guid, PlaybackSession> _sessions = new();
+    private bool _streamMuted;
     private UdpClient? _udp;
 
     public int Port { get; }
+    public bool StreamMuted => _streamMuted;
     public event EventHandler<string>? StatusChanged;
 
     public AudioReceiver(int port, MulticastReceiver multicast)
@@ -231,7 +253,7 @@ internal sealed class AudioReceiver : IDisposable
         var text = Encoding.UTF8.GetString(result.Buffer).Trim();
         if (text == ControlMessages.Discover)
         {
-            var response = DiscoveryResponse.Current(Port, VersionInfo.DisplayVersion).ToJson();
+            var response = DiscoveryResponse.Current(Port, VersionInfo.DisplayVersion, StreamMuted).ToJson();
             var bytes = Encoding.UTF8.GetBytes(response);
             _udp?.Send(bytes, bytes.Length, result.RemoteEndPoint);
             StatusChanged?.Invoke(this, $"Discovery response sent to {result.RemoteEndPoint.Address}");
@@ -289,6 +311,11 @@ internal sealed class AudioReceiver : IDisposable
 
     private void Handle(AudioPacket packet)
     {
+        if (StreamMuted)
+        {
+            return;
+        }
+
         if (!_sessions.TryGetValue(packet.SessionId, out var session))
         {
             session = new PlaybackSession(packet);
@@ -306,6 +333,25 @@ internal sealed class AudioReceiver : IDisposable
         if (session.TryStart())
         {
             StatusChanged?.Invoke(this, $"Playing synced audio session {packet.SessionId:N}");
+        }
+    }
+
+    public void SetStreamMuted(bool muted)
+    {
+        if (_streamMuted == muted)
+        {
+            return;
+        }
+
+        _streamMuted = muted;
+        if (muted)
+        {
+            ResetAudio();
+            StatusChanged?.Invoke(this, "Stream muted here");
+        }
+        else
+        {
+            StatusChanged?.Invoke(this, $"Slime Audio listening on UDP {Port}");
         }
     }
 
