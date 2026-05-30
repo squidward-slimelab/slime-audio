@@ -58,6 +58,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly MulticastReceiver _multicast;
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _muteItem;
+    private bool _updatingMuteMenu;
 
     public TrayContext(AudioReceiver receiver, MulticastReceiver multicast)
     {
@@ -75,10 +76,11 @@ internal sealed class TrayContext : ApplicationContext
         _icon.ContextMenuStrip.Opening += (_, _) => UpdateMuteMenu();
         _icon.ContextMenuStrip.Items.Add($"Slime Audio {VersionInfo.DisplayVersion}", null, (_, _) => MessageBox.Show(DefaultStatus, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
-        _muteItem = new ToolStripMenuItem("Mute stream here", null, (_, _) => ToggleMute())
+        _muteItem = new ToolStripMenuItem("Receive stream here")
         {
-            CheckOnClick = false,
+            CheckOnClick = true,
         };
+        _muteItem.CheckedChanged += (_, _) => ApplyMuteMenuChange();
         _icon.ContextMenuStrip.Items.Add(_muteItem);
         _icon.ContextMenuStrip.Items.Add("Start shared stream listener", null, (_, _) => _multicast.Start());
         _icon.ContextMenuStrip.Items.Add("Stop shared stream listener", null, (_, _) => _multicast.Stop());
@@ -90,17 +92,30 @@ internal sealed class TrayContext : ApplicationContext
 
     private string DefaultStatus => $"Slime Audio {VersionInfo.DisplayVersion} listening on UDP {_receiver.Port}";
 
-    private void ToggleMute()
+    private void ApplyMuteMenuChange()
     {
-        _receiver.SetStreamMuted(!_receiver.StreamMuted);
+        if (_updatingMuteMenu)
+        {
+            return;
+        }
+
+        _receiver.SetStreamMuted(!_muteItem.Checked);
         UpdateMuteMenu();
         _icon.Text = TrimForTray(_receiver.StreamMuted ? "Slime Audio stream muted here" : DefaultStatus);
     }
 
     private void UpdateMuteMenu()
     {
-        _muteItem.Checked = _receiver.StreamMuted;
-        _muteItem.Text = _receiver.StreamMuted ? "Unmute stream here" : "Mute stream here";
+        _updatingMuteMenu = true;
+        try
+        {
+            _muteItem.Checked = !_receiver.StreamMuted;
+            _muteItem.Text = "Receive stream here";
+        }
+        finally
+        {
+            _updatingMuteMenu = false;
+        }
     }
 
     private async Task CheckForUpdates()
