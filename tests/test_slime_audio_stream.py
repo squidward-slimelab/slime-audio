@@ -105,11 +105,12 @@ class SlimeAudioStreamTests(unittest.TestCase):
                 "DecodeFailures": 0,
             },
             now_ms=1_250,
+            clock_offset_ms=50,
         )
 
         self.assertIn("diag_packets=42", text)
         self.assertIn("diag_missing_frames=7", text)
-        self.assertIn("diag_last_packet_age_ms=250", text)
+        self.assertIn("diag_last_packet_age_ms=300", text)
 
 
 if __name__ == "__main__":

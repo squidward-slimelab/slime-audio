@@ -38,12 +38,17 @@ class Receiver:
     diagnostics: dict | None = None
 
 
-def format_diagnostics(diagnostics: dict | None, now_ms: float | None = None) -> str:
+def format_diagnostics(
+    diagnostics: dict | None,
+    now_ms: float | None = None,
+    clock_offset_ms: float = 0.0,
+) -> str:
     if not diagnostics:
         return "diag=none"
     now_ms = now_ms if now_ms is not None else time.time() * 1000
     last_packet_ms = float(diagnostics.get("LastPacketUnixTimeMs") or 0)
-    last_packet_age_ms = max(0.0, now_ms - last_packet_ms) if last_packet_ms else 0.0
+    receiver_now_ms = now_ms + clock_offset_ms
+    last_packet_age_ms = max(0.0, receiver_now_ms - last_packet_ms) if last_packet_ms else 0.0
     return (
         f"diag_sessions={diagnostics.get('ActiveSessions', 0)}"
         f"\tdiag_packets={diagnostics.get('ReceivedPackets', 0)}"
@@ -517,7 +522,7 @@ def main() -> int:
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
-    parser.add_argument("--chunk-ms", type=int, default=50)
+    parser.add_argument("--chunk-ms", type=int, default=5)
     parser.add_argument("--refresh-targets-ms", type=int, default=3000, help="For --target all packet streams, rediscover subscribers while playing.")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
@@ -554,7 +559,7 @@ def main() -> int:
                 f"target {target.endpoint}\t{target.machine_name}\t{target.version}"
                 f"\trtt={target.rtt_ms:.1f}ms\toffset={target.clock_offset_ms:.1f}ms"
                 f"\tstream_muted={str(target.stream_muted).lower()}"
-                f"\t{format_diagnostics(target.diagnostics, now_ms)}"
+                f"\t{format_diagnostics(target.diagnostics, now_ms, target.clock_offset_ms)}"
             )
         if args.mode == "multicast":
             print(f"multicast {args.multicast_group}:{args.multicast_port}")

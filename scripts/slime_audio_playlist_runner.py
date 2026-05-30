@@ -9,10 +9,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from slime_audio_dj import analyze_with_cache, transition_plan
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLAYLIST = REPO_ROOT / "runtime" / "playlist.txt"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "playlist-state.json"
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
+DEFAULT_DJ_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
 
 
 def load_playlist(path: Path) -> list[str]:
@@ -111,6 +114,9 @@ def run_playlist(args: argparse.Namespace) -> int:
     state = load_or_create_state(args.state, tracks, args.shuffle)
     order = state["order"]
     index = int(state.get("index", 0))
+    analyses = None
+    if args.dj_plan:
+        analyses = analyze_with_cache([Path(track) for track in order], args.dj_cache, args.backend, args.analysis_sample_rate)
 
     if args.dry_run:
         print(f"playlist={args.playlist}")
@@ -119,15 +125,63 @@ def run_playlist(args: argparse.Namespace) -> int:
         print(f"current={state.get('current')}")
         for offset, track in enumerate(order[index : index + args.show_next], start=index + 1):
             print(f"next {offset}/{len(order)} {track}")
+        if analyses is not None:
+            for offset in range(index, min(len(order) - 1, index + args.show_next - 1)):
+                plan = transition_plan(analyses[offset], analyses[offset + 1], args.max_pitch_shift)
+                print(
+                    "transition "
+                    f"{offset + 1}->{offset + 2} score={plan.score} "
+                    f"key={plan.key_relation} pitch={plan.pitch_shift_semitones:+d} "
+                    f"tempo={plan.target_tempo_shift_pct}"
+                )
         return 0
 
     while index < len(order):
         track = order[index]
+        active_transition = None
+        if analyses is not None and index + 1 < len(analyses):
+            active_transition = transition_plan(analyses[index], analyses[index + 1], args.max_pitch_shift)
         state["index"] = index
         state["current"] = track
         state["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         state["playlist"] = str(args.playlist)
+        if active_transition is not None:
+            state["next_transition"] = {
+                "next": order[index + 1],
+                "score": active_transition.score,
+                "target_tempo_shift_pct": active_transition.target_tempo_shift_pct,
+                "pitch_shift_semitones": active_transition.pitch_shift_semitones,
+                "key_relation": active_transition.key_relation,
+                "phrase_wait_beats": active_transition.phrase_wait_beats,
+            }
+        else:
+            state.pop("next_transition", None)
         write_state(args.state, state)
+        if active_transition is not None:
+            print(
+                "next transition "
+                f"score={active_transition.score} key={active_transition.key_relation} "
+                f"pitch={active_transition.pitch_shift_semitones:+d} "
+                f"tempo={active_transition.target_tempo_shift_pct}",
+                flush=True,
+            )
+            append_history(
+                args.history_log,
+                {
+                    "event": "transition_planned",
+                    "index": index,
+                    "next_track": order[index + 1],
+                    "pitch_shift_semitones": active_transition.pitch_shift_semitones,
+                    "playlist": str(args.playlist),
+                    "score": active_transition.score,
+                    "state": str(args.state),
+                    "target_tempo_shift_pct": active_transition.target_tempo_shift_pct,
+                    "timestamp": state["started_at"],
+                    "track": track,
+                    "key_relation": active_transition.key_relation,
+                    "notes": active_transition.notes,
+                },
+            )
         append_history(
             args.history_log,
             {
@@ -196,9 +250,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", choices=["auto", "vlc", "gstreamer"], default="auto")
     parser.add_argument("--discover-timeout-ms", type=int, default=4000)
     parser.add_argument("--delay-ms", type=int, default=7000)
-    parser.add_argument("--chunk-ms", type=int, default=50)
+    parser.add_argument("--chunk-ms", type=int, default=5)
     parser.add_argument("--retry-seconds", type=int, default=5)
     parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
+    parser.add_argument("--dj-plan", action="store_true", help="Analyze tracks and write next-transition metadata to state/history.")
+    parser.add_argument("--dj-cache", type=Path, default=DEFAULT_DJ_CACHE)
+    parser.add_argument("--analysis-sample-rate", type=int, default=44100)
+    parser.add_argument("--max-pitch-shift", type=int, default=2)
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--no-auto-listeners", action="store_true")
