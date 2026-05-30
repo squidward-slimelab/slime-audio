@@ -51,6 +51,7 @@ Keep this skill generic and portable.
 5. Analyze and rank transitions:
 
    ```bash
+   python3 scripts/slime_audio_dj.py structure ./track.flac
    python3 scripts/slime_audio_dj.py plan --playlist runtime/current-playlist.txt
    python3 scripts/slime_audio_dj.py rank ./current-track.flac --playlist runtime/candidates.txt --limit 12
    ```
@@ -85,6 +86,7 @@ The DJ should host the set, not just play files.
 - Keep commentary short and focused on the music: mood, texture, rhythm, genre lineage, energy, transition intent, or why the next track fits.
 - Use artist, lyrics, and release context when available, but verify uncertain facts before saying them.
 - Look ahead for likely tension points using energy, BPM, key relation, beat offset, track position, and transition notes.
+- Use `scripts/slime_audio_dj.py structure` to find raw-audio intro, breakdown, build, drop, outro, and pre-drop lean-in windows before placing commentary.
 - Keep commentary planning separate from the music queue so new lean-ins can be added without restarting playback.
 
 ## Lean-Ins

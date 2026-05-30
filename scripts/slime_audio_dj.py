@@ -25,6 +25,23 @@ MINOR_CAMELOT = (5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10)
 
 
 @dataclass(frozen=True)
+class StructureWindow:
+    kind: str
+    start_ms: int
+    end_ms: int
+    confidence: float
+    reason: str
+
+
+@dataclass(frozen=True)
+class BeatGrid:
+    bpm: float | None
+    beat_offset_ms: int | None
+    phrase_beats: int
+    phrase_ms: int | None
+
+
+@dataclass(frozen=True)
 class TrackAnalysis:
     path: str
     duration_s: float
@@ -39,6 +56,8 @@ class TrackAnalysis:
     energy: float
     loudness_db: float
     confidence: dict[str, float]
+    beatgrid: BeatGrid | None = None
+    structure: list[StructureWindow] | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +171,163 @@ def estimate_bpm(envelope: list[float], frame_ms: int = 46) -> tuple[float | Non
     return round(bpm, 2), beat_offset_ms, round(confidence, 3)
 
 
+def beat_grid(bpm: float | None, beat_offset_ms: int | None, phrase_beats: int = 32) -> BeatGrid:
+    phrase_ms = None
+    if bpm:
+        phrase_ms = int(round((60_000 / bpm) * phrase_beats))
+    return BeatGrid(bpm=bpm, beat_offset_ms=beat_offset_ms, phrase_beats=phrase_beats, phrase_ms=phrase_ms)
+
+
+def smooth(values: list[float], window: int) -> list[float]:
+    if not values or window <= 1:
+        return values[:]
+    half = window // 2
+    smoothed = []
+    for index in range(len(values)):
+        start = max(0, index - half)
+        end = min(len(values), index + half + 1)
+        smoothed.append(sum(values[start:end]) / (end - start))
+    return smoothed
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * fraction)))
+    return ordered[index]
+
+
+def frame_to_ms(index: int, frame_ms: int) -> int:
+    return int(index * frame_ms)
+
+
+def align_to_phrase(ms: int, grid: BeatGrid) -> int:
+    if grid.beat_offset_ms is None or grid.phrase_ms is None:
+        return max(0, ms)
+    if ms <= grid.beat_offset_ms:
+        return max(0, grid.beat_offset_ms)
+    phrases = round((ms - grid.beat_offset_ms) / grid.phrase_ms)
+    return max(0, grid.beat_offset_ms + (phrases * grid.phrase_ms))
+
+
+def detect_structure_windows(
+    envelope: list[float],
+    bpm: float | None,
+    beat_offset_ms: int | None,
+    duration_s: float,
+    frame_ms: int = 46,
+) -> list[StructureWindow]:
+    if not envelope or duration_s <= 0:
+        return []
+    grid = beat_grid(bpm, beat_offset_ms)
+    phrase_ms = grid.phrase_ms or 16_000
+    min_window_ms = max(4_000, phrase_ms // 2)
+    max_ms = int(duration_s * 1000)
+    normalized = []
+    high = max(percentile(envelope, 0.95), 1.0)
+    for value in envelope:
+        normalized.append(min(1.0, value / high))
+    window_frames = max(3, round(min_window_ms / frame_ms))
+    energy = smooth(normalized, window_frames)
+    low_threshold = max(0.10, percentile(energy, 0.25))
+    high_threshold = max(low_threshold + 0.10, percentile(energy, 0.72))
+    windows: list[StructureWindow] = []
+
+    def add(kind: str, start_ms: int, end_ms: int, confidence: float, reason: str) -> None:
+        start_ms = max(0, min(max_ms, align_to_phrase(start_ms, grid)))
+        aligned_end = align_to_phrase(end_ms, grid) or end_ms
+        end_ms = max(start_ms + min_window_ms, min(max_ms, aligned_end))
+        end_ms = min(max_ms, end_ms)
+        if end_ms - start_ms >= 1000:
+            windows.append(StructureWindow(kind, start_ms, end_ms, round(max(0.0, min(1.0, confidence)), 3), reason))
+
+    intro_end = min(max_ms, phrase_ms if max_ms < phrase_ms * 4 else phrase_ms * 2)
+    if intro_end > 0:
+        add("intro", 0, intro_end, 0.55, "opening phrase region")
+
+    outro_start = max(0, max_ms - intro_end)
+    if outro_start > 0:
+        add("outro", outro_start, max_ms, 0.5, "ending phrase region")
+
+    for index in range(1, len(energy) - 1):
+        previous = energy[index - 1]
+        current = energy[index]
+        nxt = energy[index + 1]
+        if previous < low_threshold and current < low_threshold and nxt > current:
+            start_ms = frame_to_ms(index, frame_ms)
+            add("breakdown", start_ms, start_ms + min_window_ms, 0.6 + (low_threshold - current), "sustained lower-energy section")
+        rise = nxt - previous
+        if current < high_threshold and rise > 0.08:
+            start_ms = frame_to_ms(index, frame_ms)
+            add("build", start_ms, start_ms + min_window_ms, 0.55 + rise, "energy rising into a likely transition")
+        if current >= high_threshold and previous < high_threshold:
+            start_ms = frame_to_ms(index, frame_ms)
+            add("drop", start_ms, start_ms + min_window_ms, 0.65 + (current - high_threshold), "energy crosses high threshold")
+
+    if not any(window.kind == "build" for window in windows) and len(energy) > window_frames + 1:
+        rises = [
+            (energy[index + window_frames] - energy[index], index)
+            for index in range(0, len(energy) - window_frames)
+        ]
+        strongest_rise, rise_index = max(rises, default=(0.0, 0))
+        if strongest_rise > 0.04:
+            start_ms = frame_to_ms(rise_index, frame_ms)
+            add("build", start_ms, start_ms + min_window_ms, 0.55 + strongest_rise, "strongest sustained energy rise")
+
+    deduped: list[StructureWindow] = []
+    seen: set[tuple[str, int]] = set()
+    for window in sorted(windows, key=lambda item: (item.start_ms, item.kind, -item.confidence)):
+        bucket = (window.kind, window.start_ms // max(1, phrase_ms))
+        if bucket in seen:
+            continue
+        seen.add(bucket)
+        deduped.append(window)
+    return deduped[:24]
+
+
+def suggested_lean_in_windows(structure: list[StructureWindow]) -> list[dict[str, object]]:
+    suggestions = []
+    for window in structure:
+        if window.kind in {"breakdown", "build", "intro"}:
+            suggestions.append(
+                {
+                    "at_ms": window.start_ms,
+                    "kind": window.kind,
+                    "confidence": window.confidence,
+                    "reason": f"{window.kind} window: {window.reason}",
+                }
+            )
+        elif window.kind == "drop":
+            suggestions.append(
+                {
+                    "at_ms": max(0, window.start_ms - 1500),
+                    "kind": "pre-drop",
+                    "confidence": window.confidence,
+                    "reason": "speak just before the detected drop, then get out",
+                }
+            )
+    return suggestions[:12]
+
+
+def coerce_structure(values: list[StructureWindow] | list[dict] | None) -> list[StructureWindow]:
+    result = []
+    for value in values or []:
+        if isinstance(value, StructureWindow):
+            result.append(value)
+        elif isinstance(value, dict):
+            result.append(StructureWindow(**value))
+    return result
+
+
+def beatgrid_asdict(value: BeatGrid | dict | None) -> dict | None:
+    if value is None:
+        return None
+    if isinstance(value, BeatGrid):
+        return asdict(value)
+    return value
+
+
 def goertzel_power(samples: list[float], rate: int, frequency: float) -> float:
     if not samples:
         return 0.0
@@ -234,6 +410,8 @@ def analyze_track(path: Path, backend: str = "auto", sample_rate: int = 44_100) 
     bpm, beat_offset_ms, bpm_confidence = estimate_bpm(envelope)
     tonic, mode, key_confidence = estimate_key(frames, rate)
     loudness_db = 20 * math.log10(max(rms, 1.0) / 32768.0)
+    grid = beat_grid(bpm, beat_offset_ms)
+    structure = detect_structure_windows(envelope, bpm, beat_offset_ms, duration_s)
     return TrackAnalysis(
         path=str(path),
         duration_s=round(duration_s, 3),
@@ -248,6 +426,8 @@ def analyze_track(path: Path, backend: str = "auto", sample_rate: int = 44_100) 
         energy=round(min(1.0, rms / 32768.0), 4),
         loudness_db=round(loudness_db, 2),
         confidence={"bpm": bpm_confidence, "key": key_confidence},
+        beatgrid=grid,
+        structure=structure,
     )
 
 
@@ -386,6 +566,13 @@ def main() -> int:
     rank_parser.add_argument("--max-pitch-shift", type=int, default=2)
     rank_parser.add_argument("--limit", type=int, default=10)
 
+    structure_parser = sub.add_parser("structure")
+    structure_parser.add_argument("tracks", nargs="*")
+    structure_parser.add_argument("--playlist", type=Path)
+    structure_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    structure_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
+    structure_parser.add_argument("--sample-rate", type=int, default=44_100)
+
     args = parser.parse_args()
     tracks = parse_track_list(args.tracks, args.playlist)
     if args.command == "rank":
@@ -402,6 +589,26 @@ def main() -> int:
         ]
         plans.sort(key=lambda plan: plan.score, reverse=True)
         print(json.dumps([asdict(plan) for plan in plans[: args.limit]], indent=2, sort_keys=True))
+        return 0
+    if args.command == "structure":
+        print(
+            json.dumps(
+                [
+                    {
+                        "path": analysis.path,
+                        "duration_s": analysis.duration_s,
+                        "bpm": analysis.bpm,
+                        "beat_offset_ms": analysis.beat_offset_ms,
+                        "beatgrid": beatgrid_asdict(analysis.beatgrid),
+                        "structure": [asdict(window) for window in coerce_structure(analysis.structure)],
+                        "lean_in_suggestions": suggested_lean_in_windows(coerce_structure(analysis.structure)),
+                    }
+                    for analysis in analyses
+                ],
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     plans = [

@@ -7,11 +7,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_dj import (
     TrackAnalysis,
+    beat_grid,
     camelot,
+    detect_structure_windows,
     estimate_bpm,
     key_match,
     relative_tonic,
     semitone_distance,
+    suggested_lean_in_windows,
     transition_plan,
 )
 
@@ -88,6 +91,25 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertIsNotNone(bpm)
         self.assertAlmostEqual(bpm, 118.58, places=1)
         self.assertGreaterEqual(confidence, 0.0)
+
+    def test_beat_grid_calculates_phrase_length(self):
+        grid = beat_grid(120.0, 250)
+
+        self.assertEqual(grid.beat_offset_ms, 250)
+        self.assertEqual(grid.phrase_beats, 32)
+        self.assertEqual(grid.phrase_ms, 16000)
+
+    def test_detect_structure_finds_drop_after_energy_rise(self):
+        # 46 ms frames, roughly 60 seconds. Start low, rise, then hit a high-energy section.
+        envelope = ([100.0] * 300) + ([250.0 + index * 6 for index in range(120)]) + ([1200.0] * 900)
+
+        windows = detect_structure_windows(envelope, 120.0, 0, duration_s=len(envelope) * 0.046)
+        kinds = [window.kind for window in windows]
+        suggestions = suggested_lean_in_windows(windows)
+
+        self.assertIn("build", kinds)
+        self.assertIn("drop", kinds)
+        self.assertTrue(any(item["kind"] == "pre-drop" for item in suggestions))
 
 
 if __name__ == "__main__":

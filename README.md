@@ -13,6 +13,7 @@ Download the Windows installer from GitHub releases.
 - `scripts/slime_audio_drops.py`: watches Spotify playback and sends timed phrase drops during specific songs.
 - `scripts/slime_audio_stream.py`: decodes a local audio file and streams it to any combo of discovered receivers with one synced start timestamp.
 - `scripts/slime_audio_session.py`: validates planned live-mix sessions with up to four decks, arbitrary clip start times, trims, mic lean-ins, and automation envelopes.
+- `scripts/slime_audio_web.py`: serves the read-only now-playing, scrub bar, and canonical DJ session timeline dashboard.
 - `scripts/slime_audio_candidates.py`: keeps live set constraints and ranks database-backed candidate tracks for future queue/session planning.
 - `scripts/slime_audio_dj.py`: analyzes local tracks for BPM, beat offset, key, Camelot code, energy, and transition compatibility.
 - `scripts/slime_music_library.py`: indexes mounted Samba music shares into SQLite, combines duplicates, and picks the strongest server copy.
@@ -149,6 +150,7 @@ SlimeAudio has a first-pass DJ brain for local files. It caches track metadata i
 
 ```bash
 python3 scripts/slime_audio_dj.py analyze ./track-a.wav ./track-b.wav
+python3 scripts/slime_audio_dj.py structure ./track-a.wav
 python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
 python3 scripts/slime_audio_dj.py rank ./now-playing.wav --playlist runtime/candidates.txt --limit 8
 python3 scripts/slime_audio_playlist_runner.py --playlist runtime/late-friday-fresh-playlist.txt --target all --dj-plan --dry-run
@@ -161,6 +163,8 @@ Transition plans include:
 - relative major/minor rotation matches
 - phrase wait target, currently 32 beats
 - notes when a transition needs a longer blend or bridge
+
+Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
 
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 
@@ -183,6 +187,16 @@ python3 scripts/slime_audio_stream.py runtime/mix-session-render.wav --target al
 The first implementation validates and edits the session format. The playback engine should consume this format next, keeping the current FFmpeg multicast path stable while adding a mutable schedule/control API.
 
 Lean-ins are scheduled session events, not immediate side streams. A lean-in has an exact mix timeline `start`, spoken text, voice `volume`, and paired `duck_volume`/`lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
+
+## Web Dashboard
+
+The dashboard is local and read-only. It serves current runner state as JSON and renders the browser UI from `web/slime-audio/`.
+
+```bash
+python3 scripts/slime_audio_web.py --state runtime/saturday-fresh-day-state.json --port 8765
+```
+
+Open `http://127.0.0.1:8765`. The browser polls `/api/state` every few seconds, shows the current track and scrub progress from `started_at`, and draws one session timeline. If `runtime/mix-session.json` exists, it shows native clips, vocal drops, and automation points. Until runners write native session files, legacy playlist runner state is projected into the same session shape without probing every audio file on load.
 
 ## Candidate Selection And Set Constraints
 
