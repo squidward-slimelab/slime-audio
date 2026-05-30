@@ -73,7 +73,17 @@ jobs:
       - name: Bundle ffplay
         shell: pwsh
         run: |
-          Copy-Item (Get-Command ffplay.exe).Source artifacts/slime-audio-tray-win-x64/ffplay.exe
+          $ffplay = Get-ChildItem "$env:ChocolateyInstall\lib\ffmpeg" -Recurse -Filter ffplay.exe |
+            Where-Object { $_.FullName -like "*\tools\ffmpeg\bin\ffplay.exe" } |
+            Select-Object -First 1
+          if (-not $ffplay) {
+            throw "Could not find real ffplay.exe in Chocolatey ffmpeg package"
+          }
+          Copy-Item $ffplay.FullName artifacts/slime-audio-tray-win-x64/ffplay.exe
+          $bundled = Get-Item artifacts/slime-audio-tray-win-x64/ffplay.exe
+          if ($bundled.Length -lt 1000000) {
+            throw "Bundled ffplay.exe is too small; refusing to ship a Chocolatey shim"
+          }
       - run: choco install innosetup --no-progress -y
       - name: Build installer
         shell: pwsh

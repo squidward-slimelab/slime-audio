@@ -182,7 +182,25 @@ internal sealed class MulticastReceiver : IDisposable
                 Arguments = args,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                RedirectStandardError = true,
             });
+            if (_process is not null)
+            {
+                var process = _process;
+                process.EnableRaisingEvents = true;
+                process.ErrorDataReceived += (_, e) =>
+                {
+                    if (!string.IsNullOrWhiteSpace(e.Data))
+                    {
+                        SetStatus(TrimStatus(e.Data));
+                    }
+                };
+                process.Exited += (_, _) =>
+                {
+                    SetStatus($"Shared stream exited: {process.ExitCode}");
+                };
+                process.BeginErrorReadLine();
+            }
             SetStatus($"Shared stream listening on {_options.Group}:{_options.Port}");
         }
         catch (Exception ex)
@@ -207,6 +225,8 @@ internal sealed class MulticastReceiver : IDisposable
         _lastStatus = status;
         StatusChanged?.Invoke(this, status);
     }
+
+    private static string TrimStatus(string status) => status.Length > 180 ? status[..180] : status;
 
     private static string ResolveToolPath(string fileName)
     {
