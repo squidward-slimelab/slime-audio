@@ -31,12 +31,13 @@ internal static class Program
     }
 }
 
-internal sealed record MulticastOptions(string Group, int Port)
+internal sealed record MulticastOptions(string Group, int Port, int SnapcastPort)
 {
     public static MulticastOptions Parse(string[] args)
     {
         var group = "239.77.77.77";
         var port = 47778;
+        var snapcastPort = 1704;
         for (var i = 0; i < args.Length - 1; i++)
         {
             if (args[i] == "--multicast-group")
@@ -47,8 +48,12 @@ internal sealed record MulticastOptions(string Group, int Port)
             {
                 port = parsedPort;
             }
+            else if (args[i] == "--snapcast-port" && int.TryParse(args[i + 1], out var parsedSnapcastPort))
+            {
+                snapcastPort = parsedSnapcastPort;
+            }
         }
-        return new MulticastOptions(group, port);
+        return new MulticastOptions(group, port, snapcastPort);
     }
 }
 
@@ -82,7 +87,7 @@ internal sealed class TrayContext : ApplicationContext
         };
         _muteItem.CheckedChanged += (_, _) => ApplyMuteMenuChange();
         _icon.ContextMenuStrip.Items.Add(_muteItem);
-        _icon.ContextMenuStrip.Items.Add("Start shared stream listener", null, (_, _) => _multicast.Start());
+        _icon.ContextMenuStrip.Items.Add("Start local snapclient", null, (_, _) => _multicast.Start("127.0.0.1"));
         _icon.ContextMenuStrip.Items.Add("Stop shared stream listener", null, (_, _) => _multicast.Stop());
         _icon.ContextMenuStrip.Items.Add("Check for updates", null, async (_, _) => await CheckForUpdates());
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
@@ -163,22 +168,20 @@ internal sealed class MulticastReceiver : IDisposable
         _options = options;
     }
 
-    public void Start()
+    public void Start(string serverHost)
     {
         if (_process is { HasExited: false })
         {
-            SetStatus($"Shared stream already listening on {_options.Group}:{_options.Port}");
+            SetStatus($"Snapclient already connected to {serverHost}:{_options.SnapcastPort}");
             return;
         }
 
         try
         {
-            var args =
-                "-hide_banner -loglevel warning -nodisp -fflags nobuffer -flags low_delay " +
-                $"-i \"udp://@{_options.Group}:{_options.Port}?overrun_nonfatal=1&fifo_size=5000000\"";
+            var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
             _process = Process.Start(new ProcessStartInfo
             {
-                FileName = ResolveToolPath("ffplay.exe"),
+                FileName = ResolveToolPath("snapclient.exe"),
                 Arguments = args,
                 UseShellExecute = false,
                 CreateNoWindow = true,
@@ -201,11 +204,11 @@ internal sealed class MulticastReceiver : IDisposable
                 };
                 process.BeginErrorReadLine();
             }
-            SetStatus($"Shared stream listening on {_options.Group}:{_options.Port}");
+            SetStatus($"Snapclient connected to {serverHost}:{_options.SnapcastPort}");
         }
         catch (Exception ex)
         {
-            SetStatus($"Shared stream failed: {ex.Message}");
+            SetStatus($"Snapclient failed: {ex.Message}");
         }
     }
 
@@ -217,7 +220,7 @@ internal sealed class MulticastReceiver : IDisposable
         }
         _process?.Dispose();
         _process = null;
-        SetStatus("Shared stream stopped");
+        SetStatus("Snapclient stopped");
     }
 
     private void SetStatus(string status)
@@ -340,7 +343,7 @@ internal sealed class AudioReceiver : IDisposable
 
         if (text == ControlMessages.SharedStreamStart)
         {
-            _multicast.Start();
+            _multicast.Start(result.RemoteEndPoint.Address.ToString());
             return true;
         }
 

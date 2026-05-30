@@ -23,6 +23,7 @@ internal sealed record HeadlessOptions(
     int Port,
     string MulticastGroup,
     int MulticastPort,
+    int SnapcastPort,
     bool NoAudio,
     int BufferMs,
     bool StartMuted)
@@ -32,6 +33,7 @@ internal sealed record HeadlessOptions(
         var port = 47777;
         var multicastGroup = "239.77.77.77";
         var multicastPort = 47778;
+        var snapcastPort = 1704;
         var noAudio = false;
         var bufferMs = 100;
         var startMuted = false;
@@ -51,6 +53,10 @@ internal sealed record HeadlessOptions(
                     multicastPort = parsedMulticastPort;
                     i++;
                     break;
+                case "--snapcast-port" when i + 1 < args.Length && int.TryParse(args[i + 1], out var parsedSnapcastPort):
+                    snapcastPort = parsedSnapcastPort;
+                    i++;
+                    break;
                 case "--no-audio":
                     noAudio = true;
                     break;
@@ -62,13 +68,13 @@ internal sealed record HeadlessOptions(
                     i++;
                     break;
                 case "--help":
-                    Console.WriteLine("Usage: SlimeAudio.Headless [--port 47777] [--no-audio] [--multicast-group 239.77.77.77] [--multicast-port 47778]");
+                    Console.WriteLine("Usage: SlimeAudio.Headless [--port 47777] [--no-audio] [--snapcast-port 1704]");
                     Environment.Exit(0);
                     break;
             }
         }
 
-        return new HeadlessOptions(port, multicastGroup, multicastPort, noAudio, bufferMs, startMuted);
+        return new HeadlessOptions(port, multicastGroup, multicastPort, snapcastPort, noAudio, bufferMs, startMuted);
     }
 }
 
@@ -149,7 +155,7 @@ internal sealed class HeadlessReceiver : IDisposable
         }
         if (text == ControlMessages.SharedStreamStart)
         {
-            StartMulticast();
+            StartMulticast(result.RemoteEndPoint.Address.ToString());
             return true;
         }
         if (text == ControlMessages.SharedStreamStop)
@@ -193,30 +199,28 @@ internal sealed class HeadlessReceiver : IDisposable
         session.TryStart();
     }
 
-    private void StartMulticast()
+    private void StartMulticast(string serverHost)
     {
         if (_options.NoAudio)
         {
-            SetMulticastStatus("multicast ignored because audio sink is disabled");
+            SetMulticastStatus("snapclient ignored because audio sink is disabled");
             return;
         }
         if (_multicastProcess is { HasExited: false })
         {
-            SetMulticastStatus("multicast listener already running");
+            SetMulticastStatus("snapclient already running");
             return;
         }
 
-        var args =
-            "-hide_banner -loglevel warning -nodisp -fflags nobuffer -flags low_delay " +
-            $"-i \"udp://@{_options.MulticastGroup}:{_options.MulticastPort}?overrun_nonfatal=1&fifo_size=5000000\"";
+        var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
         _multicastProcess = Process.Start(new ProcessStartInfo
         {
-            FileName = "ffplay",
+            FileName = "snapclient",
             Arguments = args,
             UseShellExecute = false,
             CreateNoWindow = true,
         });
-        SetMulticastStatus($"multicast listening on {_options.MulticastGroup}:{_options.MulticastPort}");
+        SetMulticastStatus($"snapclient connected to {serverHost}:{_options.SnapcastPort}");
     }
 
     private void StopMulticast()
@@ -227,7 +231,7 @@ internal sealed class HeadlessReceiver : IDisposable
         }
         _multicastProcess?.Dispose();
         _multicastProcess = null;
-        SetMulticastStatus("multicast stopped");
+        SetMulticastStatus("snapclient stopped");
     }
 
     private void SetMulticastStatus(string status)

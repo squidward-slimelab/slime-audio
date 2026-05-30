@@ -70,6 +70,19 @@ jobs:
       - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Tray/SlimeAudio.Tray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -p:IncludeSourceRevisionInInformationalVersion=false -o artifacts/slime-audio-tray-win-x64
       - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Send/SlimeAudio.Send.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -p:IncludeSourceRevisionInInformationalVersion=false -o artifacts/slime-audio-send-win-x64
       - run: choco install ffmpeg --no-progress -y
+      - name: Bundle snapclient
+        shell: pwsh
+        run: |
+          $snapVersion = "v0.35.0"
+          $zip = "$env:RUNNER_TEMP\snapclient_win64.zip"
+          $extract = "$env:RUNNER_TEMP\snapclient_win64"
+          Invoke-WebRequest "https://github.com/badaix/snapcast/releases/download/$snapVersion/snapclient_win64.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath $extract
+          Copy-Item "$extract\*" artifacts/slime-audio-tray-win-x64/ -Recurse -Force
+          $bundled = Get-Item artifacts/slime-audio-tray-win-x64/snapclient.exe
+          if ($bundled.Length -lt 1000000) {
+            throw "Bundled snapclient.exe is too small"
+          }
       - name: Bundle ffplay
         shell: pwsh
         run: |

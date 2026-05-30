@@ -116,6 +116,10 @@ def stream_command(args: argparse.Namespace, track: str) -> list[str]:
             command.append("--no-auto-listeners")
         if args.stop_listeners_when_done:
             command.append("--stop-listeners-when-done")
+    if args.mode == "snapcast":
+        command.extend(["--snapcast-port", str(args.snapcast_port)])
+        command.extend(["--snapcast-buffer-ms", str(args.snapcast_buffer_ms)])
+        command.extend(["--snapcast-fifo", str(args.snapcast_fifo)])
     return command
 
 
@@ -329,7 +333,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--target", action="append", default=None, help="Receiver name, host:port, or all")
     parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
+    parser.add_argument("--mode", choices=["packets", "multicast", "snapcast"], default="packets")
     parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     parser.add_argument("--discover-timeout-ms", type=int, default=4000)
     parser.add_argument("--delay-ms", type=int, default=7000)
@@ -346,6 +350,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pitch-shift", type=int, default=2)
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
+    parser.add_argument("--snapcast-port", type=int, default=1704)
+    parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
+    parser.add_argument("--snapcast-fifo", type=Path, default=Path("/tmp/slime-audio-snapfifo"))
     parser.add_argument("--no-auto-listeners", action="store_true")
     parser.add_argument("--stop-listeners-when-done", action="store_true")
     parser.add_argument("--dry-run", action="store_true")

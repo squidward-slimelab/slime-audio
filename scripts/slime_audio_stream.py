@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import shutil
 import socket
@@ -176,6 +177,13 @@ def require_ffplay() -> str:
     return ffplay
 
 
+def require_snapserver() -> str:
+    snapserver = shutil.which("snapserver")
+    if snapserver is None:
+        raise FileNotFoundError("snapserver is not installed")
+    return snapserver
+
+
 def convert_with_ffmpeg(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
     subprocess.run(
         [
@@ -269,6 +277,91 @@ def run_multicast_stream(
         ],
         check=True,
     )
+
+
+def run_snapcast_stream(
+    input_path: Path,
+    targets: list[Receiver],
+    fifo_path: Path,
+    port: int,
+    sample_rate: int,
+    channels: int,
+    buffer_ms: int,
+    delay_ms: int,
+) -> None:
+    try:
+        fifo_path.unlink()
+    except FileNotFoundError:
+        pass
+    os.mkfifo(fifo_path)
+    server = subprocess.Popen(
+        [
+            require_snapserver(),
+            "--config",
+            "/dev/null",
+            "--server.datadir",
+            "/tmp/slime-audio-snapserver",
+            "--http.enabled",
+            "false",
+            "--tcp.enabled",
+            "false",
+            "--stream.port",
+            str(port),
+            "--stream.buffer",
+            str(buffer_ms),
+            "--stream.source",
+            f"pipe://{fifo_path}?name=slime-audio&sampleformat={sample_rate}:16:{channels}&codec=flac",
+            "--logging.sink",
+            "stderr",
+            "--logging.filter",
+            "*:warning",
+        ],
+    )
+    time.sleep(0.8)
+    if server.poll() is not None:
+        raise subprocess.CalledProcessError(server.returncode or 1, "snapserver")
+
+    try:
+        send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
+        time.sleep(max(delay_ms, 0) / 1000)
+        try:
+            with fifo_path.open("wb") as fifo:
+                subprocess.run(
+                    [
+                        require_ffmpeg(),
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-re",
+                        "-i",
+                        str(input_path),
+                        "-vn",
+                        "-f",
+                        "s16le",
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ac",
+                        str(channels),
+                        "-ar",
+                        str(sample_rate),
+                        "pipe:1",
+                    ],
+                    stdout=fifo,
+                    check=True,
+                )
+        finally:
+            try:
+                fifo_path.unlink()
+            except FileNotFoundError:
+                pass
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
 
 
 def stream_wav_synced(wav_path: Path, targets: list[Receiver], delay_ms: int, packet_delay_ms: int) -> None:
@@ -529,9 +622,12 @@ def main() -> int:
     parser.add_argument("--discover-timeout-ms", type=int, default=2500)
     parser.add_argument("--include-muted", action="store_true", help="Include receivers that asked the server not to stream to them.")
     parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
-    parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
+    parser.add_argument("--mode", choices=["packets", "multicast", "snapcast"], default="packets")
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
+    parser.add_argument("--snapcast-port", type=int, default=1704)
+    parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
+    parser.add_argument("--snapcast-fifo", type=Path, default=Path("/tmp/slime-audio-snapfifo"))
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
     parser.add_argument("--chunk-ms", type=int, default=7)
@@ -577,6 +673,8 @@ def main() -> int:
             )
         if args.mode == "multicast":
             print(f"multicast {args.multicast_group}:{args.multicast_port}")
+        elif args.mode == "snapcast":
+            print(f"snapcast port={args.snapcast_port} fifo={args.snapcast_fifo}")
         return 0
 
     if args.start_listeners:
@@ -623,6 +721,24 @@ def main() -> int:
         finally:
             if args.stop_listeners_when_done:
                 send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
+        return 0
+
+    if args.mode == "snapcast":
+        print(
+            f"snapcast backend={args.backend} file={args.file} "
+            f"port={args.snapcast_port} targets={len(targets)}",
+            flush=True,
+        )
+        run_snapcast_stream(
+            args.file,
+            targets,
+            args.snapcast_fifo,
+            args.snapcast_port,
+            args.sample_rate,
+            args.channels,
+            args.snapcast_buffer_ms,
+            args.delay_ms,
+        )
         return 0
 
     effect = None
