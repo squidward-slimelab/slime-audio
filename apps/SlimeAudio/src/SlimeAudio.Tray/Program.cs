@@ -109,8 +109,6 @@ internal sealed class TrayContext : ApplicationContext
             _volumeMenu.DropDownItems.Add(item);
         }
         _icon.ContextMenuStrip.Items.Add(_volumeMenu);
-        _icon.ContextMenuStrip.Items.Add("Start local snapclient", null, (_, _) => _multicast.Start("127.0.0.1"));
-        _icon.ContextMenuStrip.Items.Add("Stop shared stream listener", null, (_, _) => _multicast.Stop());
         _icon.ContextMenuStrip.Items.Add("Check for updates", null, async (_, _) => await CheckForUpdates());
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
         UpdateMuteMenu();
@@ -239,6 +237,7 @@ internal sealed class MulticastReceiver : IDisposable
 
     public void Start(string serverHost)
     {
+        _serverHost = serverHost;
         if (_process is { HasExited: false })
         {
             SetStatus($"Snapclient already connected to {serverHost}:{_options.SnapcastPort}");
@@ -247,7 +246,6 @@ internal sealed class MulticastReceiver : IDisposable
 
         try
         {
-            _serverHost = serverHost;
             var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
             _process = Process.Start(new ProcessStartInfo
             {
@@ -281,6 +279,23 @@ internal sealed class MulticastReceiver : IDisposable
         {
             SetStatus($"Snapclient failed: {ex.Message}");
         }
+    }
+
+    public void RememberServer(string serverHost)
+    {
+        _serverHost = serverHost;
+        SetStatus($"Shared stream available at {serverHost}:{_options.SnapcastPort}");
+    }
+
+    public bool StartLastServer()
+    {
+        if (string.IsNullOrWhiteSpace(_serverHost))
+        {
+            return false;
+        }
+
+        Start(_serverHost);
+        return true;
     }
 
     public void Stop()
@@ -465,7 +480,16 @@ internal sealed class AudioReceiver : IDisposable
 
         if (text == ControlMessages.SharedStreamStart)
         {
-            _multicast.Start(result.RemoteEndPoint.Address.ToString());
+            var serverHost = result.RemoteEndPoint.Address.ToString();
+            if (StreamMuted)
+            {
+                _multicast.RememberServer(serverHost);
+                StatusChanged?.Invoke(this, "Shared stream ignored while muted");
+            }
+            else
+            {
+                _multicast.Start(serverHost);
+            }
             return true;
         }
 
@@ -551,7 +575,10 @@ internal sealed class AudioReceiver : IDisposable
         }
         else
         {
-            StatusChanged?.Invoke(this, $"Slime Audio listening on UDP {Port}");
+            if (!_multicast.StartLastServer())
+            {
+                StatusChanged?.Invoke(this, $"Slime Audio listening on UDP {Port}");
+            }
         }
     }
 
