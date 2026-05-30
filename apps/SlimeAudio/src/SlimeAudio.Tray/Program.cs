@@ -363,7 +363,7 @@ internal sealed class AudioReceiver : IDisposable
 
         if (packet.Type == AudioPacketType.End)
         {
-            session.MarkEnded();
+            session.MarkEnded(packet);
             return;
         }
 

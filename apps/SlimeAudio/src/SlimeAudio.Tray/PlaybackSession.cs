@@ -54,9 +54,9 @@ internal sealed class PlaybackSession : IDisposable
         return true;
     }
 
-    public void MarkEnded()
+    public void MarkEnded(AudioPacket packet)
     {
-        // BufferedWaveProvider drains naturally. A later pass can prune completed sessions.
+        _clockedSource.MarkEnded(packet.Sequence);
     }
 
     public void Apply(EffectEnvelope envelope)
@@ -106,6 +106,7 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
     private long _readCalls;
     private int _latestSequence = -1;
     private long _lastCurrentFrame;
+    private long? _endFrame;
 
     public WaveFormat WaveFormat { get; }
 
@@ -147,6 +148,15 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
         var framesRequested = count / channels;
         var targetFrame = ClockFrame();
         var firstFrame = SmoothFrame(targetFrame);
+        var endFrame = _endFrame;
+        if (endFrame is not null && firstFrame >= endFrame.Value)
+        {
+            return 0;
+        }
+        if (endFrame is not null)
+        {
+            framesRequested = (int)Math.Min(framesRequested, Math.Max(0, endFrame.Value - firstFrame));
+        }
         Interlocked.Increment(ref _readCalls);
         Interlocked.Exchange(ref _lastCurrentFrame, firstFrame);
 
@@ -193,6 +203,17 @@ internal sealed class ClockedPacketSampleProvider : ISampleProvider
         }
 
         return count;
+    }
+
+    public void MarkEnded(int endSequence)
+    {
+        lock (_lock)
+        {
+            if (_packetFrames > 0)
+            {
+                _endFrame = (long)Math.Max(0, endSequence) * _packetFrames;
+            }
+        }
     }
 
     public PlaybackSessionDiagnostics Diagnostics
