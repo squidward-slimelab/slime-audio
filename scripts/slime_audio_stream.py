@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import shutil
 import socket
 import struct
 import subprocess
+import threading
 import tempfile
 import time
 import uuid
@@ -22,6 +24,7 @@ RESET_AUDIO_MESSAGE = b"SLIME_AUDIO_RESET_AUDIO_V1"
 EFFECT_MESSAGE_PREFIX = b"SLIME_AUDIO_EFFECT_V1 "
 DEFAULT_PORT = 47777
 DEFAULT_LIVE_DELAY_MS = 7000
+DEFAULT_PREBUFFER_MS = 15000
 
 
 @dataclass(frozen=True)
@@ -353,6 +356,7 @@ def stream_live_synced(
     channels: int,
     delay_ms: int,
     chunk_ms: int,
+    prebuffer_ms: int,
     effect: tuple[int, int, int, int, float, float] | None = None,
     refresh_targets: Callable[[], list[Receiver]] | None = None,
     refresh_targets_ms: int = 0,
@@ -364,34 +368,45 @@ def stream_live_synced(
     session = uuid.uuid4()
     max_rtt = max((target.rtt_ms for target in targets), default=0.0)
     lead_ms = max(delay_ms, int(max_rtt + 1200))
-    sender_start_ms = int((time.time() * 1000) + lead_ms)
-    target_start_ms: dict[str, int] = {
-        target.endpoint: int(sender_start_ms + target.clock_offset_ms)
-        for target in targets
-    }
-    if effect is not None:
-        effect_offset_ms, fade_in_ms, hold_ms, fade_out_ms, volume, lowpass_hz = effect
-        send_effect_control(
-            targets,
-            delay_ms=lead_ms + effect_offset_ms,
-            fade_in_ms=fade_in_ms,
-            hold_ms=hold_ms,
-            fade_out_ms=fade_out_ms,
-            volume=volume,
-            lowpass_hz=lowpass_hz,
-        )
+    sender_start_ms: int | None = None
+    target_start_ms: dict[str, int] = {}
     chunk_frames = max(1, sample_rate * chunk_ms // 1000)
     frame_bytes = channels * 2
     chunk_bytes = chunk_frames * frame_bytes
+    prebuffer_frames = max(0, sample_rate * prebuffer_ms // 1000)
+    max_buffer_chunks = max(32, int(sample_rate * max(prebuffer_ms + 30000, chunk_ms * 32) / 1000 / chunk_frames))
+    decoded_chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=max_buffer_chunks)
+    decode_errors: list[BaseException] = []
     endpoints = [(target, (target.host, target.port)) for target in targets]
     refresh_every = refresh_targets_ms / 1000 if refresh_targets is not None and refresh_targets_ms > 0 else 0
     next_refresh = time.monotonic() + refresh_every if refresh_every else 0.0
-    started = time.monotonic()
     sequence = 0
     bytes_sent = 0
+    buffered_frames = 0
+    pending_payloads: list[bytes] = []
+    started: float | None = None
+
+    def decode() -> None:
+        try:
+            while True:
+                payload = decoder.stdout.read(chunk_bytes)
+                if not payload:
+                    break
+                if len(payload) % frame_bytes:
+                    payload = payload[: len(payload) - (len(payload) % frame_bytes)]
+                if payload:
+                    decoded_chunks.put(payload)
+        except BaseException as ex:
+            decode_errors.append(ex)
+        finally:
+            decoded_chunks.put(None)
+
+    decoder_thread = threading.Thread(target=decode, name="slime-audio-decoder", daemon=True)
+    decoder_thread.start()
 
     print(
         f"live backend={selected_backend} session={session} lead_ms={lead_ms} "
+        f"prebuffer_ms={prebuffer_ms} "
         f"targets={','.join(f'{target.machine_name}(rtt={target.rtt_ms:.1f}ms,offset={target.clock_offset_ms:.1f}ms)' for target in targets)}",
         flush=True,
     )
@@ -399,47 +414,79 @@ def stream_live_synced(
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             while True:
-                payload = decoder.stdout.read(chunk_bytes)
-                if not payload:
-                    break
-                if len(payload) % frame_bytes:
-                    payload = payload[: len(payload) - (len(payload) % frame_bytes)]
-                if not payload:
-                    continue
-                if refresh_every and time.monotonic() >= next_refresh:
-                    refreshed = refresh_targets()
-                    for target in refreshed:
-                        target_start_ms.setdefault(target.endpoint, int(sender_start_ms + target.clock_offset_ms))
-                    endpoints = [(target, (target.host, target.port)) for target in refreshed]
-                    next_refresh = time.monotonic() + refresh_every
+                payload = decoded_chunks.get()
+                if payload is None:
+                    if started is None and pending_payloads:
+                        payloads = pending_payloads
+                        pending_payloads = []
+                    else:
+                        break
+                else:
+                    if started is None:
+                        pending_payloads.append(payload)
+                        buffered_frames += len(payload) // frame_bytes
+                        if prebuffer_frames and buffered_frames < prebuffer_frames:
+                            continue
+                        payloads = pending_payloads
+                        pending_payloads = []
+                    else:
+                        payloads = [payload]
+                if started is None:
+                    started = time.monotonic()
+                    sender_start_ms = int((time.time() * 1000) + lead_ms)
+                    target_start_ms = {
+                        target.endpoint: int(sender_start_ms + target.clock_offset_ms)
+                        for target, _ in endpoints
+                    }
+                    if effect is not None:
+                        effect_offset_ms, fade_in_ms, hold_ms, fade_out_ms, volume, lowpass_hz = effect
+                        send_effect_control(
+                            [target for target, _ in endpoints],
+                            delay_ms=lead_ms + effect_offset_ms,
+                            fade_in_ms=fade_in_ms,
+                            hold_ms=hold_ms,
+                            fade_out_ms=fade_out_ms,
+                            volume=volume,
+                            lowpass_hz=lowpass_hz,
+                        )
+
+                for payload in payloads:
+                    if refresh_every and time.monotonic() >= next_refresh:
+                        refreshed = refresh_targets()
+                        for target in refreshed:
+                            if sender_start_ms is not None:
+                                target_start_ms.setdefault(target.endpoint, int(sender_start_ms + target.clock_offset_ms))
+                        endpoints = [(target, (target.host, target.port)) for target in refreshed]
+                        next_refresh = time.monotonic() + refresh_every
+                    for target, endpoint in endpoints:
+                        packet = encode_audio_packet(
+                            session,
+                            sequence,
+                            target_start_ms[target.endpoint],
+                            sample_rate,
+                            channels,
+                            payload,
+                        )
+                        sock.sendto(packet, endpoint)
+                    bytes_sent += len(payload)
+                    sequence += 1
+                    next_send = started + ((bytes_sent / frame_bytes) / sample_rate)
+                    sleep_for = next_send - time.monotonic()
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+
+            if started is not None:
                 for target, endpoint in endpoints:
-                    packet = encode_audio_packet(
+                    end = encode_audio_packet(
                         session,
                         sequence,
                         target_start_ms[target.endpoint],
                         sample_rate,
                         channels,
-                        payload,
+                        b"",
+                        packet_type=2,
                     )
-                    sock.sendto(packet, endpoint)
-                bytes_sent += len(payload)
-                sequence += 1
-                next_send = started + ((bytes_sent / frame_bytes) / sample_rate)
-                sleep_for = next_send - time.monotonic()
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
-
-            for target, endpoint in endpoints:
-                end = encode_audio_packet(
-                    session,
-                    sequence,
-                    target_start_ms[target.endpoint],
-                    sample_rate,
-                    channels,
-                    b"",
-                    packet_type=2,
-                )
-                sock.sendto(end, endpoint)
+                    sock.sendto(end, endpoint)
     finally:
         try:
             decoder.stdout.close()
@@ -448,6 +495,8 @@ def stream_live_synced(
         return_code = decoder.wait(timeout=5)
         if return_code not in (0, None):
             raise subprocess.CalledProcessError(return_code, selected_backend)
+        if decode_errors:
+            raise decode_errors[0]
 
     print(
         f"sent live session={session} bytes={bytes_sent} "
@@ -522,7 +571,8 @@ def main() -> int:
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--packet-delay-ms", type=int, default=45)
-    parser.add_argument("--chunk-ms", type=int, default=5)
+    parser.add_argument("--chunk-ms", type=int, default=7)
+    parser.add_argument("--prebuffer-ms", type=int, default=DEFAULT_PREBUFFER_MS)
     parser.add_argument("--refresh-targets-ms", type=int, default=3000, help="For --target all packet streams, rediscover subscribers while playing.")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
@@ -635,6 +685,7 @@ def main() -> int:
         args.channels,
         args.delay_ms,
         args.chunk_ms,
+        args.prebuffer_ms,
         effect,
         refresh_targets=refresh_targets,
         refresh_targets_ms=args.refresh_targets_ms,

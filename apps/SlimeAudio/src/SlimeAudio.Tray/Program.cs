@@ -207,6 +207,7 @@ internal sealed class MulticastReceiver : IDisposable
 
 internal sealed class AudioReceiver : IDisposable
 {
+    private const int ReceiveBufferBytes = 4 * 1024 * 1024;
     private readonly CancellationTokenSource _stop = new();
     private readonly MulticastReceiver _multicast;
     private readonly object _sessionsLock = new();
@@ -233,6 +234,7 @@ internal sealed class AudioReceiver : IDisposable
     public void Start()
     {
         _udp = new UdpClient(Port);
+        _udp.Client.ReceiveBufferSize = ReceiveBufferBytes;
         _ = Task.Run(ReceiveLoop);
         StatusChanged?.Invoke(this, $"Slime Audio listening on UDP {Port}");
     }
