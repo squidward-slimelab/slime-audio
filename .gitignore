@@ -6,5 +6,7 @@ __pycache__/
 .coverage
 dist/
 build/
+bin/
+obj/
 *.log
 runtime/

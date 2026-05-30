@@ -151,8 +151,12 @@ internal sealed class MulticastReceiver : IDisposable
 {
     private readonly MulticastOptions _options;
     private Process? _process;
+    private string? _lastStatus;
 
     public event EventHandler<string>? StatusChanged;
+    public bool IsRunning => _process is { HasExited: false };
+    public int? ExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
+    public string? LastStatus => _lastStatus;
 
     public MulticastReceiver(MulticastOptions options)
     {
@@ -163,28 +167,27 @@ internal sealed class MulticastReceiver : IDisposable
     {
         if (_process is { HasExited: false })
         {
-            StatusChanged?.Invoke(this, $"Shared stream already listening on {_options.Group}:{_options.Port}");
+            SetStatus($"Shared stream already listening on {_options.Group}:{_options.Port}");
             return;
         }
 
         try
         {
             var args =
-                $"-q udpsrc multicast-group={_options.Group} port={_options.Port} " +
-                "caps=\"application/x-rtp,media=audio,clock-rate=48000,encoding-name=L16,channels=2,payload=96\" " +
-                "! rtpL16depay ! audioconvert ! audioresample ! autoaudiosink sync=true";
+                "-hide_banner -loglevel warning -nodisp -fflags nobuffer -flags low_delay " +
+                $"-i \"udp://@{_options.Group}:{_options.Port}?overrun_nonfatal=1&fifo_size=5000000\"";
             _process = Process.Start(new ProcessStartInfo
             {
-                FileName = "gst-launch-1.0",
+                FileName = ResolveToolPath("ffplay.exe"),
                 Arguments = args,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             });
-            StatusChanged?.Invoke(this, $"Shared stream listening on {_options.Group}:{_options.Port}");
+            SetStatus($"Shared stream listening on {_options.Group}:{_options.Port}");
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke(this, $"Shared stream failed: {ex.Message}");
+            SetStatus($"Shared stream failed: {ex.Message}");
         }
     }
 
@@ -196,7 +199,19 @@ internal sealed class MulticastReceiver : IDisposable
         }
         _process?.Dispose();
         _process = null;
-        StatusChanged?.Invoke(this, "Shared stream stopped");
+        SetStatus("Shared stream stopped");
+    }
+
+    private void SetStatus(string status)
+    {
+        _lastStatus = status;
+        StatusChanged?.Invoke(this, status);
+    }
+
+    private static string ResolveToolPath(string fileName)
+    {
+        var local = Path.Combine(AppContext.BaseDirectory, fileName);
+        return File.Exists(local) ? local : fileName;
     }
 
     public void Dispose()
@@ -454,7 +469,10 @@ internal sealed class AudioReceiver : IDisposable
             maxBufferedPackets,
             maxBufferedPacketSpan,
             latestSequence,
-            latestSessionId);
+            latestSessionId,
+            _multicast.IsRunning,
+            _multicast.ExitCode,
+            _multicast.LastStatus);
     }
 
     public void Dispose()

@@ -7,14 +7,43 @@ on:
   push:
     paths:
       - "apps/SlimeAudio/**"
+      - "scripts/**"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
       - ".github/workflows/slime-audio.yml"
   pull_request:
     paths:
       - "apps/SlimeAudio/**"
+      - "scripts/**"
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
       - ".github/workflows/slime-audio.yml"
   workflow_dispatch:
 
 jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python
+        run: python -m compileall scripts src tests
+      - name: Run Python tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build Linux headless receiver
+        run: dotnet build apps/SlimeAudio/src/SlimeAudio.Headless/SlimeAudio.Headless.csproj -c Release
+      - name: Run protocol tests
+        run: dotnet test apps/SlimeAudio/tests/SlimeAudio.Protocol.Tests/SlimeAudio.Protocol.Tests.csproj -c Release --no-restore
+
   build:
     runs-on: windows-latest
     steps:
@@ -38,6 +67,11 @@ jobs:
           "SLIME_AUDIO_ASSEMBLY_VERSION=$($version.Split('+')[0])" >> $env:GITHUB_ENV
       - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Tray/SlimeAudio.Tray.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -p:IncludeSourceRevisionInInformationalVersion=false -o artifacts/slime-audio-tray-win-x64
       - run: dotnet publish apps/SlimeAudio/src/SlimeAudio.Send/SlimeAudio.Send.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -p:Version=$env:SLIME_AUDIO_ASSEMBLY_VERSION -p:InformationalVersion=$env:SLIME_AUDIO_VERSION -p:IncludeSourceRevisionInInformationalVersion=false -o artifacts/slime-audio-send-win-x64
+      - run: choco install ffmpeg --no-progress -y
+      - name: Bundle ffplay
+        shell: pwsh
+        run: |
+          Copy-Item (Get-Command ffplay.exe).Source artifacts/slime-audio-tray-win-x64/ffplay.exe
       - run: choco install innosetup --no-progress -y
       - name: Build installer
         shell: pwsh

@@ -60,7 +60,10 @@ public sealed record AudioDiagnostics(
     int MaxBufferedPackets,
     int MaxBufferedPacketSpan,
     int LatestSequence,
-    string? LatestSessionId);
+    string? LatestSessionId,
+    bool SharedStreamListening = false,
+    int? SharedStreamExitCode = null,
+    string? SharedStreamStatus = null);
 
 public sealed record EffectEnvelope(
     long StartUnixTimeMs,

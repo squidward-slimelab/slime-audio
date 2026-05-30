@@ -2,7 +2,7 @@
 
 Windows tray receiver and sender tooling for LAN audio broadcast.
 
-This is the first pass for house TTS and VLC-style broadcasts to Windows machines with speakers. Each receiver sits in the Windows tray and listens for UDP audio packets. The sender sends the same audio stream to one or more receivers with a future start timestamp so devices can begin together.
+This is the first pass for house TTS and shared audio broadcasts to Windows machines with speakers. Each receiver sits in the Windows tray and listens for UDP audio packets. The sender sends the same audio stream to one or more receivers with a future start timestamp so devices can begin together.
 
 ## Devices
 
@@ -31,7 +31,7 @@ choco install innosetup -y
 iscc apps/SlimeAudio/installer/SlimeAudio.iss
 ```
 
-GitHub Actions publishes `SlimeAudioSetup.exe`.
+GitHub Actions publishes `SlimeAudioSetup.exe`. The installer bundles `ffplay.exe` beside the tray app for shared-stream playback.
 
 ## Run Receiver
 
@@ -95,7 +95,7 @@ python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPON
 python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 ```
 
-The streamer prefers VLC/cvlc when installed and falls back to GStreamer. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one live RTP source. Multicast mode starts the selected receivers' shared stream listeners before playback.
+The streamer uses FFmpeg for decoding and shared-stream transport. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one shared FFmpeg UDP stream with `ffplay`. Multicast mode starts the selected receivers' shared stream listeners before playback.
 
 Receivers muted from the tray are excluded from `--target all` streams. Packet streams refresh discovered subscribers while playing, so muting a tray stops future packets within a few seconds instead of only taking effect on the next track. Use `--include-muted` only for diagnostics or intentional override.
 
@@ -104,6 +104,17 @@ python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
 python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
+
+## Linux Headless Receiver
+
+`SlimeAudio.Headless` is a cross-platform receiver for Linux debugging and CI. It speaks the same discovery, reset, packet-audio, and shared-stream control protocol as the Windows tray app, but runs as a console process.
+
+```bash
+dotnet run --project apps/SlimeAudio/src/SlimeAudio.Headless/SlimeAudio.Headless.csproj -c Release -- --port 47777
+dotnet run --project apps/SlimeAudio/src/SlimeAudio.Headless/SlimeAudio.Headless.csproj -c Release -- --port 47777 --no-audio
+```
+
+Use `--no-audio` for protocol/debug smoke tests without opening an audio device.
 
 ## Timed Spotify Drops
 
@@ -134,5 +145,5 @@ python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
 ## Design Notes
 
 - No remote volume control. Room volume is human-side until we have microphones or real SPL sensing.
-- UDP is fine for first-pass LAN TTS and bumpers. For long VLC relays, add packet loss recovery or TCP/WebRTC later.
+- UDP is fine for first-pass LAN TTS and bumpers. For long shared streams, prefer FFmpeg multicast mode over packet mode.
 - Time sync is coarse wall-clock sync right now. Next step is sender-side ping/offset estimation per receiver.

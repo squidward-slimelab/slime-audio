@@ -10,6 +10,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Send", "src\Slim
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Protocol.Tests", "tests\SlimeAudio.Protocol.Tests\SlimeAudio.Protocol.Tests.csproj", "{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{CCF08FEC-4FAA-4561-9CB3-EF376D765CC4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SlimeAudio.Headless", "src\SlimeAudio.Headless\SlimeAudio.Headless.csproj", "{4AADF2F1-8F6E-41E9-B6CC-4FE992DDDC54}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -32,5 +36,12 @@ Global
 		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{87797708-4F02-4E2B-8EA4-07CB3D0E2F45}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4AADF2F1-8F6E-41E9-B6CC-4FE992DDDC54}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4AADF2F1-8F6E-41E9-B6CC-4FE992DDDC54}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4AADF2F1-8F6E-41E9-B6CC-4FE992DDDC54}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4AADF2F1-8F6E-41E9-B6CC-4FE992DDDC54}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{4AADF2F1-8F6E-41E9-B6CC-4FE992DDDC54} = {CCF08FEC-4FAA-4561-9CB3-EF376D765CC4}
 	EndGlobalSection
 EndGlobal

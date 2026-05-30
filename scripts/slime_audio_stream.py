@@ -9,7 +9,6 @@ import socket
 import struct
 import subprocess
 import threading
-import tempfile
 import time
 import uuid
 import wave
@@ -63,6 +62,9 @@ def format_diagnostics(
         f"\tdiag_last_packet_age_ms={last_packet_age_ms:.0f}"
         f"\tdiag_resets={diagnostics.get('ResetCount', 0)}"
         f"\tdiag_decode_failures={diagnostics.get('DecodeFailures', 0)}"
+        f"\tshared_stream_listening={str(bool(diagnostics.get('SharedStreamListening'))).lower()}"
+        f"\tshared_stream_exit_code={diagnostics.get('SharedStreamExitCode')}"
+        f"\tshared_stream_status={diagnostics.get('SharedStreamStatus') or ''}"
     )
 
 
@@ -160,61 +162,46 @@ def parse_endpoint(value: str, default_port: int = DEFAULT_PORT) -> tuple[str, i
     return host, int(port_text)
 
 
-def convert_with_vlc(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
-    vlc = shutil.which("cvlc") or shutil.which("vlc")
-    if vlc is None:
-        raise FileNotFoundError("cvlc/vlc is not installed")
+def require_ffmpeg() -> str:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise FileNotFoundError("ffmpeg is not installed")
+    return ffmpeg
 
+
+def require_ffplay() -> str:
+    ffplay = shutil.which("ffplay")
+    if ffplay is None:
+        raise FileNotFoundError("ffplay is not installed")
+    return ffplay
+
+
+def convert_with_ffmpeg(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
     subprocess.run(
         [
-            vlc,
-            "-I",
-            "dummy",
-            "--no-video",
-            "--play-and-exit",
+            require_ffmpeg(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
             str(input_path),
-            f"--sout=#transcode{{acodec=s16l,channels={channels},samplerate={sample_rate}}}:std{{access=file,mux=wav,dst={output_path}}}",
-        ],
-        check=True,
-    )
-
-
-def convert_with_gstreamer(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
-    subprocess.run(
-        [
-            "gst-launch-1.0",
-            "-q",
-            "filesrc",
-            f"location={input_path}",
-            "!",
-            "decodebin",
-            "!",
-            "audioconvert",
-            "!",
-            "audioresample",
-            "!",
-            f"audio/x-raw,format=S16LE,channels={channels},rate={sample_rate}",
-            "!",
-            "wavenc",
-            "!",
-            "filesink",
-            f"location={output_path}",
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ac",
+            str(channels),
+            "-ar",
+            str(sample_rate),
+            str(output_path),
         ],
         check=True,
     )
 
 
 def convert_to_stream_wav(input_path: Path, output_path: Path, backend: str, sample_rate: int, channels: int) -> str:
-    if backend in {"auto", "vlc"}:
-        try:
-            convert_with_vlc(input_path, output_path, sample_rate, channels)
-            return "vlc"
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            if backend == "vlc":
-                raise
-
-    convert_with_gstreamer(input_path, output_path, sample_rate, channels)
-    return "gstreamer"
+    convert_with_ffmpeg(input_path, output_path, sample_rate, channels)
+    return "ffmpeg"
 
 
 def open_decoder_stdout(
@@ -223,54 +210,30 @@ def open_decoder_stdout(
     sample_rate: int,
     channels: int,
 ) -> tuple[subprocess.Popen[bytes], str]:
-    if backend in {"auto", "vlc"}:
-        vlc = shutil.which("cvlc") or shutil.which("vlc")
-        if vlc is not None:
-            return (
-                subprocess.Popen(
-                    [
-                        vlc,
-                        "-I",
-                        "dummy",
-                        "--no-video",
-                        "--play-and-exit",
-                        str(input_path),
-                        (
-                            f"--sout=#transcode{{acodec=s16l,channels={channels},samplerate={sample_rate}}}:"
-                            "std{access=file,mux=raw,dst=-}"
-                        ),
-                        "vlc://quit",
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                ),
-                "vlc",
-            )
-        if backend == "vlc":
-            raise FileNotFoundError("cvlc/vlc is not installed")
-
     return (
         subprocess.Popen(
             [
-                "gst-launch-1.0",
-                "-q",
-                "filesrc",
-                f"location={input_path}",
-                "!",
-                "decodebin",
-                "!",
-                "audioconvert",
-                "!",
-                "audioresample",
-                "!",
-                f"audio/x-raw,format=S16LE,channels={channels},rate={sample_rate}",
-                "!",
-                "fdsink",
-                "fd=1",
+                require_ffmpeg(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(input_path),
+                "-vn",
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                str(channels),
+                "-ar",
+                str(sample_rate),
+                "pipe:1",
             ],
             stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         ),
-        "gstreamer",
+        "ffmpeg",
     )
 
 
@@ -282,31 +245,27 @@ def run_multicast_stream(
     sample_rate: int,
     channels: int,
 ) -> None:
-    if backend == "vlc":
-        raise SystemExit("multicast mode currently uses gstreamer; use --backend auto or --backend gstreamer")
     subprocess.run(
         [
-            "gst-launch-1.0",
-            "-q",
-            "filesrc",
-            f"location={input_path}",
-            "!",
-            "decodebin",
-            "!",
-            "audioconvert",
-            "!",
-            "audioresample",
-            "!",
-            f"audio/x-raw,format=S16BE,channels={channels},rate={sample_rate}",
-            "!",
-            "rtpL16pay",
-            "pt=96",
-            "!",
-            "udpsink",
-            f"host={group}",
-            f"port={port}",
-            "auto-multicast=true",
-            "ttl-mc=2",
+            require_ffmpeg(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-re",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ac",
+            str(channels),
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-f",
+            "mpegts",
+            f"udp://{group}:{port}?ttl=2&pkt_size=1316",
         ],
         check=True,
     )
@@ -569,7 +528,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--discover-timeout-ms", type=int, default=2500)
     parser.add_argument("--include-muted", action="store_true", help="Include receivers that asked the server not to stream to them.")
-    parser.add_argument("--backend", choices=["auto", "vlc", "gstreamer"], default="auto")
+    parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
@@ -655,7 +614,7 @@ def main() -> int:
             send_control(targets, SHARED_STREAM_START_MESSAGE, "started listener")
             time.sleep(max(args.delay_ms, 0) / 1000)
         print(
-            f"multicast backend=gstreamer file={args.file} "
+            f"multicast backend={args.backend} file={args.file} "
             f"group={args.multicast_group}:{args.multicast_port} targets={len(targets)}",
             flush=True,
         )

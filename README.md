@@ -12,6 +12,8 @@ Download the Windows installer from GitHub releases.
 - `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
 - `scripts/slime_audio_drops.py`: watches Spotify playback and sends timed phrase drops during specific songs.
 - `scripts/slime_audio_stream.py`: decodes a local audio file and streams it to any combo of discovered receivers with one synced start timestamp.
+- `scripts/slime_audio_dj.py`: analyzes local tracks for BPM, beat offset, key, Camelot code, energy, and transition compatibility.
+- `scripts/slime_music_library.py`: indexes mounted Samba music shares into SQLite, combines duplicates, and picks the strongest server copy.
 - `SlimeAudioSetup.exe`: real Windows installer with Start Menu shortcut and optional startup launch.
 - LAN discovery: `SlimeAudio.Send.exe discover`
 - Updates: tray menu `Check for updates`, or `SlimeAudio.Send.exe update --target HOST:47777`
@@ -104,7 +106,7 @@ Use `track_uri` for exact matching. `track_id` and `track_name` also work for qu
 
 ## Local File Streaming
 
-Stream any local audio file through the same SlimeAudio UDP path as voice. The script discovers receivers, accepts receiver names, `host:port`, or `all`, decodes with VLC when installed, and falls back to GStreamer.
+Stream any local audio file through the same SlimeAudio UDP path as voice. The script discovers receivers, accepts receiver names, `host:port`, or `all`, and decodes with FFmpeg.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT
@@ -113,12 +115,72 @@ python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
 
 All targets receive one shared session id and start timestamp, so connected rooms begin together. Use `--dry-run` to see resolved receivers without sending audio.
 
-For multi-room music, use multicast mode. This is one live RTP source instead of separate per-host packet playback. The streamer starts shared stream listeners on the selected receivers before playback; add `--stop-listeners-when-done` when you want it to shut them down after the file exits.
+For multi-room music, use multicast mode. This is one live FFmpeg UDP stream instead of separate per-host packet playback. The streamer starts shared stream listeners on the selected receivers before playback; add `--stop-listeners-when-done` when you want it to shut them down after the file exits.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
 python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
+```
+
+Linux debugging receiver:
+
+```bash
+dotnet run --project apps/SlimeAudio/src/SlimeAudio.Headless/SlimeAudio.Headless.csproj -c Release -- --port 47777 --no-audio
+```
+
+The headless receiver uses the same SlimeAudio UDP/control protocol as the tray app and gives Linux/CI a buildable receiver target.
+
+## DJ Analysis And Keymatching
+
+SlimeAudio has a first-pass DJ brain for local files. It caches track metadata in `runtime/dj-analysis-cache.json`, estimates BPM/key/energy, and plans adjacent transitions. The key planner treats relative minor/major as a real rotation of the same pitch set, so A minor to C major is a strong zero-pitch-shift match instead of a dumb "different mode" clash.
+
+```bash
+python3 scripts/slime_audio_dj.py analyze ./track-a.wav ./track-b.wav
+python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
+python3 scripts/slime_audio_dj.py rank ./now-playing.wav --playlist runtime/candidates.txt --limit 8
+python3 scripts/slime_audio_playlist_runner.py --playlist runtime/late-friday-fresh-playlist.txt --target all --dj-plan --dry-run
+```
+
+Transition plans include:
+
+- tempo shift for the next track
+- pitch shift in semitones when a small shift improves compatibility
+- relative major/minor rotation matches
+- phrase wait target, currently 32 beats
+- notes when a transition needs a longer blend or bridge
+
+The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
+
+## Samba Music Library
+
+The local library index lives at `runtime/slime-music-library.sqlite3`. It scans mounted Samba music roots, stores every audio file in SQLite, groups duplicates by normalized artist/album/title, and exposes two useful views:
+
+- `tracks`: one row per unique song with copy count, server count, preferred path, and every known location.
+- `preferred_files`: one chosen file per song, routed to the strongest server copy first.
+
+Default source priority:
+
+- `patrick:/mnt/rockhouse/Music` priority `100`
+- `robokrabs:/mnt/chum-bucket/Music` priority `90`
+- `spongebot:/mnt/pineapple/Music` priority `60`
+- `spatula:/mnt/krusty-krab/Music` priority `50`
+
+```bash
+python3 scripts/slime_music_library.py scan
+python3 scripts/slime_music_library.py stats
+python3 scripts/slime_music_library.py search "brianstorm"
+python3 scripts/slime_music_library.py tracks --duplicates-only --limit 25
+python3 scripts/slime_music_library.py copies "song title"
+python3 scripts/slime_music_library.py route /mnt/krusty-krab/Music/Artist/Album/song.flac
+```
+
+`scripts/slime_audio_playlist_runner.py` uses this database by default when it exists. If a playlist points at a weaker duplicate, the runner resolves it to the preferred copy before streaming and records both `track` and `resolved_track` in playback history. Disable that with `--no-prefer-library-source`.
+
+Custom mounts can be supplied as `server:share:priority:/absolute/path`:
+
+```bash
+python3 scripts/slime_music_library.py scan --source robokrabs:chum-bucket:90:/mnt/chum-bucket/Music
 ```
 
 ## Daemon

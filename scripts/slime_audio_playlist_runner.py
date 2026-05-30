@@ -3,19 +3,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import signal
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 from slime_audio_dj import analyze_with_cache, transition_plan
+from slime_music_library import DEFAULT_DB as DEFAULT_LIBRARY_DB
+from slime_music_library import connect as connect_library
+from slime_music_library import preferred_path_for_file
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLAYLIST = REPO_ROOT / "runtime" / "playlist.txt"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "playlist-state.json"
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
 DEFAULT_DJ_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
+_active_stream: subprocess.Popen[bytes] | None = None
 
 
 def load_playlist(path: Path) -> list[str]:
@@ -113,7 +119,64 @@ def stream_command(args: argparse.Namespace, track: str) -> list[str]:
     return command
 
 
+def resolve_stream_track(args: argparse.Namespace, track: str) -> str:
+    if not args.prefer_library_source or not args.library_db.exists():
+        return track
+    try:
+        conn = connect_library(args.library_db)
+        preferred = preferred_path_for_file(conn, Path(track))
+    except Exception:
+        return track
+    if preferred is None:
+        return track
+    return str(preferred)
+
+
+def stop_active_stream() -> None:
+    global _active_stream
+    process = _active_stream
+    if process is None or process.poll() is not None:
+        _active_stream = None
+        return
+
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        _active_stream = None
+        return
+
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        process.wait()
+    finally:
+        _active_stream = None
+
+
+def run_stream(command: list[str]) -> int:
+    global _active_stream
+    _active_stream = subprocess.Popen(command, cwd=REPO_ROOT, start_new_session=True)
+    try:
+        return _active_stream.wait()
+    finally:
+        stop_active_stream()
+
+
+def install_signal_handlers() -> None:
+    def handle_stop(signum: int, _frame: object) -> None:
+        stop_active_stream()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_stop)
+    signal.signal(signal.SIGINT, handle_stop)
+
+
 def run_playlist(args: argparse.Namespace) -> int:
+    install_signal_handlers()
     tracks = load_playlist(args.playlist)
     state = load_or_create_state(args.state, tracks, args.shuffle)
     order = state["order"]
@@ -128,7 +191,9 @@ def run_playlist(args: argparse.Namespace) -> int:
         print(f"index={index}/{len(order)}")
         print(f"current={state.get('current')}")
         for offset, track in enumerate(order[index : index + args.show_next], start=index + 1):
-            print(f"next {offset}/{len(order)} {track}")
+            resolved = resolve_stream_track(args, track)
+            suffix = f" -> {resolved}" if resolved != track else ""
+            print(f"next {offset}/{len(order)} {track}{suffix}")
         if analyses is not None:
             for offset in range(index, min(len(order) - 1, index + args.show_next - 1)):
                 plan = transition_plan(analyses[offset], analyses[offset + 1], args.max_pitch_shift)
@@ -142,11 +207,13 @@ def run_playlist(args: argparse.Namespace) -> int:
 
     while index < len(order):
         track = order[index]
+        stream_track = resolve_stream_track(args, track)
         active_transition = None
         if analyses is not None and index + 1 < len(analyses):
             active_transition = transition_plan(analyses[index], analyses[index + 1], args.max_pitch_shift)
         state["index"] = index
         state["current"] = track
+        state["resolved_current"] = stream_track
         state["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         state["playlist"] = str(args.playlist)
         if active_transition is not None:
@@ -191,6 +258,7 @@ def run_playlist(args: argparse.Namespace) -> int:
             {
                 "event": "track_started",
                 "index": index,
+                "resolved_track": stream_track,
                 "playlist": str(args.playlist),
                 "state": str(args.state),
                 "target": args.target,
@@ -199,17 +267,20 @@ def run_playlist(args: argparse.Namespace) -> int:
             },
         )
 
-        print(f"[{state['started_at']}] streaming {index + 1}/{len(order)} {track}", flush=True)
-        result = subprocess.run(stream_command(args, track), cwd=REPO_ROOT, check=False)
-        if result.returncode != 0:
-            print(f"stream failed rc={result.returncode} path={track}", flush=True)
+        if stream_track != track:
+            print(f"routing via preferred library source: {stream_track}", flush=True)
+        print(f"[{state['started_at']}] streaming {index + 1}/{len(order)} {stream_track}", flush=True)
+        returncode = run_stream(stream_command(args, stream_track))
+        if returncode != 0:
+            print(f"stream failed rc={returncode} path={track}", flush=True)
             append_history(
                 args.history_log,
                 {
                     "event": "track_failed",
                     "index": index,
                     "playlist": str(args.playlist),
-                    "returncode": result.returncode,
+                    "returncode": returncode,
+                    "resolved_track": stream_track,
                     "state": str(args.state),
                     "target": args.target,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -233,6 +304,7 @@ def run_playlist(args: argparse.Namespace) -> int:
                 "event": "track_completed",
                 "index": index - 1,
                 "playlist": str(args.playlist),
+                "resolved_track": stream_track,
                 "state": str(args.state),
                 "target": args.target,
                 "timestamp": state["completed_at"],
@@ -251,7 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target", action="append", default=None, help="Receiver name, host:port, or all")
     parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--mode", choices=["packets", "multicast"], default="packets")
-    parser.add_argument("--backend", choices=["auto", "vlc", "gstreamer"], default="auto")
+    parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     parser.add_argument("--discover-timeout-ms", type=int, default=4000)
     parser.add_argument("--delay-ms", type=int, default=7000)
     parser.add_argument("--chunk-ms", type=int, default=7)
@@ -261,6 +333,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
     parser.add_argument("--dj-plan", action="store_true", help="Analyze tracks and write next-transition metadata to state/history.")
     parser.add_argument("--dj-cache", type=Path, default=DEFAULT_DJ_CACHE)
+    parser.add_argument("--library-db", type=Path, default=DEFAULT_LIBRARY_DB)
+    parser.add_argument("--prefer-library-source", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--analysis-sample-rate", type=int, default=44100)
     parser.add_argument("--max-pitch-shift", type=int, default=2)
     parser.add_argument("--multicast-group", default="239.77.77.77")
