@@ -196,7 +196,16 @@ The dashboard is local and read-only. It serves current runner state as JSON and
 python3 scripts/slime_audio_web.py --state runtime/saturday-fresh-day-state.json --port 8765
 ```
 
-Open `http://127.0.0.1:8765`. The browser polls `/api/state` every few seconds, shows the current track and scrub progress from `started_at`, and draws one session timeline. If `runtime/mix-session.json` exists, it shows native clips, vocal drops, and automation points. Until runners write native session files, legacy playlist runner state is projected into the same session shape without probing every audio file on load.
+Open `http://127.0.0.1:8765`. If `--state` is omitted, the server uses the newest `runtime/*state.json`, which is usually the active playlist runner. The browser polls `/api/state` every few seconds, shows the current track and scrub progress from `started_at`, and draws one session timeline. If `runtime/mix-session.json` exists, it shows native clips, vocal drops, and automation points. Until runners write native session files, legacy playlist runner state is projected into the same session shape without probing every audio file on load.
+
+Install the dashboard as a user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/slime-audio-web.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now slime-audio-web.service
+```
 
 ## Candidate Selection And Set Constraints
 

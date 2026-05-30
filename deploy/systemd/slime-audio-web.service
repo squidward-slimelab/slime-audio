@@ -1,0 +1,13 @@
+[Unit]
+Description=Serve the SlimeAudio web dashboard
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/squidward/.openclaw/workspace/spotify
+ExecStart=/usr/bin/python3 /home/squidward/.openclaw/workspace/spotify/scripts/slime_audio_web.py --host 0.0.0.0 --port 8765
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

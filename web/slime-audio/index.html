@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SlimeAudio</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="now">
+        <div>
+          <p class="eyebrow">SlimeAudio</p>
+          <h1 id="track-title">waiting for state</h1>
+          <p id="track-meta" class="muted">no active track</p>
+        </div>
+        <div class="meters">
+          <div class="time-row">
+            <span id="elapsed">0:00</span>
+            <span id="duration">--:--</span>
+          </div>
+          <div class="scrub" aria-label="read only track progress">
+            <div id="scrub-fill"></div>
+          </div>
+          <p id="transition" class="transition"></p>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <span class="mode">session plan</span>
+        <span id="transport" class="transport">live timeline</span>
+        <span id="updated" class="muted"></span>
+      </section>
+
+      <section class="workspace">
+        <section class="panel timeline-panel">
+          <div class="timeline-head">
+            <div>
+              <h2 id="timeline-title">session timeline</h2>
+              <p id="timeline-subtitle" class="muted"></p>
+            </div>
+            <div id="summary" class="summary"></div>
+          </div>
+          <div id="time-axis" class="time-axis"></div>
+          <div id="timeline-scroll" class="timeline-scroll">
+            <div id="timeline" class="timeline"></div>
+          </div>
+        </section>
+
+        <aside class="panel inspector">
+          <div class="inspector-section">
+            <p class="eyebrow">current</p>
+            <h2 id="current-card-title">nothing loaded</h2>
+            <p id="current-card-meta" class="muted"></p>
+          </div>
+          <div class="inspector-section">
+            <p class="eyebrow">next up</p>
+            <div id="up-next" class="queue-list"></div>
+          </div>
+          <div class="inspector-section">
+            <p class="eyebrow">automation</p>
+            <div id="automation-list" class="queue-list"></div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="legend">
+        <span><b class="swatch current"></b>current</span>
+        <span><b class="swatch planned"></b>planned</span>
+        <span><b class="swatch done"></b>done</span>
+        <span><b class="swatch vocal"></b>vocal</span>
+        <span><b class="swatch automation"></b>automation</span>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
