@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh SlimeAudio music library database
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/squidward/.openclaw/workspace/spotify
+ExecStart=/usr/bin/python3 /home/squidward/.openclaw/workspace/spotify/scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

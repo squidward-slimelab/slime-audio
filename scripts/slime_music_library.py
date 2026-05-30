@@ -7,12 +7,14 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = REPO_ROOT / "runtime" / "slime-music-library.sqlite3"
+DEFAULT_TUNEBAT_LOCAL_ANALYZER = REPO_ROOT / "scripts" / "slime_tunebat_analyzer.js"
 AUDIO_EXTENSIONS = {
     ".aac",
     ".aif",
@@ -89,6 +91,31 @@ def init_db(conn: sqlite3.Connection) -> None:
             scanned_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS track_lyrics (
+            duplicate_key TEXT PRIMARY KEY,
+            lyrics TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS track_tunebat (
+            duplicate_key TEXT PRIMARY KEY,
+            tunebat_url TEXT NOT NULL DEFAULT '',
+            tunebat_title TEXT NOT NULL DEFAULT '',
+            tunebat_artist TEXT NOT NULL DEFAULT '',
+            key TEXT NOT NULL DEFAULT '',
+            mode TEXT NOT NULL DEFAULT '',
+            camelot TEXT NOT NULL DEFAULT '',
+            bpm REAL,
+            popularity INTEGER,
+            energy REAL,
+            danceability REAL,
+            happiness REAL,
+            raw_json TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_files_duplicate_key ON files(duplicate_key);
         CREATE INDEX IF NOT EXISTS idx_files_title ON files(normalized_title);
         CREATE INDEX IF NOT EXISTS idx_files_artist ON files(normalized_artist);
@@ -153,12 +180,28 @@ def init_db(conn: sqlite3.Connection) -> None:
                 preferred.server AS preferred_server,
                 preferred.share AS preferred_share,
                 preferred.quality_score AS preferred_quality_score,
+                lyrics.lyrics IS NOT NULL AS has_lyrics,
+                lyrics.source AS lyrics_source,
+                lyrics.source_url AS lyrics_url,
+                tunebat.tunebat_url,
+                tunebat.tunebat_title,
+                tunebat.tunebat_artist,
+                tunebat.key AS tunebat_key,
+                tunebat.mode AS tunebat_mode,
+                tunebat.camelot AS tunebat_camelot,
+                tunebat.bpm AS tunebat_bpm,
+                tunebat.popularity AS tunebat_popularity,
+                tunebat.energy AS tunebat_energy,
+                tunebat.danceability AS tunebat_danceability,
+                tunebat.happiness AS tunebat_happiness,
                 GROUP_CONCAT(sources.server || ':' || files.path, '\n') AS locations
             FROM duplicate_groups groups
             JOIN ranked ON ranked.duplicate_key = groups.duplicate_key AND ranked.row_number = 1
             JOIN preferred_files preferred ON preferred.id = ranked.id
             JOIN files ON files.duplicate_key = groups.duplicate_key
             JOIN sources ON sources.id = files.source_id
+            LEFT JOIN track_lyrics lyrics ON lyrics.duplicate_key = groups.duplicate_key
+            LEFT JOIN track_tunebat tunebat ON tunebat.duplicate_key = groups.duplicate_key
             GROUP BY groups.duplicate_key
             ORDER BY preferred.artist_guess, preferred.album_guess, preferred.title_guess;
         """
@@ -340,6 +383,16 @@ def print_json(value: object) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
+def read_json(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_text_value(path: Path | None, value: str | None) -> str:
+    if path is not None:
+        return path.read_text(encoding="utf-8")
+    return value or ""
+
+
 def command_stats(conn: sqlite3.Connection) -> None:
     summary = {
         "files": conn.execute("SELECT COUNT(*) AS value FROM files").fetchone()["value"],
@@ -371,6 +424,13 @@ def command_search(conn: sqlite3.Connection, query: str, limit: int) -> None:
             preferred_server,
             preferred_share,
             preferred_path,
+            has_lyrics,
+            lyrics_source,
+            tunebat_key,
+            tunebat_mode,
+            tunebat_camelot,
+            tunebat_bpm,
+            tunebat_url,
             copies,
             server_count,
             servers,
@@ -464,6 +524,13 @@ def command_tracks(conn: sqlite3.Connection, query: str | None, limit: int, dupl
             servers,
             preferred_server,
             preferred_path,
+            has_lyrics,
+            lyrics_source,
+            tunebat_key,
+            tunebat_mode,
+            tunebat_camelot,
+            tunebat_bpm,
+            tunebat_url,
             locations,
             duplicate_key
         FROM tracks
@@ -474,6 +541,255 @@ def command_tracks(conn: sqlite3.Connection, query: str | None, limit: int, dupl
         params,
     ).fetchall()
     print_json(rows_to_dicts(rows))
+
+
+def command_show(conn: sqlite3.Connection, duplicate_key_value: str, include_lyrics: bool) -> None:
+    row = conn.execute("SELECT * FROM tracks WHERE duplicate_key = ?", (duplicate_key_value,)).fetchone()
+    if row is None:
+        raise SystemExit(f"unknown duplicate_key: {duplicate_key_value}")
+    result = {key: row[key] for key in row.keys()}
+    if include_lyrics:
+        lyrics = conn.execute("SELECT lyrics FROM track_lyrics WHERE duplicate_key = ?", (duplicate_key_value,)).fetchone()
+        result["lyrics"] = lyrics["lyrics"] if lyrics is not None else None
+    print_json(result)
+
+
+def command_set_lyrics(
+    conn: sqlite3.Connection,
+    duplicate_key_value: str,
+    lyrics: str,
+    source: str,
+    source_url: str,
+    emit: bool = True,
+) -> None:
+    if not lyrics.strip():
+        raise SystemExit("lyrics cannot be empty")
+    now = time.time_ns()
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO track_lyrics(duplicate_key, lyrics, source, source_url, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(duplicate_key) DO UPDATE SET
+                lyrics=excluded.lyrics,
+                source=excluded.source,
+                source_url=excluded.source_url,
+                updated_at=excluded.updated_at
+            """,
+            (duplicate_key_value, lyrics, source, source_url, now),
+        )
+    if emit:
+        print_json({"duplicate_key": duplicate_key_value, "lyrics": True, "source": source, "source_url": source_url})
+
+
+def command_set_tunebat(
+    conn: sqlite3.Connection,
+    duplicate_key_value: str,
+    tunebat_url: str,
+    tunebat_title: str,
+    tunebat_artist: str,
+    key: str,
+    mode: str,
+    camelot: str,
+    bpm: float | None,
+    popularity: int | None,
+    energy: float | None,
+    danceability: float | None,
+    happiness: float | None,
+    raw_json: object | None,
+    emit: bool = True,
+) -> None:
+    now = time.time_ns()
+    raw_text = json.dumps(raw_json, sort_keys=True) if raw_json is not None else ""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO track_tunebat(
+                duplicate_key, tunebat_url, tunebat_title, tunebat_artist, key, mode, camelot,
+                bpm, popularity, energy, danceability, happiness, raw_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(duplicate_key) DO UPDATE SET
+                tunebat_url=excluded.tunebat_url,
+                tunebat_title=excluded.tunebat_title,
+                tunebat_artist=excluded.tunebat_artist,
+                key=excluded.key,
+                mode=excluded.mode,
+                camelot=excluded.camelot,
+                bpm=excluded.bpm,
+                popularity=excluded.popularity,
+                energy=excluded.energy,
+                danceability=excluded.danceability,
+                happiness=excluded.happiness,
+                raw_json=excluded.raw_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                duplicate_key_value,
+                tunebat_url,
+                tunebat_title,
+                tunebat_artist,
+                key,
+                mode,
+                camelot,
+                bpm,
+                popularity,
+                energy,
+                danceability,
+                happiness,
+                raw_text,
+                now,
+            ),
+        )
+    if emit:
+        print_json({"duplicate_key": duplicate_key_value, "tunebat": True, "key": key, "mode": mode, "camelot": camelot, "bpm": bpm})
+
+
+def command_import_metadata(conn: sqlite3.Connection, path: Path) -> None:
+    payload = read_json(path)
+    if isinstance(payload, dict):
+        rows = payload.get("tracks", [payload])
+    else:
+        rows = payload
+    if not isinstance(rows, list):
+        raise SystemExit("metadata import must be a JSON object, a JSON object with tracks, or a JSON list")
+
+    imported = {"lyrics": 0, "tunebat": 0}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        duplicate_key_value = str(item.get("duplicate_key") or "")
+        if not duplicate_key_value:
+            continue
+        lyrics = item.get("lyrics")
+        if isinstance(lyrics, dict):
+            text = str(lyrics.get("text") or "")
+            if text.strip():
+                command_set_lyrics(
+                    conn,
+                    duplicate_key_value,
+                    text,
+                    str(lyrics.get("source") or ""),
+                    str(lyrics.get("source_url") or lyrics.get("url") or ""),
+                    emit=False,
+                )
+                imported["lyrics"] += 1
+        elif isinstance(lyrics, str) and lyrics.strip():
+            command_set_lyrics(conn, duplicate_key_value, lyrics, "", "", emit=False)
+            imported["lyrics"] += 1
+
+        tunebat = item.get("tunebat")
+        if isinstance(tunebat, dict):
+            command_set_tunebat(
+                conn,
+                duplicate_key_value,
+                str(tunebat.get("url") or tunebat.get("tunebat_url") or ""),
+                str(tunebat.get("title") or tunebat.get("tunebat_title") or ""),
+                str(tunebat.get("artist") or tunebat.get("tunebat_artist") or ""),
+                str(tunebat.get("key") or ""),
+                str(tunebat.get("mode") or ""),
+                str(tunebat.get("camelot") or ""),
+                float(tunebat["bpm"]) if tunebat.get("bpm") is not None else None,
+                int(tunebat["popularity"]) if tunebat.get("popularity") is not None else None,
+                float(tunebat["energy"]) if tunebat.get("energy") is not None else None,
+                float(tunebat["danceability"]) if tunebat.get("danceability") is not None else None,
+                float(tunebat["happiness"]) if tunebat.get("happiness") is not None else None,
+                tunebat,
+                emit=False,
+            )
+            imported["tunebat"] += 1
+    print_json(imported)
+
+
+def tunebat_local_payload(analyzer: Path, target_path: Path) -> dict:
+    command = ["node", str(analyzer), str(target_path)]
+    completed = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+    if completed.returncode != 0:
+        raise SystemExit(completed.stderr.strip() or f"local TuneBat analyzer failed rc={completed.returncode}")
+    payload = json.loads(completed.stdout)
+    if not isinstance(payload, dict):
+        raise SystemExit("local TuneBat analyzer returned non-object JSON")
+    return payload
+
+
+def store_tunebat_local_payload(conn: sqlite3.Connection, duplicate_key_value: str, target_path: Path, payload: dict) -> None:
+    command_set_tunebat(
+        conn,
+        duplicate_key_value,
+        str(payload.get("analyzer_url") or "https://tunebat.com/Analyzer"),
+        str(payload.get("filename") or target_path.name),
+        "",
+        str(payload.get("key") or ""),
+        str(payload.get("mode") or ""),
+        str(payload.get("camelot") or ""),
+        float(payload["bpm"]) if payload.get("bpm") is not None else None,
+        None,
+        float(payload["energy"]) if payload.get("energy") is not None else None,
+        None,
+        None,
+        payload,
+        emit=False,
+    )
+
+
+def command_analyze_tunebat_local(conn: sqlite3.Connection, duplicate_key_value: str, analyzer: Path, path: Path | None) -> None:
+    target_path = path
+    if target_path is None:
+        row = conn.execute("SELECT preferred_path FROM tracks WHERE duplicate_key = ?", (duplicate_key_value,)).fetchone()
+        if row is None:
+            raise SystemExit(f"unknown duplicate_key: {duplicate_key_value}")
+        target_path = Path(row["preferred_path"])
+    payload = tunebat_local_payload(analyzer, target_path)
+    store_tunebat_local_payload(conn, duplicate_key_value, target_path, payload)
+    print_json({"duplicate_key": duplicate_key_value, "path": str(target_path), "tunebat_local": payload})
+
+
+def command_backfill_tunebat_local(
+    conn: sqlite3.Connection,
+    analyzer: Path,
+    limit: int,
+    max_seconds: int,
+    force: bool,
+    emit: bool = True,
+) -> None:
+    if limit < 1:
+        raise SystemExit("limit must be at least 1")
+    started = time.monotonic()
+    where = "" if force else "WHERE tunebat_bpm IS NULL"
+    rows = conn.execute(
+        f"""
+        SELECT duplicate_key, preferred_path, title_guess, artist_guess
+        FROM tracks
+        {where}
+        ORDER BY preferred_server = 'patrick' DESC, copies DESC, artist_guess, album_guess, title_guess
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    result = {"requested": limit, "found": len(rows), "analyzed": 0, "failed": 0, "skipped": 0, "errors": []}
+    for row in rows:
+        if max_seconds > 0 and time.monotonic() - started >= max_seconds:
+            break
+        target_path = Path(row["preferred_path"])
+        if not target_path.exists():
+            result["skipped"] += 1
+            result["errors"].append({"duplicate_key": row["duplicate_key"], "path": str(target_path), "error": "preferred path missing"})
+            continue
+        try:
+            payload = tunebat_local_payload(analyzer, target_path)
+            store_tunebat_local_payload(conn, row["duplicate_key"], target_path, payload)
+            result["analyzed"] += 1
+        except Exception as error:
+            result["failed"] += 1
+            result["errors"].append(
+                {
+                    "duplicate_key": row["duplicate_key"],
+                    "path": str(target_path),
+                    "error": str(error),
+                }
+            )
+    if emit:
+        print_json(result)
 
 
 def parse_args() -> argparse.Namespace:
@@ -500,6 +816,46 @@ def parse_args() -> argparse.Namespace:
     tracks_parser.add_argument("--limit", type=int, default=50)
     tracks_parser.add_argument("--duplicates-only", action=argparse.BooleanOptionalAction, default=False)
 
+    show_parser = sub.add_parser("show")
+    show_parser.add_argument("duplicate_key")
+    show_parser.add_argument("--include-lyrics", action=argparse.BooleanOptionalAction, default=False)
+
+    lyrics_parser = sub.add_parser("set-lyrics")
+    lyrics_parser.add_argument("duplicate_key")
+    lyrics_parser.add_argument("--lyrics")
+    lyrics_parser.add_argument("--lyrics-file", type=Path)
+    lyrics_parser.add_argument("--source", default="")
+    lyrics_parser.add_argument("--source-url", default="")
+
+    tunebat_parser = sub.add_parser("set-tunebat")
+    tunebat_parser.add_argument("duplicate_key")
+    tunebat_parser.add_argument("--url", default="")
+    tunebat_parser.add_argument("--title", default="")
+    tunebat_parser.add_argument("--artist", default="")
+    tunebat_parser.add_argument("--key", default="")
+    tunebat_parser.add_argument("--mode", default="")
+    tunebat_parser.add_argument("--camelot", default="")
+    tunebat_parser.add_argument("--bpm", type=float)
+    tunebat_parser.add_argument("--popularity", type=int)
+    tunebat_parser.add_argument("--energy", type=float)
+    tunebat_parser.add_argument("--danceability", type=float)
+    tunebat_parser.add_argument("--happiness", type=float)
+    tunebat_parser.add_argument("--raw-json", type=Path)
+
+    import_parser = sub.add_parser("import-metadata")
+    import_parser.add_argument("path", type=Path)
+
+    analyze_parser = sub.add_parser("analyze-tunebat-local")
+    analyze_parser.add_argument("duplicate_key")
+    analyze_parser.add_argument("--analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
+    analyze_parser.add_argument("--path", type=Path)
+
+    backfill_parser = sub.add_parser("backfill-tunebat-local")
+    backfill_parser.add_argument("--analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
+    backfill_parser.add_argument("--limit", type=int, default=10)
+    backfill_parser.add_argument("--max-seconds", type=int, default=900)
+    backfill_parser.add_argument("--force", action=argparse.BooleanOptionalAction, default=False)
+
     route_parser = sub.add_parser("route")
     route_parser.add_argument("path", type=Path)
     return parser.parse_args()
@@ -525,6 +881,39 @@ def main() -> int:
         return 0
     if args.command == "tracks":
         command_tracks(conn, args.query, args.limit, args.duplicates_only)
+        return 0
+    if args.command == "show":
+        command_show(conn, args.duplicate_key, args.include_lyrics)
+        return 0
+    if args.command == "set-lyrics":
+        command_set_lyrics(conn, args.duplicate_key, read_text_value(args.lyrics_file, args.lyrics), args.source, args.source_url)
+        return 0
+    if args.command == "set-tunebat":
+        command_set_tunebat(
+            conn,
+            args.duplicate_key,
+            args.url,
+            args.title,
+            args.artist,
+            args.key,
+            args.mode,
+            args.camelot,
+            args.bpm,
+            args.popularity,
+            args.energy,
+            args.danceability,
+            args.happiness,
+            read_json(args.raw_json) if args.raw_json else None,
+        )
+        return 0
+    if args.command == "import-metadata":
+        command_import_metadata(conn, args.path)
+        return 0
+    if args.command == "analyze-tunebat-local":
+        command_analyze_tunebat_local(conn, args.duplicate_key, args.analyzer, args.path)
+        return 0
+    if args.command == "backfill-tunebat-local":
+        command_backfill_tunebat_local(conn, args.analyzer, args.limit, args.max_seconds, args.force)
         return 0
     if args.command == "route":
         command_route(conn, args.path)

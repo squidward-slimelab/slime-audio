@@ -12,6 +12,8 @@ Download the Windows installer from GitHub releases.
 - `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
 - `scripts/slime_audio_drops.py`: watches Spotify playback and sends timed phrase drops during specific songs.
 - `scripts/slime_audio_stream.py`: decodes a local audio file and streams it to any combo of discovered receivers with one synced start timestamp.
+- `scripts/slime_audio_session.py`: validates planned live-mix sessions with up to four decks, arbitrary clip start times, trims, mic lean-ins, and automation envelopes.
+- `scripts/slime_audio_candidates.py`: keeps live set constraints and ranks database-backed candidate tracks for future queue/session planning.
 - `scripts/slime_audio_dj.py`: analyzes local tracks for BPM, beat offset, key, Camelot code, energy, and transition compatibility.
 - `scripts/slime_music_library.py`: indexes mounted Samba music shares into SQLite, combines duplicates, and picks the strongest server copy.
 - `SlimeAudioSetup.exe`: real Windows installer with Start Menu shortcut and optional startup launch.
@@ -123,6 +125,16 @@ python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
+Persistent playlist runs can be edited while playback continues. Queue commands only touch future tracks: the current track and completed tracks are protected. By default, the runner also reloads the playlist file between tracks and appends newly added entries without restarting audio.
+
+```bash
+python3 scripts/slime_audio_playlist_runner.py --playlist runtime/set.txt --target all --mode multicast
+python3 scripts/slime_audio_playlist_runner.py queue-append --state runtime/playlist-state.json /mnt/rockhouse/Music/Artist/Album/song.flac
+python3 scripts/slime_audio_playlist_runner.py queue-swap --state runtime/playlist-state.json /old/future.flac /new/future.flac
+python3 scripts/slime_audio_playlist_runner.py queue-remove --state runtime/playlist-state.json /future/nope.flac
+python3 scripts/slime_audio_playlist_runner.py queue-move --state runtime/playlist-state.json /future/hook.flac --after /future/bridge.flac
+```
+
 Linux debugging receiver:
 
 ```bash
@@ -152,11 +164,40 @@ Transition plans include:
 
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 
+## Live Mix Sessions
+
+Live mix sessions are the control-plane shape for the next SlimeAudio engine. They are intentionally planned data, not manual performance gestures: every gain ramp, filter move, pitch/tempo change, TTS lean-in, and ducking move should be encoded as automation before playback reaches it. Clips can start at any timeline position, so tracks do not need to be stacked back-to-back. Use `trim_start` and `duration` to pull sections from songs for overlays, hooks, bridges, and loops.
+
+```bash
+python3 scripts/slime_audio_session.py template > runtime/mix-session.json
+python3 scripts/slime_audio_session.py validate runtime/mix-session.json
+python3 scripts/slime_audio_session.py summary runtime/mix-session.json
+python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000
+python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --duck-volume 0.45
+python3 scripts/slime_audio_session.py automate runtime/mix-session.json --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]'
+```
+
+The first implementation validates and edits the session format. The playback engine should consume this format next, keeping the current FFmpeg multicast path stable while adding a mutable schedule/control API.
+
+## Candidate Selection And Set Constraints
+
+Candidate selection reads the Samba music database, recent playback history, and a runtime scratchpad of operator steering. This is where the DJ agent records current vibe, direction, energy target, banned artists, and exclude terms before asking for future tracks. The scratchpad lives under `runtime/` by default so local set state does not leak into the public repo.
+
+```bash
+python3 scripts/slime_audio_candidates.py constraints --init
+python3 scripts/slime_audio_candidates.py set-constraints --vibe "fresh daytime" --direction "brighter but not corny" --energy-target 0.65 --exclude-artist "Khruangbin" --reason "operator steering"
+python3 scripts/slime_audio_candidates.py candidates --limit 12
+python3 scripts/slime_audio_candidates.py candidates "jungle" --recent-limit 40 --limit 8
+```
+
+Candidates avoid recently played tracks from `runtime/play-history.jsonl` by default, filter excluded artists/terms, prefer stronger duplicate/library copies, and include `reasons` so the agent can explain why a track was chosen.
+Root-level or otherwise untagged files are skipped by default so replicated sound effects do not outrank real music; add `--include-untagged` when intentionally searching that bucket.
+
 ## Samba Music Library
 
 The local library index lives at `runtime/slime-music-library.sqlite3`. It scans mounted Samba music roots, stores every audio file in SQLite, groups duplicates by normalized artist/album/title, and exposes two useful views:
 
-- `tracks`: one row per unique song with copy count, server count, preferred path, and every known location.
+- `tracks`: one row per unique song with copy count, server count, preferred path, every known location, lyrics availability, and cached TuneBat facts.
 - `preferred_files`: one chosen file per song, routed to the strongest server copy first.
 
 Default source priority:
@@ -174,6 +215,32 @@ python3 scripts/slime_music_library.py tracks --duplicates-only --limit 25
 python3 scripts/slime_music_library.py copies "song title"
 python3 scripts/slime_music_library.py route /mnt/krusty-krab/Music/Artist/Album/song.flac
 ```
+
+Lyrics and TuneBat metadata are stored per duplicate group, not per replicated copy. Use the `duplicate_key` returned by `search`, `tracks`, or `copies`:
+
+```bash
+python3 scripts/slime_music_library.py set-lyrics DUPLICATE_KEY --lyrics-file lyrics.txt --source "manual"
+python3 scripts/slime_music_library.py set-tunebat DUPLICATE_KEY --key "C# major" --mode major --camelot 3B --bpm 126 --url "https://tunebat.com/Analyzer"
+python3 scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY
+python3 scripts/slime_music_library.py backfill-tunebat-local --limit 12 --max-seconds 1200
+python3 scripts/slime_music_library.py show DUPLICATE_KEY
+python3 scripts/slime_music_library.py show DUPLICATE_KEY --include-lyrics
+python3 scripts/slime_music_library.py import-metadata runtime/music-metadata.json
+```
+
+This is for TuneBat Analyzer output from `https://tunebat.com/Analyzer`, not the public TuneBat song database. The analyzer runs in-browser and is the path to use for odd local files, bootlegs, edits, samples, and other tracks that Spotify would never know about. `scripts/slime_tunebat_analyzer.js` runs the same public browser-capable engine family locally through `essentia.js` and FFmpeg, then `analyze-tunebat-local` caches that output into SQLite. It intentionally does not vendor TuneBat's protected site bundle. `essentia.js` is AGPL-3.0, so keep this as an optional local/internal tool unless the repo licensing is changed deliberately.
+
+Use the service wrapper for routine maintenance. It rescans mounted shares, then backfills a bounded number of missing local TuneBat-style analysis rows so full-library work spreads out over many small runs:
+
+```bash
+python3 scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/slime-music-library.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now slime-music-library.timer
+```
+
+The service uses `runtime/slime-music-library.lock`, so overlapping timer runs skip instead of fighting SQLite or hammering the network shares. Lyrics are intentionally not scraped by the maintenance service; import verified lyrics or sidecar files explicitly so we do not fill the database with junk.
 
 `scripts/slime_audio_playlist_runner.py` uses this database by default when it exists. If a playlist points at a weaker duplicate, the runner resolves it to the preferred copy before streaming and records both `track` and `resolved_track` in playback history. Disable that with `--no-prefer-library-source`.
 

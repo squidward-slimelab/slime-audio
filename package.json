@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "analyze:tunebat-local": "node scripts/slime_tunebat_analyzer.js"
+  },
+  "optionalDependencies": {
+    "essentia.js": "0.1.3"
+  }
+}

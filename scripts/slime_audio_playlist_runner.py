@@ -47,6 +47,13 @@ def write_state(path: Path, state: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def read_state_or_die(path: Path) -> dict[str, Any]:
+    state = load_json(path)
+    if state is None:
+        raise SystemExit(f"state file is missing or invalid: {path}")
+    return state
+
+
 def append_history(path: Path | None, event: dict[str, Any]) -> None:
     if path is None:
         return
@@ -77,10 +84,106 @@ def load_or_create_state(path: Path, tracks: list[str], shuffle: bool) -> dict[s
     state = load_json(path)
     if state is not None and state_matches_playlist(state, tracks):
         return state
+    if state is not None and isinstance(state.get("order"), list) and int(state.get("index", 0)) <= len(state["order"]):
+        merged, appended = merge_playlist_future(state, tracks)
+        if appended:
+            merged["queue_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            write_state(path, merged)
+        return merged
 
     state = new_state(tracks, shuffle)
     write_state(path, state)
     return state
+
+
+def merge_playlist_future(state: dict[str, Any], tracks: list[str]) -> tuple[dict[str, Any], list[str]]:
+    order = list(state.get("order") or [])
+    index = int(state.get("index", 0))
+    protected = set(order[: index + 1])
+    existing = set(order)
+    appended = [track for track in tracks if track not in existing and track not in protected]
+    if not appended:
+        return state, []
+    next_state = dict(state)
+    next_state["order"] = order + appended
+    return next_state, appended
+
+
+def future_start_index(state: dict[str, Any]) -> int:
+    index = int(state.get("index", 0))
+    return index + 1 if state.get("current") else index
+
+
+def assert_future_track(state: dict[str, Any], track: str) -> int:
+    order = list(state.get("order") or [])
+    try:
+        position = order.index(track)
+    except ValueError as ex:
+        raise ValueError(f"track is not in queue: {track}") from ex
+    if position < future_start_index(state):
+        raise ValueError(f"cannot edit current or completed track: {track}")
+    return position
+
+
+def edit_append(state: dict[str, Any], tracks: list[str]) -> tuple[dict[str, Any], list[str]]:
+    next_state = dict(state)
+    order = list(next_state.get("order") or [])
+    appended = [track for track in tracks if track not in order]
+    next_state["order"] = order + appended
+    return next_state, appended
+
+
+def edit_remove(state: dict[str, Any], tracks: list[str]) -> tuple[dict[str, Any], list[str]]:
+    next_state = dict(state)
+    order = list(next_state.get("order") or [])
+    removed = []
+    for track in tracks:
+        position = assert_future_track(next_state, track)
+        removed.append(order[position])
+        del order[position]
+        next_state["order"] = order
+    return next_state, removed
+
+
+def edit_swap(state: dict[str, Any], old_track: str, new_track: str) -> dict[str, Any]:
+    next_state = dict(state)
+    order = list(next_state.get("order") or [])
+    position = assert_future_track(next_state, old_track)
+    if new_track in order and new_track != old_track:
+        raise ValueError(f"replacement is already in queue: {new_track}")
+    order[position] = new_track
+    next_state["order"] = order
+    return next_state
+
+
+def edit_move(state: dict[str, Any], track: str, after: str | None) -> dict[str, Any]:
+    next_state = dict(state)
+    order = list(next_state.get("order") or [])
+    position = assert_future_track(next_state, track)
+    item = order.pop(position)
+    if after is None:
+        insert_at = future_start_index(next_state)
+    else:
+        after_position = assert_future_track(next_state, after)
+        if after_position >= position:
+            after_position -= 1
+        insert_at = after_position + 1
+    order.insert(insert_at, item)
+    next_state["order"] = order
+    return next_state
+
+
+def record_queue_edit(history_path: Path | None, state_path: Path, action: str, payload: dict[str, Any]) -> None:
+    append_history(
+        history_path,
+        {
+            "event": "queue_edited",
+            "action": action,
+            "state": str(state_path),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            **payload,
+        },
+    )
 
 
 def stream_command(args: argparse.Namespace, track: str) -> list[str]:
@@ -322,13 +425,53 @@ def run_playlist(args: argparse.Namespace) -> int:
                 "track": track,
             },
         )
+        if args.reload_playlist:
+            latest_tracks = load_playlist(args.playlist)
+            state, appended = merge_playlist_future(state, latest_tracks)
+            if appended:
+                state["queue_updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                write_state(args.state, state)
+                record_queue_edit(args.history_log, args.state, "append_from_playlist", {"tracks": appended})
+                print(f"appended {len(appended)} future tracks from playlist", flush=True)
+        order = state["order"]
+        if args.dj_plan:
+            analyses = analyze_with_cache([Path(track) for track in order], args.dj_cache, args.backend, args.analysis_sample_rate)
 
     print("playlist done", flush=True)
     return 0
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a persistent SlimeAudio playlist without restarting from track one.")
+def run_queue_edit(args: argparse.Namespace) -> int:
+    state = read_state_or_die(args.state)
+    if args.queue_command == "queue-append":
+        tracks = [line.strip() for line in args.tracks_file.read_text(encoding="utf-8").splitlines() if line.strip()] if args.tracks_file else args.track
+        state, appended = edit_append(state, tracks)
+        write_state(args.state, state)
+        record_queue_edit(args.history_log, args.state, "append", {"tracks": appended})
+        print(f"appended {len(appended)} tracks")
+        return 0
+    if args.queue_command == "queue-remove":
+        state, removed = edit_remove(state, args.track)
+        write_state(args.state, state)
+        record_queue_edit(args.history_log, args.state, "remove", {"tracks": removed})
+        print(f"removed {len(removed)} tracks")
+        return 0
+    if args.queue_command == "queue-swap":
+        state = edit_swap(state, args.old, args.new)
+        write_state(args.state, state)
+        record_queue_edit(args.history_log, args.state, "swap", {"old": args.old, "new": args.new})
+        print("swapped future track")
+        return 0
+    if args.queue_command == "queue-move":
+        state = edit_move(state, args.track, args.after)
+        write_state(args.state, state)
+        record_queue_edit(args.history_log, args.state, "move", {"track": args.track, "after": args.after})
+        print("moved future track")
+        return 0
+    raise AssertionError(args.queue_command)
+
+
+def add_runner_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--playlist", type=Path, default=DEFAULT_PLAYLIST)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--target", action="append", default=None, help="Receiver name, host:port, or all")
@@ -357,6 +500,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stop-listeners-when-done", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--show-next", type=int, default=10)
+    parser.add_argument("--reload-playlist", action=argparse.BooleanOptionalAction, default=True)
+
+
+def add_queue_edit_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a persistent SlimeAudio playlist without restarting from track one.")
+    sub = parser.add_subparsers(dest="queue_command")
+    run_parser = sub.add_parser("run")
+    add_runner_args(run_parser)
+
+    append_parser = sub.add_parser("queue-append")
+    add_queue_edit_args(append_parser)
+    append_parser.add_argument("track", nargs="*")
+    append_parser.add_argument("--tracks-file", type=Path)
+
+    remove_parser = sub.add_parser("queue-remove")
+    add_queue_edit_args(remove_parser)
+    remove_parser.add_argument("track", nargs="+")
+
+    swap_parser = sub.add_parser("queue-swap")
+    add_queue_edit_args(swap_parser)
+    swap_parser.add_argument("old")
+    swap_parser.add_argument("new")
+
+    move_parser = sub.add_parser("queue-move")
+    add_queue_edit_args(move_parser)
+    move_parser.add_argument("track")
+    move_parser.add_argument("--after")
+
+    add_runner_args(parser)
     args = parser.parse_args()
     if args.target is None:
         args.target = ["all"]
@@ -364,7 +541,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    return run_playlist(parse_args())
+    args = parse_args()
+    if args.queue_command and args.queue_command != "run":
+        return run_queue_edit(args)
+    return run_playlist(args)
 
 
 if __name__ == "__main__":

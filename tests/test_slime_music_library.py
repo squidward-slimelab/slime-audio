@@ -9,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_music_library import (
     Source,
+    command_backfill_tunebat_local,
+    command_set_lyrics,
+    command_set_tunebat,
     connect,
     duplicate_key,
     normalize,
@@ -70,6 +73,82 @@ class SlimeMusicLibraryTests(unittest.TestCase):
             self.assertEqual(track["preferred_server"], "patrick")
             self.assertEqual(track["preferred_path"], str(patrick_track))
             self.assertIn(str(spatula_track), track["locations"])
+
+    def test_tracks_view_includes_lyrics_and_tunebat_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "music"
+            track_path = root / "Artist" / "Album" / "01 - Song.flac"
+            track_path.parent.mkdir(parents=True)
+            track_path.write_bytes(b"a" * 100)
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+            duplicate_key = conn.execute("SELECT duplicate_key FROM tracks").fetchone()["duplicate_key"]
+
+            command_set_lyrics(conn, duplicate_key, "hello slime lab", "test", "https://example.test/lyrics", emit=False)
+            command_set_tunebat(
+                conn,
+                duplicate_key,
+                "https://tunebat.com/Info/song/abc",
+                "Song",
+                "Artist",
+                "C# major",
+                "major",
+                "3B",
+                126.0,
+                95,
+                0.71,
+                0.62,
+                0.53,
+                {"bpm": 126, "key": "C# major"},
+                emit=False,
+            )
+
+            row = conn.execute(
+                """
+                SELECT has_lyrics, lyrics_source, tunebat_key, tunebat_mode, tunebat_camelot, tunebat_bpm, tunebat_url
+                FROM tracks
+                """
+            ).fetchone()
+            self.assertEqual(row["has_lyrics"], 1)
+            self.assertEqual(row["lyrics_source"], "test")
+            self.assertEqual(row["tunebat_key"], "C# major")
+            self.assertEqual(row["tunebat_mode"], "major")
+            self.assertEqual(row["tunebat_camelot"], "3B")
+            self.assertEqual(row["tunebat_bpm"], 126.0)
+            self.assertEqual(row["tunebat_url"], "https://tunebat.com/Info/song/abc")
+
+    def test_backfill_tunebat_local_stores_missing_analysis(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "music"
+            track_path = root / "Artist" / "Album" / "01 - Song.flac"
+            analyzer = temp / "fake-analyzer.js"
+            track_path.parent.mkdir(parents=True)
+            track_path.write_bytes(b"a" * 100)
+            analyzer.write_text(
+                """
+                console.log(JSON.stringify({
+                  analyzer_url: "https://tunebat.com/Analyzer",
+                  filename: "01 - Song.flac",
+                  key: "A minor",
+                  mode: "minor",
+                  camelot: "8A",
+                  bpm: 120,
+                  energy: 0.5
+                }));
+                """,
+                encoding="utf-8",
+            )
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+
+            command_backfill_tunebat_local(conn, analyzer, limit=1, max_seconds=30, force=False, emit=False)
+
+            row = conn.execute("SELECT tunebat_key, tunebat_camelot, tunebat_bpm FROM tracks").fetchone()
+            self.assertEqual(row["tunebat_key"], "A minor")
+            self.assertEqual(row["tunebat_camelot"], "8A")
+            self.assertEqual(row["tunebat_bpm"], 120.0)
 
     def test_scan_prunes_removed_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
