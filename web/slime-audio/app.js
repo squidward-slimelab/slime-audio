@@ -1,6 +1,11 @@
 const state = {
   data: null,
   scale: null,
+  timelineSignature: null,
+  playhead: null,
+  lastActiveNow: null,
+  lastActiveAt: 0,
+  lastPositionMs: 0,
 };
 
 const els = {
@@ -28,6 +33,7 @@ const FALLBACK_TRACK_MS = 180000;
 const MIN_STAGE_WIDTH = 1440;
 const LANE_LABEL_WIDTH = 96;
 const DECK_LANES = ["deck-3", "deck-1", "deck-2", "deck-4"];
+const TRANSIENT_EMPTY_MS = 12000;
 
 function fmtMs(ms) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "--:--";
@@ -44,8 +50,33 @@ function shortPath(path) {
   return parts.slice(Math.max(0, parts.length - 3)).join(" / ");
 }
 
-function currentIndex(events) {
-  return events.findIndex((event) => event.kind === "song" && event.status === "current");
+function parseTimestampMs(value) {
+  if (!value) return null;
+  const normalized = /[+-]\d{4}$/.test(value) ? `${value.slice(0, -2)}:${value.slice(-2)}` : value;
+  const ms = Date.parse(normalized);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function activeNow(data = state.data) {
+  const now = data?.now || {};
+  if (now.track) {
+    state.lastActiveNow = now;
+    state.lastActiveAt = Date.now();
+    return now;
+  }
+  if (state.lastActiveNow && Date.now() - state.lastActiveAt < TRANSIENT_EMPTY_MS) {
+    return state.lastActiveNow;
+  }
+  return now;
+}
+
+function currentEvent(events, data = state.data) {
+  const now = activeNow(data);
+  return (
+    events.find((event) => event.kind === "song" && event.status === "current") ||
+    events.find((event) => event.kind === "song" && now?.track?.path && event.path === now.track.path) ||
+    null
+  );
 }
 
 function eventStart(event) {
@@ -53,19 +84,37 @@ function eventStart(event) {
 }
 
 function eventEnd(event) {
-  return event.end_ms ?? eventStart(event) + (event.duration_ms ?? FALLBACK_TRACK_MS);
+  return event.end_ms ?? eventStart(event) + inferredDuration(event);
+}
+
+function inferredDuration(event, data = state.data) {
+  if (event.duration_ms) return event.duration_ms;
+  const current = currentEvent(data?.session?.events || [], data);
+  if (current && current.id === event.id) {
+    const elapsed = activeElapsedMs(data);
+    return Math.max(FALLBACK_TRACK_MS, elapsed + 60000);
+  }
+  return FALLBACK_TRACK_MS;
+}
+
+function activeElapsedMs(data = state.data) {
+  const now = activeNow(data);
+  const started = parseTimestampMs(now?.started_at);
+  if (started !== null) return Math.max(0, Date.now() - started);
+  return Math.max(0, now?.elapsed_ms || 0);
 }
 
 function nowPositionMs(data, events) {
-  const index = currentIndex(events);
-  if (index < 0) return 0;
-  const current = events[index];
-  const elapsed = data.now?.elapsed_ms ?? 0;
-  return eventStart(current) + Math.min(elapsed, current.duration_ms ?? FALLBACK_TRACK_MS);
+  const current = currentEvent(events, data);
+  if (!current) return state.lastPositionMs;
+  const elapsed = activeElapsedMs(data);
+  const position = eventStart(current) + Math.min(elapsed, inferredDuration(current, data));
+  state.lastPositionMs = position;
+  return position;
 }
 
 function updateNow(data) {
-  const now = data.now || {};
+  const now = activeNow(data);
   if (!now.track) {
     els.title.textContent = "nothing playing";
     els.meta.textContent = "waiting for runner state";
@@ -77,9 +126,9 @@ function updateNow(data) {
   }
   els.title.textContent = now.track.title || "untitled";
   els.meta.textContent = [now.track.artist, now.track.album].filter(Boolean).join(" - ") || shortPath(now.track.path);
-  els.elapsed.textContent = fmtMs(now.elapsed_ms);
+  els.elapsed.textContent = fmtMs(activeElapsedMs(data));
   els.duration.textContent = fmtMs(now.duration_ms);
-  const pct = now.elapsed_ms !== null && now.duration_ms ? Math.min(100, (now.elapsed_ms / now.duration_ms) * 100) : 0;
+  const pct = now.duration_ms ? Math.min(100, (activeElapsedMs(data) / now.duration_ms) * 100) : 0;
   els.scrub.style.width = `${pct}%`;
   const transition = now.transition;
   els.transition.textContent = transition
@@ -118,7 +167,7 @@ function laneInfo(lane) {
 }
 
 function timelineScale(events) {
-  const max = Math.max(60000, ...events.map(eventEnd));
+  const max = Math.max(60000, nowPositionMs(state.data, events) + 60000, ...events.map(eventEnd));
   const stageWidth = Math.max(MIN_STAGE_WIDTH, Math.ceil(max / 1000) * 5);
   return { max, stageWidth };
 }
@@ -200,9 +249,9 @@ function renderTimeline(events) {
   }
   const playhead = document.createElement("div");
   playhead.className = "playhead";
-  playhead.style.left = `${(nowPositionMs(state.data, events) / scale.max) * scale.stageWidth}px`;
+  state.playhead = playhead;
   els.timeline.append(playhead);
-  autoFollowPlayhead(playhead);
+  updatePlayhead();
 }
 
 function renderSummary(events) {
@@ -221,7 +270,7 @@ function renderSummary(events) {
 
 function renderInspector(data, events) {
   const songs = events.filter((event) => event.kind === "song");
-  const current = songs.find((event) => event.status === "current");
+  const current = currentEvent(songs, data);
   const planned = songs.filter((event) => event.status === "planned").slice(0, 6);
   const automations = events.filter((event) => event.kind === "automation" || event.kind === "vocal").slice(0, 8);
 
@@ -255,11 +304,27 @@ function renderQueueList(container, events, emptyText) {
   }
 }
 
-function autoFollowPlayhead(playhead) {
-  if (!playhead || !els.timelineScroll) return;
-  const left = Number.parseFloat(playhead.style.left || "0");
+function timelineSignature(events) {
+  return JSON.stringify(
+    events.map((event) => [
+      event.id,
+      event.kind,
+      event.deck,
+      event.index,
+      event.status,
+      event.start_ms,
+      event.end_ms,
+      event.duration_ms,
+    ])
+  );
+}
+
+function autoFollowPlayhead(left) {
+  if (!els.timelineScroll || !currentEvent(state.data?.session?.events || [])) return;
+  const viewportStart = els.timelineScroll.scrollLeft;
+  const viewportEnd = viewportStart + els.timelineScroll.clientWidth;
   const target = Math.max(0, left - els.timelineScroll.clientWidth * 0.42);
-  if (Math.abs(els.timelineScroll.scrollLeft - target) > 80) {
+  if (left > viewportEnd - 180 || left < viewportStart + 120) {
     els.timelineScroll.scrollTo({ left: target, behavior: "smooth" });
   }
 }
@@ -275,10 +340,31 @@ function render() {
   els.timelineTitle.textContent = "session timeline";
   els.timelineSubtitle.textContent = state.data.session?.path || state.data.state_path;
   els.updated.textContent = `updated ${state.data.generated_at}`;
-  els.transport.textContent = state.data.now?.track ? "live playhead active" : "waiting for transport";
+  els.transport.textContent = activeNow(state.data)?.track ? "live playhead active" : "waiting for transport";
   renderSummary(events);
-  renderTimeline(events);
+  const signature = timelineSignature(events);
+  if (signature !== state.timelineSignature) {
+    state.timelineSignature = signature;
+    renderTimeline(events);
+  } else {
+    updatePlayhead();
+  }
   renderInspector(state.data, events);
+}
+
+function updatePlayhead() {
+  const events = state.data?.session?.events || [];
+  if (!state.playhead || !state.scale || !events.length) return;
+  const position = nowPositionMs(state.data, events);
+  if (position + 60000 > state.scale.max) {
+    state.timelineSignature = null;
+    render();
+    return;
+  }
+  const left = (position / state.scale.max) * state.scale.stageWidth;
+  state.playhead.style.left = `${left}px`;
+  autoFollowPlayhead(left);
+  updateNow(state.data);
 }
 
 async function refresh() {
@@ -303,4 +389,5 @@ async function tick() {
 
 tick();
 setInterval(tick, 3000);
+setInterval(updatePlayhead, 1000);
 els.timelineScroll.addEventListener("scroll", syncAxis, { passive: true });
