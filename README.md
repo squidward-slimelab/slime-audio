@@ -192,12 +192,21 @@ Lean-ins are scheduled session events, not immediate side streams. A lean-in has
 ## Web Dashboard
 
 The dashboard is local and read-only. It serves current runner state as JSON and renders the browser UI from `web/slime-audio/`.
+See `docs/slime-audio-dashboard.md` for the dashboard workflow, `/api/state` view-model contract, and frontend verification checklist.
 
 ```bash
 python3 scripts/slime_audio_web.py --state runtime/mix-session-state.json --session runtime/mix-session.json --port 8765
 ```
 
 Open `http://127.0.0.1:8765`. The browser polls `/api/state`, shows the current render window/playhead, and draws the native timestamped mix session: clips, vocal drops, and automation points. The dashboard no longer projects legacy playlist state.
+
+For fixture-backed frontend checks without active room playback:
+
+```bash
+PYTHONPATH=scripts:src python3 scripts/slime_audio_web_smoke.py
+```
+
+The smoke check starts a temporary dashboard server, renders desktop and mobile headless Chrome screenshots into `runtime/web-smoke/`, and verifies the timeline, playhead, and planned vocal marker are present.
 
 Install the dashboard as a user service:
 

@@ -18,6 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
+DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4"]
+DEFAULT_VOCAL_DURATION_MS = 4500
 
 
 def parse_timestamp(value: str | None) -> float | None:
@@ -107,6 +109,195 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
     )
 
 
+def event_start(event: dict[str, Any]) -> int | None:
+    value = event.get("start_ms")
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def event_end(event: dict[str, Any]) -> int | None:
+    value = event.get("end_ms")
+    if isinstance(value, (int, float)):
+        return int(value)
+    start = event_start(event)
+    if start is None:
+        return None
+    duration = event.get("duration_ms")
+    if isinstance(duration, (int, float)):
+        return start + int(duration)
+    if event.get("kind") == "vocal":
+        return start + DEFAULT_VOCAL_DURATION_MS
+    if event.get("kind") == "automation":
+        return start + 1000
+    return None
+
+
+def session_duration_ms(events: list[dict[str, Any]], state: dict[str, Any]) -> int:
+    ends = [end for end in (event_end(event) for event in events) if end is not None]
+    state_duration = state.get("duration_ms")
+    if isinstance(state_duration, (int, float)):
+        ends.append(int(state_duration))
+    return max(ends) if ends else 0
+
+
+def classify_status(event: dict[str, Any], playhead_ms: int | None) -> str:
+    existing = str(event.get("status") or "")
+    start = event_start(event)
+    end = event_end(event)
+    if playhead_ms is None or start is None or end is None:
+        return existing or "unknown"
+    if end <= playhead_ms:
+        return "done"
+    if start <= playhead_ms < end:
+        return "current"
+    return "planned"
+
+
+def display_title_for_event(event: dict[str, Any]) -> str:
+    if event.get("kind") == "automation":
+        return f"{event.get('param') or 'automation'}"
+    if event.get("kind") == "vocal":
+        return str(event.get("text") or event.get("id") or "vocal")
+    return str(event.get("title") or event.get("id") or "untitled")
+
+
+def display_meta_for_event(event: dict[str, Any]) -> str:
+    if event.get("kind") == "automation":
+        target = event.get("target") or event.get("owner") or "master"
+        return f"{target} | {event.get('param') or 'automation'}"
+    if event.get("kind") == "vocal":
+        return "mic lean-in"
+    artist_album = " - ".join(str(value) for value in (event.get("artist"), event.get("album")) if value)
+    return artist_album or str(event.get("path") or "")
+
+
+def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str, Any]:
+    start = event_start(event)
+    end = event_end(event)
+    duration = None if start is None or end is None else max(0, end - start)
+    lane = str(event.get("deck") or event.get("kind") or "timeline")
+    status = classify_status(event, playhead_ms)
+    normalized = dict(event)
+    normalized.update(
+        {
+            "lane": lane,
+            "start_ms": start,
+            "end_ms": end,
+            "duration_ms": duration,
+            "status": status,
+            "display_title": display_title_for_event(event),
+            "display_meta": display_meta_for_event(event),
+            "is_timed": start is not None and end is not None,
+        }
+    )
+    return normalized
+
+
+def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ordered_lanes: list[str] = []
+    for lane in DECK_ORDER:
+        ordered_lanes.append(lane)
+    for lane in ("voice", "automation"):
+        ordered_lanes.append(lane)
+    for event in events:
+        lane = str(event.get("lane") or "timeline")
+        if lane not in ordered_lanes:
+            ordered_lanes.append(lane)
+    return [
+        {
+            "id": lane,
+            "label": lane.replace("-", " "),
+            "kind": "deck" if lane.startswith("deck-") else lane,
+            "events": [event for event in events if event.get("lane") == lane],
+        }
+        for lane in ordered_lanes
+    ]
+
+
+def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms: int) -> dict[str, Any]:
+    updated_at = state.get("updated_at") or state.get("window_started_at") or state.get("started_at")
+    completed_at = state.get("completed_at")
+    current = state.get("current")
+    status = "idle"
+    if completed_at:
+        status = "completed"
+    elif current:
+        status = "playing"
+    elif state.get("window_started_at"):
+        status = "window-active"
+    stale = False
+    updated_ts = parse_timestamp(updated_at if isinstance(updated_at, str) else None)
+    if updated_ts is not None and not completed_at and time.time() - updated_ts > 30:
+        stale = True
+        status = "stale"
+    return {
+        "status": status,
+        "stale": stale,
+        "updated_at": updated_at,
+        "completed_at": completed_at,
+        "playhead_ms": min(playhead_ms, duration_ms) if playhead_ms is not None and duration_ms else playhead_ms,
+        "duration_ms": duration_ms,
+        "window": {
+            "start_ms": state.get("window_start_ms"),
+            "end_ms": state.get("window_end_ms"),
+            "started_at": state.get("window_started_at"),
+        },
+    }
+
+
+def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: Path, session_payload: dict[str, Any]) -> dict[str, Any]:
+    raw_events = session_events(session_payload)
+    try:
+        playhead_ms = playhead_ms_from_state(state_path) if state_path.exists() else None
+    except Exception:
+        playhead_ms = None
+    duration_ms = session_duration_ms(raw_events, state)
+    events = [normalize_event(event, playhead_ms) for event in raw_events]
+    current = next((event for event in events if event.get("kind") == "song" and event.get("status") == "current"), None)
+    if current is None and state.get("current"):
+        current = next((event for event in events if event.get("path") == state.get("current")), None)
+    upcoming = [
+        event
+        for event in events
+        if event.get("kind") == "song" and event.get("status") == "planned"
+    ][:8]
+    commentary = [
+        event
+        for event in events
+        if event.get("kind") == "vocal" and event.get("status") != "done"
+    ][:8]
+    automation = [
+        event
+        for event in events
+        if event.get("kind") == "automation" and event.get("status") != "done"
+    ][:10]
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[str(event.get("kind") or "event")] = counts.get(str(event.get("kind") or "event"), 0) + 1
+    return {
+        "schema_version": 1,
+        "state_path": str(state_path),
+        "session_path": str(session_path),
+        "transport": transport_status(state, playhead_ms, duration_ms),
+        "session": {
+            "timeline_mode": session_payload.get("timeline_mode", "native"),
+            "duration_ms": duration_ms,
+            "counts": counts,
+            "decks": session_payload.get("decks", []),
+        },
+        "now": current,
+        "lanes": lane_rows(events),
+        "events": events,
+        "upcoming": upcoming,
+        "commentary": commentary,
+        "automation": automation,
+        "health": {
+            "runner_state": "stale" if transport_status(state, playhead_ms, duration_ms)["stale"] else "ok",
+            "receivers": state.get("receivers", []),
+            "current_clips": state.get("current_clips", []),
+        },
+    }
+
+
 def now_from_state(state: dict[str, Any], session_payload: dict[str, Any]) -> dict[str, Any]:
     current = state.get("current")
     started_at = parse_timestamp(state.get("started_at"))
@@ -153,7 +344,7 @@ def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[st
         raise FileNotFoundError(f"native mix session is required: {session_path or DEFAULT_SESSION}")
     session_payload = load_payload(session_path)
     session_source = str(session_path)
-    return {
+    payload = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "state_path": str(state_path),
         "now": now_from_state(state, session_payload),
@@ -165,6 +356,8 @@ def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[st
             "events": session_events(session_payload),
         },
     }
+    payload["dashboard"] = build_dashboard_view(state, state_path, session_path, session_payload)
+    return payload
 
 
 def choose_state_path(explicit: Path | None) -> Path:

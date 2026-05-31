@@ -1,46 +1,46 @@
-const state = {
-  data: null,
+const dashboardState = {
+  payload: null,
+  dashboard: null,
+  signature: "",
   scale: null,
-  timelineSignature: null,
-  playhead: null,
-  lastActiveNow: null,
-  lastActiveAt: 0,
-  lastPositionMs: 0,
+  playheadEl: null,
+  follow: false,
 };
 
 const els = {
-  title: document.querySelector("#track-title"),
-  meta: document.querySelector("#track-meta"),
-  elapsed: document.querySelector("#elapsed"),
-  duration: document.querySelector("#duration"),
-  scrub: document.querySelector("#scrub-fill"),
-  transition: document.querySelector("#transition"),
-  timeline: document.querySelector("#timeline"),
-  timelineScroll: document.querySelector("#timeline-scroll"),
-  timeAxis: document.querySelector("#time-axis"),
-  timelineTitle: document.querySelector("#timeline-title"),
-  timelineSubtitle: document.querySelector("#timeline-subtitle"),
-  summary: document.querySelector("#summary"),
-  updated: document.querySelector("#updated"),
-  transport: document.querySelector("#transport"),
-  currentCardTitle: document.querySelector("#current-card-title"),
-  currentCardMeta: document.querySelector("#current-card-meta"),
-  upNext: document.querySelector("#up-next"),
+  nowTitle: document.querySelector("#now-title"),
+  nowMeta: document.querySelector("#now-meta"),
+  transportStatus: document.querySelector("#transport-status"),
+  playheadTime: document.querySelector("#playhead-time"),
+  windowTime: document.querySelector("#window-time"),
+  updatedTime: document.querySelector("#updated-time"),
+  currentTitle: document.querySelector("#current-title"),
+  currentState: document.querySelector("#current-state"),
+  currentDetail: document.querySelector("#current-detail"),
+  sessionProgress: document.querySelector("#session-progress"),
+  nextList: document.querySelector("#next-list"),
+  commentaryList: document.querySelector("#commentary-list"),
+  healthList: document.querySelector("#health-list"),
   automationList: document.querySelector("#automation-list"),
+  sessionSummary: document.querySelector("#session-summary"),
+  timelineTitle: document.querySelector("#timeline-title"),
+  timeAxis: document.querySelector("#time-axis"),
+  timelineScroll: document.querySelector("#timeline-scroll"),
+  timeline: document.querySelector("#timeline"),
+  followPlayhead: document.querySelector("#follow-playhead"),
 };
 
-const MIN_STAGE_WIDTH = 1440;
-const LANE_LABEL_WIDTH = 96;
-const DECK_LANES = ["deck-3", "deck-1", "deck-2", "deck-4"];
-const TRANSIENT_EMPTY_MS = 12000;
+const MIN_STAGE_WIDTH = 1600;
+const LANE_LABEL_WIDTH = 104;
 
 function fmtMs(ms) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "--:--";
   const total = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function shortPath(path) {
@@ -49,342 +49,251 @@ function shortPath(path) {
   return parts.slice(Math.max(0, parts.length - 3)).join(" / ");
 }
 
-function parseTimestampMs(value) {
-  if (!value) return null;
-  const normalized = /[+-]\d{4}$/.test(value) ? `${value.slice(0, -2)}:${value.slice(-2)}` : value;
-  const ms = Date.parse(normalized);
-  return Number.isNaN(ms) ? null : ms;
+function generatedAtMs() {
+  const value = Date.parse(dashboardState.payload?.generated_at || "");
+  return Number.isNaN(value) ? Date.now() : value;
 }
 
-function activeNow(data = state.data) {
-  const now = data?.now || {};
-  if (now.track) {
-    state.lastActiveNow = now;
-    state.lastActiveAt = Date.now();
-    return now;
-  }
-  if (state.lastActiveNow && Date.now() - state.lastActiveAt < TRANSIENT_EMPTY_MS) {
-    return state.lastActiveNow;
-  }
-  return now;
+function livePlayheadMs() {
+  const transport = dashboardState.dashboard?.transport || {};
+  const base = transport.playhead_ms;
+  if (base === null || base === undefined) return null;
+  if (!["playing", "window-active"].includes(transport.status)) return base;
+  const duration = transport.duration_ms || base;
+  return Math.min(duration, base + Math.max(0, Date.now() - generatedAtMs()));
 }
 
-function currentEvent(events, data = state.data) {
-  const now = activeNow(data);
-  return (
-    events.find((event) => event.kind === "song" && event.status === "current") ||
-    events.find((event) => event.kind === "song" && now?.track?.path && event.path === now.track.path) ||
-    null
+function eventSignature(dashboard) {
+  return JSON.stringify(
+    (dashboard?.events || []).map((event) => [
+      event.id,
+      event.kind,
+      event.lane,
+      event.start_ms,
+      event.end_ms,
+      event.status,
+      event.display_title,
+    ])
   );
 }
 
-function eventStart(event) {
-  return event.start_ms;
+function statusLabel(value) {
+  return String(value || "unknown").replace("-", " ");
 }
 
-function eventEnd(event) {
-  const start = eventStart(event);
-  if (event.end_ms !== null && event.end_ms !== undefined) return event.end_ms;
-  if (start === null || start === undefined) return null;
-  return start + inferredDuration(event);
+function setBadgeState(el, status) {
+  el.className = `badge ${String(status || "unknown").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
+  el.textContent = statusLabel(status);
 }
 
-function isTimed(event) {
-  return eventStart(event) !== null && eventStart(event) !== undefined && eventEnd(event) !== null && eventEnd(event) !== undefined;
+function renderTopline() {
+  const dashboard = dashboardState.dashboard;
+  const now = dashboard?.now;
+  const transport = dashboard?.transport || {};
+  const playhead = livePlayheadMs();
+
+  els.nowTitle.textContent = now?.display_title || "nothing active";
+  els.nowMeta.textContent = now ? now.display_meta || shortPath(now.path) : dashboard?.session_path || "waiting for runner state";
+  els.transportStatus.textContent = statusLabel(transport.status);
+  els.playheadTime.textContent = fmtMs(playhead);
+  els.windowTime.textContent = transport.window?.start_ms !== undefined
+    ? `${fmtMs(transport.window.start_ms)} - ${fmtMs(transport.window.end_ms)}`
+    : "--:--";
+  els.updatedTime.textContent = transport.updated_at || dashboardState.payload?.generated_at || "--";
+
+  els.currentTitle.textContent = now?.display_title || "nothing active";
+  els.currentDetail.textContent = now ? `${fmtMs(now.start_ms)} - ${fmtMs(now.end_ms)} | ${shortPath(now.path)}` : "no current clip";
+  setBadgeState(els.currentState, transport.status || "idle");
+  const pct = transport.duration_ms && playhead !== null ? Math.max(0, Math.min(100, (playhead / transport.duration_ms) * 100)) : 0;
+  els.sessionProgress.style.width = `${pct}%`;
 }
 
-function inferredDuration(event) {
-  if (event.duration_ms) return event.duration_ms;
-  return 0;
+function listItem(event) {
+  const item = document.createElement("div");
+  item.className = `mini-event ${event.kind || "event"} ${event.status || ""}`;
+  const title = document.createElement("strong");
+  title.textContent = event.display_title || "untitled";
+  const meta = document.createElement("span");
+  meta.textContent = `${fmtMs(event.start_ms)} | ${event.display_meta || shortPath(event.path)}`;
+  item.append(title, meta);
+  return item;
 }
 
-function activeElapsedMs(data = state.data) {
-  const now = activeNow(data);
-  const started = parseTimestampMs(now?.started_at);
-  if (started !== null) return Math.max(0, Date.now() - started);
-  return Math.max(0, now?.elapsed_ms || 0);
-}
-
-function nowPositionMs(data, events) {
-  const current = currentEvent(events, data);
-  if (!current) return state.lastPositionMs;
-  const elapsed = activeElapsedMs(data);
-  const start = eventStart(current);
-  if (start === null || start === undefined) return state.lastPositionMs;
-  const duration = inferredDuration(current);
-  const position = start + (duration ? Math.min(elapsed, duration) : elapsed);
-  state.lastPositionMs = position;
-  return position;
-}
-
-function updateNow(data) {
-  const now = activeNow(data);
-  if (!now.track) {
-    els.title.textContent = "nothing playing";
-    els.meta.textContent = "waiting for runner state";
-    els.elapsed.textContent = "0:00";
-    els.duration.textContent = "--:--";
-    els.scrub.style.width = "0%";
-    els.transition.textContent = "";
+function renderList(container, events, emptyText, limit = 6) {
+  container.replaceChildren();
+  if (!events || !events.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = emptyText;
+    container.append(empty);
     return;
   }
-  els.title.textContent = now.track.title || "untitled";
-  els.meta.textContent = [now.track.artist, now.track.album].filter(Boolean).join(" - ") || shortPath(now.track.path);
-  els.elapsed.textContent = fmtMs(activeElapsedMs(data));
-  els.duration.textContent = fmtMs(now.duration_ms);
-  const pct = now.duration_ms ? Math.min(100, (activeElapsedMs(data) / now.duration_ms) * 100) : 0;
-  els.scrub.style.width = `${pct}%`;
-  const transition = now.transition;
-  els.transition.textContent = transition
-    ? `next: ${shortPath(transition.next)} | key ${transition.key_relation} | pitch ${transition.pitch_shift_semitones >= 0 ? "+" : ""}${transition.pitch_shift_semitones} | tempo ${transition.target_tempo_shift_pct}%`
-    : currentEvent(state.data?.session?.events || [], data)?.transition_gap_ms
-      ? `last transition gap: ${fmtMs(currentEvent(state.data?.session?.events || [], data).transition_gap_ms)}`
-      : "";
+  for (const event of events.slice(0, limit)) container.append(listItem(event));
 }
 
-function eventLabel(event) {
-  if (event.kind === "automation") return `${event.param || "automation"} -> ${event.target || event.owner || "master"}`;
-  if (event.kind === "vocal") return event.text || event.id || "vocal drop";
-  return event.title || event.id || "song";
-}
-
-function eventMeta(event) {
-  if (event.kind === "automation") return `${fmtMs(event.start_ms)} - ${fmtMs(event.end_ms)}`;
-  if (event.kind === "vocal") return `${fmtMs(event.start_ms)} voice drop`;
-  const artistAlbum = [event.artist, event.album].filter(Boolean).join(" - ");
-  const start = eventStart(event);
-  const time = start === null || start === undefined ? "missing timestamp" : fmtMs(start);
-  const gap = event.transition_gap_ms ? ` gap ${fmtMs(event.transition_gap_ms)}` : "";
-  return `${time}${gap} ${artistAlbum}`;
-}
-
-function groupEvents(events) {
-  const lanes = new Map(DECK_LANES.map((lane) => [lane, []]));
-  for (const event of events.filter(isTimed)) {
-    const lane = event.deck || event.kind || "timeline";
-    if (!lanes.has(lane)) lanes.set(lane, []);
-    lanes.get(lane).push(event);
+function renderHealth() {
+  const dashboard = dashboardState.dashboard || {};
+  const health = dashboard.health || {};
+  els.healthList.replaceChildren();
+  const rows = [
+    ["runner", health.runner_state || "unknown"],
+    ["current clips", String((health.current_clips || []).length)],
+    ["receiver telemetry", (health.receivers || []).length ? `${health.receivers.length} receivers` : "not in state"],
+  ];
+  for (const [key, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "health-row";
+    row.innerHTML = `<span>${key}</span><strong>${value}</strong>`;
+    els.healthList.append(row);
   }
-  return lanes;
 }
 
-function laneInfo(lane) {
-  const match = /^deck-(\d+)$/.exec(lane);
-  if (!match) return { number: "", name: lane };
-  return { number: match[1], name: "deck" };
+function renderSummary() {
+  const dashboard = dashboardState.dashboard || {};
+  const session = dashboard.session || {};
+  const counts = session.counts || {};
+  const rows = [
+    ["mode", session.timeline_mode || "native"],
+    ["duration", fmtMs(session.duration_ms)],
+    ["songs", counts.song || 0],
+    ["vocal", counts.vocal || 0],
+    ["automation", counts.automation || 0],
+    ["session", dashboard.session_path || ""],
+  ];
+  els.sessionSummary.replaceChildren();
+  for (const [key, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "summary-row";
+    row.innerHTML = `<span>${key}</span><strong>${value}</strong>`;
+    els.sessionSummary.append(row);
+  }
 }
 
-function timelineScale(events) {
-  const timestamped = events.filter(isTimed).map(eventEnd);
-  const max = Math.max(60000, ...timestamped);
-  const stageWidth = Math.max(MIN_STAGE_WIDTH, Math.ceil(max / 1000) * 5);
-  return { max, stageWidth };
+function timelineScale(durationMs) {
+  const duration = Math.max(60_000, durationMs || 60_000);
+  const stageWidth = Math.max(MIN_STAGE_WIDTH, Math.ceil(duration / 1000) * 7);
+  return { duration, stageWidth };
 }
 
 function renderAxis(scale) {
   els.timeAxis.replaceChildren();
   els.timeAxis.style.setProperty("--stage-width", `${scale.stageWidth}px`);
-  const tickEvery = scale.max > 3600000 ? 900000 : 300000;
-  for (let at = 0; at <= scale.max; at += tickEvery) {
+  const tickEvery = scale.duration > 3_600_000 ? 900_000 : scale.duration > 900_000 ? 300_000 : 60_000;
+  for (let at = 0; at <= scale.duration; at += tickEvery) {
     const tick = document.createElement("span");
     tick.className = "tick";
-    tick.style.left = `${LANE_LABEL_WIDTH + (at / scale.max) * scale.stageWidth}px`;
+    tick.style.left = `${LANE_LABEL_WIDTH + (at / scale.duration) * scale.stageWidth}px`;
     tick.textContent = fmtMs(at);
     els.timeAxis.append(tick);
   }
   syncAxis();
 }
 
-function renderTimeline(events) {
+function laneNumber(laneId) {
+  const match = /^deck-(\d+)$/.exec(laneId || "");
+  return match ? match[1] : "";
+}
+
+function renderTimeline() {
+  const dashboard = dashboardState.dashboard;
+  const scale = timelineScale(dashboard?.session?.duration_ms);
+  dashboardState.scale = scale;
   els.timeline.replaceChildren();
-  const timedEvents = events.filter(isTimed);
-  if (!timedEvents.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = events.length ? "events are missing timestamp data" : "no timeline events yet";
-    els.timeline.append(empty);
-    return;
-  }
-  const scale = timelineScale(timedEvents);
-  state.scale = scale;
-  renderAxis(scale);
   els.timeline.style.setProperty("--stage-width", `${scale.stageWidth}px`);
-  const lanes = groupEvents(timedEvents);
-  for (const [lane, items] of lanes.entries()) {
+  renderAxis(scale);
+
+  for (const lane of dashboard?.lanes || []) {
     const row = document.createElement("div");
-    row.className = `lane ${DECK_LANES.includes(lane) ? "deck-lane" : "utility-lane"}`;
+    row.className = `lane-row ${lane.kind || ""}`;
     const label = document.createElement("div");
-    const info = laneInfo(lane);
-    label.className = `lane-label ${DECK_LANES.includes(lane) ? "deck-label" : ""}`;
-    if (info.number) {
-      const number = document.createElement("span");
-      number.className = "lane-number";
-      number.textContent = info.number;
-      const name = document.createElement("span");
-      name.className = "lane-name";
-      name.textContent = info.name;
-      label.append(number, name);
-    } else {
-      label.textContent = info.name;
-    }
+    label.className = "lane-label";
+    const number = laneNumber(lane.id);
+    const utilityLabel = lane.id === "voice" ? "mic" : lane.id === "automation" ? "auto" : lane.label || lane.id;
+    label.innerHTML = number
+      ? `<strong>${number}</strong><span>deck</span>`
+      : `<strong>${utilityLabel}</strong><span>${lane.label || lane.id}</span>`;
     const track = document.createElement("div");
-    track.className = `lane-track ${items.length ? "" : "empty-lane"}`;
-    if (!items.length) {
+    track.className = "lane-track";
+    if (!lane.events.length) {
       const empty = document.createElement("span");
-      empty.className = "empty-lane-label";
+      empty.className = "lane-empty";
       empty.textContent = "empty";
       track.append(empty);
     }
-    for (const event of items) {
-      const start = eventStart(event);
-      const end = eventEnd(event);
-      const el = document.createElement("div");
-      el.className = `event ${event.kind || "event"} ${event.status || ""}`;
-      el.style.left = `${(start / scale.max) * scale.stageWidth}px`;
-      el.style.width = `${Math.max(16, ((end - start) / scale.max) * scale.stageWidth)}px`;
-      el.title = `${eventLabel(event)}\n${eventMeta(event)}\n${event.path || ""}`;
-      if (event.kind !== "automation") {
-        const title = document.createElement("div");
-        title.className = "event-title";
-        title.textContent = eventLabel(event);
-        const meta = document.createElement("div");
-        meta.className = "event-meta";
-        meta.textContent = eventMeta(event);
-        el.append(title, meta);
-      }
+    for (const event of lane.events) {
+      if (!event.is_timed) continue;
+      const start = Math.max(0, event.start_ms || 0);
+      const end = Math.max(start + 1000, event.end_ms || start + 1000);
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = `timeline-event ${event.kind || "event"} ${event.status || ""}`;
+      el.style.left = `${(start / scale.duration) * scale.stageWidth}px`;
+      el.style.width = `${Math.max(18, ((end - start) / scale.duration) * scale.stageWidth)}px`;
+      el.title = `${event.display_title}\n${fmtMs(start)} - ${fmtMs(end)}\n${event.display_meta || shortPath(event.path)}`;
+      el.innerHTML = `<span>${event.display_title || "event"}</span><small>${event.display_meta || ""}</small>`;
       track.append(el);
     }
     row.append(label, track);
     els.timeline.append(row);
   }
+
   const playhead = document.createElement("div");
   playhead.className = "playhead";
-  state.playhead = playhead;
+  dashboardState.playheadEl = playhead;
   els.timeline.append(playhead);
   updatePlayhead();
 }
 
-function renderSummary(events) {
-  const counts = events.reduce((acc, event) => {
-    acc[event.kind] = (acc[event.kind] || 0) + 1;
-    return acc;
-  }, {});
-  const untimed = events.filter((event) => !isTimed(event)).length;
-  els.summary.replaceChildren();
-  for (const [key, value] of Object.entries(counts)) {
-    const pill = document.createElement("span");
-    pill.className = "pill";
-    pill.textContent = `${value} ${key}`;
-    els.summary.append(pill);
-  }
-  if (untimed) {
-    const pill = document.createElement("span");
-    pill.className = "pill warning";
-    pill.textContent = `${untimed} untimed`;
-    els.summary.append(pill);
-  }
-}
-
-function renderInspector(data, events) {
-  const songs = events.filter((event) => event.kind === "song");
-  const current = currentEvent(songs, data);
-  const planned = songs.filter((event) => event.status === "planned").slice(0, 6);
-  const automations = events.filter((event) => event.kind === "automation" || event.kind === "vocal").slice(0, 8);
-
-  els.currentCardTitle.textContent = current ? eventLabel(current) : "nothing loaded";
-  els.currentCardMeta.textContent = current
-    ? `${eventMeta(current)} | ${shortPath(current.path)}`
-    : data.session?.path || "";
-
-  renderQueueList(els.upNext, planned, "no future clips");
-  renderQueueList(els.automationList, automations, "no automation planned");
-}
-
-function renderQueueList(container, events, emptyText) {
-  container.replaceChildren();
-  if (!events.length) {
-    const empty = document.createElement("p");
-    empty.className = "muted compact";
-    empty.textContent = emptyText;
-    container.append(empty);
-    return;
-  }
-  for (const event of events) {
-    const item = document.createElement("div");
-    item.className = `queue-item ${event.kind || ""} ${event.status || ""}`;
-    const title = document.createElement("strong");
-    title.textContent = eventLabel(event);
-    const meta = document.createElement("span");
-    meta.textContent = eventMeta(event);
-    item.append(title, meta);
-    container.append(item);
-  }
-}
-
-function timelineSignature(events) {
-  return JSON.stringify(
-    events.map((event) => [
-      event.id,
-      event.kind,
-      event.deck,
-      event.index,
-      event.status,
-      event.start_ms,
-      event.end_ms,
-      event.duration_ms,
-    ])
-  );
-}
-
-function autoFollowPlayhead(left) {
-  if (!els.timelineScroll || !currentEvent(state.data?.session?.events || [])) return;
-  const viewportStart = els.timelineScroll.scrollLeft;
-  const viewportEnd = viewportStart + els.timelineScroll.clientWidth;
-  const target = Math.max(0, left - els.timelineScroll.clientWidth * 0.42);
-  if (left > viewportEnd - 180 || left < viewportStart + 120) {
-    els.timelineScroll.scrollTo({ left: target, behavior: "smooth" });
-  }
-}
-
 function syncAxis() {
-  els.timeAxis.style.setProperty("--scroll-x", `${els.timelineScroll?.scrollLeft || 0}px`);
-}
-
-function render() {
-  if (!state.data) return;
-  updateNow(state.data);
-  const events = state.data.session?.events || [];
-  els.timelineTitle.textContent = "session timeline";
-  els.timelineSubtitle.textContent = `native timestamped mix session | ${state.data.session?.path || state.data.state_path}`;
-  els.updated.textContent = `updated ${state.data.generated_at}`;
-  els.transport.textContent = activeNow(state.data)?.track ? "live playhead active" : "waiting for transport";
-  renderSummary(events);
-  const signature = timelineSignature(events);
-  if (signature !== state.timelineSignature) {
-    state.timelineSignature = signature;
-    renderTimeline(events);
-  } else {
-    updatePlayhead();
-  }
-  renderInspector(state.data, events);
+  els.timeAxis.style.setProperty("--scroll-x", `${els.timelineScroll.scrollLeft}px`);
 }
 
 function updatePlayhead() {
-  const events = state.data?.session?.events || [];
-  if (!state.playhead || !state.scale || !events.length) return;
-  const position = nowPositionMs(state.data, events);
-  const boundedPosition = Math.min(position, state.scale.max);
-  const left = (boundedPosition / state.scale.max) * state.scale.stageWidth;
-  state.playhead.style.left = `${left}px`;
-  autoFollowPlayhead(left);
-  updateNow(state.data);
+  const scale = dashboardState.scale;
+  const playhead = dashboardState.playheadEl;
+  if (!scale || !playhead) return;
+  const ms = livePlayheadMs();
+  if (ms === null || ms === undefined) {
+    playhead.hidden = true;
+    return;
+  }
+  playhead.hidden = false;
+  const left = Math.max(0, Math.min(scale.stageWidth, (ms / scale.duration) * scale.stageWidth));
+  playhead.style.left = `${left}px`;
+  els.playheadTime.textContent = fmtMs(ms);
+  if (dashboardState.follow) {
+    const viewportStart = els.timelineScroll.scrollLeft;
+    const viewportEnd = viewportStart + els.timelineScroll.clientWidth;
+    if (left < viewportStart + 120 || left > viewportEnd - 180) {
+      els.timelineScroll.scrollTo({ left: Math.max(0, left - els.timelineScroll.clientWidth * 0.42), behavior: "smooth" });
+    }
+  }
+}
+
+function render() {
+  const dashboard = dashboardState.dashboard;
+  renderTopline();
+  renderList(els.nextList, dashboard.upcoming, "no future song clips");
+  renderList(els.commentaryList, dashboard.commentary, "no planned lean-ins");
+  renderList(els.automationList, dashboard.automation, "no upcoming automation", 10);
+  renderHealth();
+  renderSummary();
+  els.timelineTitle.textContent = dashboard.session?.timeline_mode || "native mix session";
+  const signature = eventSignature(dashboard);
+  if (signature !== dashboardState.signature) {
+    dashboardState.signature = signature;
+    renderTimeline();
+  } else {
+    updatePlayhead();
+  }
 }
 
 async function refresh() {
   const response = await fetch("/api/state", { cache: "no-store" });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || response.statusText);
-  state.data = data;
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  dashboardState.payload = payload;
+  dashboardState.dashboard = payload.dashboard;
   render();
 }
 
@@ -392,15 +301,18 @@ async function tick() {
   try {
     await refresh();
   } catch (error) {
-    els.timeline.replaceChildren();
-    const el = document.createElement("div");
-    el.className = "error";
-    el.textContent = error.message;
-    els.timeline.append(el);
+    els.nowTitle.textContent = "dashboard error";
+    els.nowMeta.textContent = error.message;
+    els.transportStatus.textContent = "error";
   }
 }
+
+els.followPlayhead.addEventListener("change", (event) => {
+  dashboardState.follow = event.currentTarget.checked;
+  updatePlayhead();
+});
+els.timelineScroll.addEventListener("scroll", syncAxis, { passive: true });
 
 tick();
 setInterval(tick, 3000);
 setInterval(updatePlayhead, 1000);
-els.timelineScroll.addEventListener("scroll", syncAxis, { passive: true });

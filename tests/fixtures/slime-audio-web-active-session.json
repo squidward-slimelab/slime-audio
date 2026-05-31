@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+  "clips": [
+    {
+      "id": "clip-a",
+      "deck": "deck-3",
+      "path": "/music/Ninajirachi/I Love My Computer/01 - London Song.flac",
+      "start_ms": 0,
+      "duration_ms": 90000
+    },
+    {
+      "id": "clip-b",
+      "deck": "deck-1",
+      "path": "/music/Baltra/In the Afterglow/02 - Gentle Tone.flac",
+      "start_ms": 72000,
+      "duration_ms": 110000
+    },
+    {
+      "id": "clip-c",
+      "deck": "deck-2",
+      "path": "/music/Common Saints/Night Light/01 - Night Light.flac",
+      "start_ms": 178000,
+      "duration_ms": 120000
+    }
+  ],
+  "mic_lean_ins": [
+    {
+      "id": "lean-a",
+      "start_ms": 104000,
+      "text": "short incoming vocal note",
+      "volume": 1.4,
+      "ducking": {
+        "target": "master",
+        "param": "duck_volume",
+        "points": [
+          {"at_ms": 103700, "value": 0.45},
+          {"at_ms": 108200, "value": 1.0}
+        ]
+      },
+      "lowpass": {
+        "target": "master",
+        "param": "lowpass_hz",
+        "points": [
+          {"at_ms": 103700, "value": 1400},
+          {"at_ms": 108200, "value": 22050}
+        ]
+      }
+    }
+  ],
+  "automations": [
+    {
+      "target": "clip-b",
+      "param": "gain_db",
+      "points": [
+        {"at_ms": 72000, "value": -10},
+        {"at_ms": 82000, "value": 0}
+      ]
+    }
+  ]
+}

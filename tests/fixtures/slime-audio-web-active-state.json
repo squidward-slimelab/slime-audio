@@ -1,0 +1,25 @@
+{
+  "timeline_mode": "native-session-runner",
+  "current": "/music/Baltra/In the Afterglow/02 - Gentle Tone.flac",
+  "resolved_current": "/music/Baltra/In the Afterglow/02 - Gentle Tone.flac",
+  "playhead_ms": 84000,
+  "window_start_ms": 72000,
+  "window_end_ms": 180000,
+  "window_started_at": "2026-05-31T10:00:00-0400",
+  "updated_at": "2026-05-31T10:00:05-0400",
+  "duration_ms": 298000,
+  "current_clips": [
+    {
+      "id": "clip-b",
+      "deck": "deck-1",
+      "path": "/music/Baltra/In the Afterglow/02 - Gentle Tone.flac",
+      "start_ms": 72000,
+      "end_ms": 182000,
+      "trim_start_ms": 0
+    }
+  ],
+  "receivers": [
+    {"name": "SPATULA", "status": "listening"},
+    {"name": "SPONGEBOT", "status": "listening"}
+  ]
+}

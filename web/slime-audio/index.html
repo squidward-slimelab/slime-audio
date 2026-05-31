@@ -3,73 +3,94 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SlimeAudio</title>
+    <title>SlimeAudio Dashboard</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <section class="now">
-        <div>
-          <p class="eyebrow">SlimeAudio</p>
-          <h1 id="track-title">waiting for state</h1>
-          <p id="track-meta" class="muted">no active track</p>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="label">SlimeAudio</p>
+          <h1 id="now-title">loading session</h1>
+          <p id="now-meta" class="subtle">waiting for dashboard state</p>
         </div>
-        <div class="meters">
-          <div class="time-row">
-            <span id="elapsed">0:00</span>
-            <span id="duration">--:--</span>
+        <div class="transport-strip" aria-label="transport status">
+          <div>
+            <span class="label">transport</span>
+            <strong id="transport-status">loading</strong>
           </div>
-          <div class="scrub" aria-label="read only track progress">
-            <div id="scrub-fill"></div>
+          <div>
+            <span class="label">playhead</span>
+            <strong id="playhead-time">--:--</strong>
           </div>
-          <p id="transition" class="transition"></p>
+          <div>
+            <span class="label">window</span>
+            <strong id="window-time">--:--</strong>
+          </div>
+          <div>
+            <span class="label">updated</span>
+            <strong id="updated-time">--</strong>
+          </div>
         </div>
-      </section>
+      </header>
 
-      <section class="toolbar">
-        <span class="mode">session plan</span>
-        <span id="transport" class="transport">live timeline</span>
-        <span id="updated" class="muted"></span>
-      </section>
-
-      <section class="workspace">
-        <section class="panel timeline-panel">
-          <div class="timeline-head">
+      <section class="status-grid" aria-label="live status">
+        <article class="status-panel status-primary">
+          <div class="panel-head">
             <div>
-              <h2 id="timeline-title">session timeline</h2>
-              <p id="timeline-subtitle" class="muted"></p>
+              <p class="label">now</p>
+              <h2 id="current-title">nothing active</h2>
             </div>
-            <div id="summary" class="summary"></div>
+            <span id="current-state" class="badge">idle</span>
           </div>
-          <div id="time-axis" class="time-axis"></div>
-          <div id="timeline-scroll" class="timeline-scroll">
-            <div id="timeline" class="timeline"></div>
+          <p id="current-detail" class="detail-line">no current clip</p>
+          <div class="progress-track" aria-label="session progress">
+            <div id="session-progress"></div>
           </div>
-        </section>
+        </article>
 
-        <aside class="panel inspector">
-          <div class="inspector-section">
-            <p class="eyebrow">current</p>
-            <h2 id="current-card-title">nothing loaded</h2>
-            <p id="current-card-meta" class="muted"></p>
-          </div>
-          <div class="inspector-section">
-            <p class="eyebrow">next up</p>
-            <div id="up-next" class="queue-list"></div>
-          </div>
-          <div class="inspector-section">
-            <p class="eyebrow">automation</p>
-            <div id="automation-list" class="queue-list"></div>
-          </div>
-        </aside>
+        <article class="status-panel">
+          <p class="label">next clips</p>
+          <div id="next-list" class="compact-list"></div>
+        </article>
+
+        <article class="status-panel">
+          <p class="label">commentary</p>
+          <div id="commentary-list" class="compact-list"></div>
+        </article>
+
+        <article class="status-panel">
+          <p class="label">health</p>
+          <div id="health-list" class="compact-list"></div>
+        </article>
       </section>
 
-      <section class="legend">
-        <span><b class="swatch current"></b>current</span>
-        <span><b class="swatch planned"></b>planned</span>
-        <span><b class="swatch done"></b>done</span>
-        <span><b class="swatch vocal"></b>vocal</span>
-        <span><b class="swatch automation"></b>automation</span>
+      <section class="timeline-panel" aria-label="session timeline">
+        <div class="timeline-toolbar">
+          <div>
+            <p class="label">arrangement</p>
+            <h2 id="timeline-title">native mix session</h2>
+          </div>
+          <label class="follow-toggle">
+            <input id="follow-playhead" type="checkbox" />
+            follow playhead
+          </label>
+        </div>
+        <div id="time-axis" class="time-axis"></div>
+        <div id="timeline-scroll" class="timeline-scroll">
+          <div id="timeline" class="timeline"></div>
+        </div>
+      </section>
+
+      <section class="lower-grid">
+        <article class="status-panel">
+          <p class="label">automation</p>
+          <div id="automation-list" class="event-list"></div>
+        </article>
+        <article class="status-panel">
+          <p class="label">session</p>
+          <div id="session-summary" class="summary-grid"></div>
+        </article>
       </section>
     </main>
     <script src="/app.js"></script>
