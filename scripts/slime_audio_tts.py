@@ -3,13 +3,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import socket
-import struct
 import subprocess
 import tempfile
-import time
-import uuid
-import wave
 from pathlib import Path
 
 import edge_tts
@@ -45,45 +40,16 @@ def convert_to_wav(mp3_path: Path, wav_path: Path, volume: float) -> None:
 
 
 def send_wav(wav_path: Path, host: str, port: int, delay_ms: int) -> None:
-    with wave.open(str(wav_path), "rb") as audio:
-        channels = audio.getnchannels()
-        rate = audio.getframerate()
-        width = audio.getsampwidth()
-        frames = audio.readframes(audio.getnframes())
-
-    if width != 2:
-        raise SystemExit("expected 16-bit PCM wav")
-
-    session = uuid.uuid4()
-    start_ms = int((time.time() * 1000) + delay_ms)
-    chunk_frames = max(1, rate // 20)
-    chunk_bytes = chunk_frames * channels * width
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-    sequence = 0
-    for offset in range(0, len(frames), chunk_bytes):
-        payload = frames[offset : offset + chunk_bytes]
-        header = (
-            b"SLA1"
-            + bytes([1])
-            + session.bytes_le
-            + struct.pack("<iqihhh", sequence, start_ms, rate, channels, 16, len(payload))
-        )
-        sock.sendto(header + payload, (host, port))
-        sequence += 1
-        time.sleep(0.045)
-
-    header = (
-        b"SLA1"
-        + bytes([2])
-        + session.bytes_le
-        + struct.pack("<iqihhh", sequence, start_ms, rate, channels, 16, 0)
+    raise RuntimeError(
+        "direct TTS audio sending has been removed; plan mic lean-ins with "
+        "scripts/slime_audio_lean_ins.py and render/stream the mix session"
     )
-    sock.sendto(header, (host, port))
-    print(f"sent session={session} bytes={len(frames)} target={host}:{port}")
-
 
 def main() -> int:
+    raise SystemExit(
+        "packet audio TTS transport has been removed; plan mic lean-ins with "
+        "scripts/slime_audio_lean_ins.py and render/stream the mix session"
+    )
     parser = argparse.ArgumentParser()
     parser.add_argument("text")
     parser.add_argument("--host", default="192.168.0.163")

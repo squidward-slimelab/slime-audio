@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_session import load_session
-from slime_audio_session_mixdown import build_filter_complex, ffmpeg_command, session_duration_ms
+from slime_audio_session_mixdown import build_filter_complex, ffmpeg_command, session_duration_ms, shift_session_window
 
 
 class SlimeAudioSessionMixdownTests(unittest.TestCase):
@@ -111,6 +111,86 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             session = load_session(session_path)
 
         self.assertEqual(session_duration_ms(session), 15_000)
+
+    def test_shift_session_window_trims_current_clip_and_shifts_future_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "current",
+                                "deck": "deck-1",
+                                "path": "/music/current.flac",
+                                "start": 5_000,
+                                "trim_start": 1_000,
+                                "duration": 20_000,
+                            },
+                            {
+                                "id": "future",
+                                "deck": "deck-2",
+                                "path": "/music/future.flac",
+                                "start": 30_000,
+                                "duration": 10_000,
+                            },
+                        ],
+                        "mic_lean_ins": [{"id": "lean", "start": 32_000, "text": "incoming"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            shifted = shift_session_window(load_session(session_path), 12_000)
+            filters = build_filter_complex(shifted, {"lean": Path("/tmp/lean.wav")}, 48_000, 2)
+
+        self.assertEqual(shifted.clips[0].id, "current")
+        self.assertEqual(shifted.clips[0].start_ms, 0)
+        self.assertEqual(shifted.clips[0].trim_start_ms, 8_000)
+        self.assertEqual(shifted.clips[0].duration_ms, 13_000)
+        self.assertEqual(shifted.clips[1].start_ms, 18_000)
+        self.assertEqual(shifted.mic_lean_ins[0].start_ms, 20_000)
+        self.assertIn("atrim=start=8.000:duration=13.000", filters)
+        self.assertIn("adelay=0:all=1", filters)
+        self.assertIn("adelay=18000:all=1", filters)
+
+    def test_shift_session_window_limits_duration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-1",
+                                "path": "/music/bed.flac",
+                                "start": 5_000,
+                                "trim_start": 1_000,
+                                "duration": 20_000,
+                            },
+                            {
+                                "id": "too-late",
+                                "deck": "deck-1",
+                                "path": "/music/late.flac",
+                                "start": 35_000,
+                                "duration": 10_000,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            shifted = shift_session_window(load_session(session_path), 10_000, 8_000)
+            filters = build_filter_complex(shifted, {}, 48_000, 2, 8_000)
+
+        self.assertEqual([clip.id for clip in shifted.clips], ["bed"])
+        self.assertEqual(shifted.clips[0].trim_start_ms, 6_000)
+        self.assertEqual(shifted.clips[0].duration_ms, 8_000)
+        self.assertIn("atrim=duration=8.000,alimiter", filters)
 
 
 if __name__ == "__main__":

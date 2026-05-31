@@ -12,33 +12,48 @@ import slime_audio_web as web
 
 
 class SlimeAudioWebTests(unittest.TestCase):
-    def test_playlist_dashboard_includes_now_and_timeline(self):
+    def test_session_dashboard_includes_now_and_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/Artist/Album/a.flac", "start": 0, "duration": 30_000},
+                            {"id": "b", "deck": "deck-2", "path": "/music/Artist/Album/b.flac", "start": 30_000, "duration": 40_000},
+                            {"id": "c", "deck": "deck-3", "path": "/music/Artist/Album/c.flac", "start": 70_000, "duration": 50_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             state_path.write_text(
                 json.dumps(
                     {
-                        "completed": ["/music/Artist/Album/a.flac"],
                         "current": "/music/Artist/Album/b.flac",
-                        "index": 1,
-                        "order": ["/music/Artist/Album/a.flac", "/music/Artist/Album/b.flac", "/music/Artist/Album/c.flac"],
                         "resolved_current": "/music/Artist/Album/b.flac",
                         "started_at": "2026-05-30T12:00:00-0400",
-                        "next_transition": {"next": "/music/Artist/Album/c.flac", "key_relation": "relative", "pitch_shift_semitones": 0, "target_tempo_shift_pct": 1.2},
+                        "window_started_at": "2026-05-30T12:00:00-0400",
+                        "window_start_ms": 30_000,
+                        "window_end_ms": 70_000,
                     }
                 ),
                 encoding="utf-8",
             )
             with patch.object(web, "time") as fake_time:
                 fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:00-0400")
-                data = web.load_dashboard_state(state_path, None)
+                data = web.load_dashboard_state(state_path, session_path)
 
         self.assertEqual(data["now"]["track"]["title"], "b")
-        self.assertEqual(data["now"]["elapsed_ms"], 60000)
-        self.assertEqual(data["session"]["raw"]["source"], "playlist-runner-state")
-        self.assertEqual(data["session"]["raw"]["decks"], ["deck-3", "deck-1", "deck-2", "deck-4"])
-        self.assertEqual([event["status"] for event in data["session"]["events"]], ["done", "current", "planned"])
-        self.assertIsNone(data["session"]["events"][1]["duration_ms"])
+        self.assertEqual(data["now"]["elapsed_ms"], 40000)
+        self.assertEqual(data["session"]["source"], "mix-session")
+        self.assertEqual(data["session"]["timeline_mode"], "native")
+        self.assertEqual(data["session"]["raw"]["decks"], ["deck-1", "deck-2", "deck-3", "deck-4"])
+        self.assertEqual([event["start_ms"] for event in data["session"]["events"]], [0, 30_000, 70_000])
+        self.assertEqual(data["session"]["events"][1]["duration_ms"], 40_000)
 
     def test_session_events_include_clips_vocals_and_automation(self):
         payload = {

@@ -4,18 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import queue
 import shutil
 import socket
-import struct
 import subprocess
-import threading
 import time
-import uuid
-import wave
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Iterable
 
 DISCOVER_MESSAGE = b"SLIME_AUDIO_DISCOVER_V1"
 SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
@@ -66,6 +61,13 @@ def format_diagnostics(
         f"\tshared_stream_listening={str(bool(diagnostics.get('SharedStreamListening'))).lower()}"
         f"\tshared_stream_exit_code={diagnostics.get('SharedStreamExitCode')}"
         f"\tshared_stream_status={diagnostics.get('SharedStreamStatus') or ''}"
+        f"\tshared_stream_host={diagnostics.get('SharedStreamServerHost') or ''}"
+        f"\tshared_stream_pid={diagnostics.get('SharedStreamProcessId')}"
+        f"\tshared_stream_started_ms={diagnostics.get('SharedStreamStartedUnixTimeMs', 0)}"
+        f"\tshared_stream_last_exit_ms={diagnostics.get('SharedStreamLastExitUnixTimeMs', 0)}"
+        f"\tshared_stream_exits={diagnostics.get('SharedStreamExitCount', 0)}"
+        f"\tshared_stream_last_stderr_ms={diagnostics.get('SharedStreamLastStderrUnixTimeMs', 0)}"
+        f"\ttelemetry_path={diagnostics.get('SharedStreamTelemetryPath') or ''}"
     )
 
 
@@ -366,203 +368,6 @@ def run_snapcast_stream(
                 server.wait(timeout=5)
 
 
-def stream_wav_synced(wav_path: Path, targets: list[Receiver], delay_ms: int, packet_delay_ms: int) -> None:
-    with wave.open(str(wav_path), "rb") as audio:
-        channels = audio.getnchannels()
-        rate = audio.getframerate()
-        width = audio.getsampwidth()
-        frames = audio.readframes(audio.getnframes())
-
-    if width != 2:
-        raise SystemExit("expected 16-bit PCM wav")
-
-    session = uuid.uuid4()
-    start_ms = int((time.time() * 1000) + delay_ms)
-    chunk_frames = max(1, rate // 20)
-    chunk_bytes = chunk_frames * channels * width
-    endpoints = [(target.host, target.port) for target in targets]
-
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sequence = 0
-        for offset in range(0, len(frames), chunk_bytes):
-            payload = frames[offset : offset + chunk_bytes]
-            packet = encode_audio_packet(session, sequence, start_ms, rate, channels, payload)
-            for endpoint in endpoints:
-                sock.sendto(packet, endpoint)
-            sequence += 1
-            time.sleep(packet_delay_ms / 1000)
-
-        end = encode_audio_packet(session, sequence, start_ms, rate, channels, b"", packet_type=2)
-        for endpoint in endpoints:
-            sock.sendto(end, endpoint)
-
-    print(
-        f"sent session={session} bytes={len(frames)} start={start_ms} "
-        f"targets={','.join(target.endpoint for target in targets)}"
-    )
-
-
-def stream_live_synced(
-    input_path: Path,
-    targets: list[Receiver],
-    backend: str,
-    sample_rate: int,
-    channels: int,
-    delay_ms: int,
-    chunk_ms: int,
-    prebuffer_ms: int,
-    packet_redundancy: int,
-    effect: tuple[int, int, int, int, float, float] | None = None,
-    refresh_targets: Callable[[], list[Receiver]] | None = None,
-    refresh_targets_ms: int = 0,
-) -> None:
-    decoder, selected_backend = open_decoder_stdout(input_path, backend, sample_rate, channels)
-    if decoder.stdout is None:
-        raise RuntimeError("decoder stdout was not captured")
-
-    session = uuid.uuid4()
-    max_rtt = max((target.rtt_ms for target in targets), default=0.0)
-    lead_ms = max(delay_ms, int(max_rtt + 1200))
-    sender_start_ms: int | None = None
-    target_start_ms: dict[str, int] = {}
-    chunk_frames = max(1, sample_rate * chunk_ms // 1000)
-    packet_redundancy = max(1, packet_redundancy)
-    frame_bytes = channels * 2
-    chunk_bytes = chunk_frames * frame_bytes
-    prebuffer_frames = max(0, sample_rate * prebuffer_ms // 1000)
-    max_buffer_chunks = max(32, int(sample_rate * max(prebuffer_ms + 30000, chunk_ms * 32) / 1000 / chunk_frames))
-    decoded_chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=max_buffer_chunks)
-    decode_errors: list[BaseException] = []
-    endpoints = [(target, (target.host, target.port)) for target in targets]
-    refresh_every = refresh_targets_ms / 1000 if refresh_targets is not None and refresh_targets_ms > 0 else 0
-    next_refresh = time.monotonic() + refresh_every if refresh_every else 0.0
-    sequence = 0
-    bytes_sent = 0
-    buffered_frames = 0
-    pending_payloads: list[bytes] = []
-    started: float | None = None
-
-    def decode() -> None:
-        try:
-            while True:
-                payload = decoder.stdout.read(chunk_bytes)
-                if not payload:
-                    break
-                if len(payload) % frame_bytes:
-                    payload = payload[: len(payload) - (len(payload) % frame_bytes)]
-                if payload:
-                    decoded_chunks.put(payload)
-        except BaseException as ex:
-            decode_errors.append(ex)
-        finally:
-            decoded_chunks.put(None)
-
-    decoder_thread = threading.Thread(target=decode, name="slime-audio-decoder", daemon=True)
-    decoder_thread.start()
-
-    print(
-        f"live backend={selected_backend} session={session} lead_ms={lead_ms} "
-        f"prebuffer_ms={prebuffer_ms} packet_redundancy={packet_redundancy} "
-        f"targets={','.join(f'{target.machine_name}(rtt={target.rtt_ms:.1f}ms,offset={target.clock_offset_ms:.1f}ms)' for target in targets)}",
-        flush=True,
-    )
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            while True:
-                payload = decoded_chunks.get()
-                if payload is None:
-                    if started is None and pending_payloads:
-                        payloads = pending_payloads
-                        pending_payloads = []
-                    else:
-                        break
-                else:
-                    if started is None:
-                        pending_payloads.append(payload)
-                        buffered_frames += len(payload) // frame_bytes
-                        if prebuffer_frames and buffered_frames < prebuffer_frames:
-                            continue
-                        payloads = pending_payloads
-                        pending_payloads = []
-                    else:
-                        payloads = [payload]
-                if started is None:
-                    started = time.monotonic()
-                    sender_start_ms = int((time.time() * 1000) + lead_ms)
-                    target_start_ms = {
-                        target.endpoint: int(sender_start_ms + target.clock_offset_ms)
-                        for target, _ in endpoints
-                    }
-                    if effect is not None:
-                        effect_offset_ms, fade_in_ms, hold_ms, fade_out_ms, volume, lowpass_hz = effect
-                        send_effect_control(
-                            [target for target, _ in endpoints],
-                            delay_ms=lead_ms + effect_offset_ms,
-                            fade_in_ms=fade_in_ms,
-                            hold_ms=hold_ms,
-                            fade_out_ms=fade_out_ms,
-                            volume=volume,
-                            lowpass_hz=lowpass_hz,
-                        )
-
-                for payload in payloads:
-                    if refresh_every and time.monotonic() >= next_refresh:
-                        refreshed = refresh_targets()
-                        for target in refreshed:
-                            if sender_start_ms is not None:
-                                target_start_ms.setdefault(target.endpoint, int(sender_start_ms + target.clock_offset_ms))
-                        endpoints = [(target, (target.host, target.port)) for target in refreshed]
-                        next_refresh = time.monotonic() + refresh_every
-                    for target, endpoint in endpoints:
-                        packet = encode_audio_packet(
-                            session,
-                            sequence,
-                            target_start_ms[target.endpoint],
-                            sample_rate,
-                            channels,
-                            payload,
-                        )
-                        for _ in range(packet_redundancy):
-                            sock.sendto(packet, endpoint)
-                    bytes_sent += len(payload)
-                    sequence += 1
-                    next_send = started + ((bytes_sent / frame_bytes) / sample_rate)
-                    sleep_for = next_send - time.monotonic()
-                    if sleep_for > 0:
-                        time.sleep(sleep_for)
-
-            if started is not None:
-                for target, endpoint in endpoints:
-                    end = encode_audio_packet(
-                        session,
-                        sequence,
-                        target_start_ms[target.endpoint],
-                        sample_rate,
-                        channels,
-                        b"",
-                        packet_type=2,
-                    )
-                    for _ in range(packet_redundancy):
-                        sock.sendto(end, endpoint)
-    finally:
-        try:
-            decoder.stdout.close()
-        except Exception:
-            pass
-        return_code = decoder.wait(timeout=5)
-        if return_code not in (0, None):
-            raise subprocess.CalledProcessError(return_code, selected_backend)
-        if decode_errors:
-            raise decode_errors[0]
-
-    print(
-        f"sent live session={session} bytes={bytes_sent} "
-        f"targets={','.join(target.endpoint for target in targets)}",
-        flush=True,
-    )
-
-
 def send_control(targets: list[Receiver], payload: bytes, label: str) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         for target in targets:
@@ -598,44 +403,21 @@ def send_effect_control(
             )
 
 
-def encode_audio_packet(
-    session: uuid.UUID,
-    sequence: int,
-    start_ms: int,
-    rate: int,
-    channels: int,
-    payload: bytes,
-    packet_type: int = 1,
-) -> bytes:
-    header = (
-        b"SLA1"
-        + bytes([packet_type])
-        + session.bytes_le
-        + struct.pack("<iqihhh", sequence, start_ms, rate, channels, 16, len(payload))
-    )
-    return header + payload
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Stream a local audio file to SlimeAudio receivers with synced start.")
+    parser = argparse.ArgumentParser(description="Stream a local audio file to SlimeAudio receivers via shared-stream backends.")
     parser.add_argument("file", nargs="?", type=Path)
     parser.add_argument("--target", action="append", required=True, help="Receiver name, host:port, or all")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--discover-timeout-ms", type=int, default=2500)
     parser.add_argument("--include-muted", action="store_true", help="Include receivers that asked the server not to stream to them.")
     parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
-    parser.add_argument("--mode", choices=["packets", "multicast", "snapcast"], default="packets")
+    parser.add_argument("--mode", choices=["multicast", "snapcast"], default="snapcast")
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--snapcast-port", type=int, default=1704)
     parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
     parser.add_argument("--snapcast-fifo", type=Path, default=Path("/tmp/slime-audio-snapfifo"))
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
-    parser.add_argument("--packet-delay-ms", type=int, default=45)
-    parser.add_argument("--chunk-ms", type=int, default=7)
-    parser.add_argument("--prebuffer-ms", type=int, default=DEFAULT_PREBUFFER_MS)
-    parser.add_argument("--packet-redundancy", type=int, default=2)
-    parser.add_argument("--refresh-targets-ms", type=int, default=3000, help="For --target all packet streams, rediscover subscribers while playing.")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--dry-run", action="store_true")
@@ -743,38 +525,7 @@ def main() -> int:
         )
         return 0
 
-    effect = None
-    if args.effect_during_stream:
-        effect = (
-            args.effect_start_offset_ms,
-            args.effect_fade_in_ms,
-            args.effect_hold_ms,
-            args.effect_fade_out_ms,
-            args.effect_volume,
-            args.effect_lowpass_hz,
-        )
-    refresh_targets = None
-    if args.mode == "packets" and any(target.casefold() == "all" for target in args.target) and args.refresh_targets_ms > 0:
-        def refresh_targets() -> list[Receiver]:
-            discovered_targets = discover_receivers(args.port, args.discover_timeout_ms)
-            return resolve_targets(args.target, discovered_targets, args.port, include_muted=args.include_muted)
-
-    stream_live_synced(
-        args.file,
-        targets,
-        args.backend,
-        args.sample_rate,
-        args.channels,
-        args.delay_ms,
-        args.chunk_ms,
-        args.prebuffer_ms,
-        args.packet_redundancy,
-        effect,
-        refresh_targets=refresh_targets,
-        refresh_targets_ms=args.refresh_targets_ms,
-    )
-
-    return 0
+    raise SystemExit(f"unsupported stream mode: {args.mode}")
 
 
 if __name__ == "__main__":

@@ -63,7 +63,14 @@ public sealed record AudioDiagnostics(
     string? LatestSessionId,
     bool SharedStreamListening = false,
     int? SharedStreamExitCode = null,
-    string? SharedStreamStatus = null);
+    string? SharedStreamStatus = null,
+    string? SharedStreamServerHost = null,
+    int? SharedStreamProcessId = null,
+    long SharedStreamStartedUnixTimeMs = 0,
+    long SharedStreamLastExitUnixTimeMs = 0,
+    int SharedStreamExitCount = 0,
+    long SharedStreamLastStderrUnixTimeMs = 0,
+    string? SharedStreamTelemetryPath = null);
 
 public sealed record EffectEnvelope(
     long StartUnixTimeMs,

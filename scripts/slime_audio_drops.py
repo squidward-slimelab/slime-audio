@@ -324,6 +324,10 @@ async def run_plan(plan: DropPlan, spogo: str, max_minutes: float | None) -> int
 
 
 def main() -> int:
+    raise SystemExit(
+        "packet audio drop transport has been removed; plan mic lean-ins with "
+        "scripts/slime_audio_lean_ins.py and render/stream the mix session"
+    )
     parser = argparse.ArgumentParser(description="Run timed SlimeAudio sample drops against Spotify playback.")
     parser.add_argument("--plan", required=True, help="JSON plan with targets and drops")
     parser.add_argument("--spogo", default="spogo")

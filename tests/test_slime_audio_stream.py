@@ -7,13 +7,11 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_stream import (
-    DEFAULT_LIVE_DELAY_MS,
     EFFECT_MESSAGE_PREFIX,
     RESET_AUDIO_MESSAGE,
     Receiver,
     SHARED_STREAM_START_MESSAGE,
     SHARED_STREAM_STOP_MESSAGE,
-    encode_audio_packet,
     format_diagnostics,
     parse_discovery_response,
     parse_endpoint,
@@ -56,15 +54,6 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(parse_endpoint("SPATULA"), ("SPATULA", 47777))
         self.assertEqual(parse_endpoint("SPATULA:48888"), ("SPATULA", 48888))
 
-    def test_encoded_audio_packet_uses_protocol_magic(self):
-        import uuid
-
-        packet = encode_audio_packet(uuid.UUID("00000000-0000-0000-0000-000000000001"), 7, 1234, 48000, 2, b"abc")
-
-        self.assertEqual(packet[:4], b"SLA1")
-        self.assertEqual(packet[4], 1)
-        self.assertEqual(len(packet), 43 + 3)
-
     def test_resolve_targets_deduplicates_all_and_named_target(self):
         discovered = [
             Receiver("192.168.0.163:47777", "192.168.0.163", 47777, "SPATULA", "user", "0.3.0"),
@@ -87,9 +76,6 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(RESET_AUDIO_MESSAGE, b"SLIME_AUDIO_RESET_AUDIO_V1")
         self.assertEqual(EFFECT_MESSAGE_PREFIX, b"SLIME_AUDIO_EFFECT_V1 ")
 
-    def test_default_live_delay_keeps_audible_buffer(self):
-        self.assertGreaterEqual(DEFAULT_LIVE_DELAY_MS, 7000)
-
     def test_format_diagnostics(self):
         text = format_diagnostics(
             {
@@ -103,6 +89,10 @@ class SlimeAudioStreamTests(unittest.TestCase):
                 "LastPacketUnixTimeMs": 1_000,
                 "ResetCount": 2,
                 "DecodeFailures": 0,
+                "SharedStreamServerHost": "192.168.0.122",
+                "SharedStreamProcessId": 1234,
+                "SharedStreamExitCount": 2,
+                "SharedStreamTelemetryPath": r"C:\Users\slimeq\AppData\Local\SlimeAudio\telemetry.jsonl",
             },
             now_ms=1_250,
             clock_offset_ms=50,
@@ -111,6 +101,10 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertIn("diag_packets=42", text)
         self.assertIn("diag_missing_frames=7", text)
         self.assertIn("diag_last_packet_age_ms=300", text)
+        self.assertIn("shared_stream_host=192.168.0.122", text)
+        self.assertIn("shared_stream_pid=1234", text)
+        self.assertIn("shared_stream_exits=2", text)
+        self.assertIn("telemetry_path=", text)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,12 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
+import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
+from time import time
 from typing import Any
 
 MAX_DECKS = 4
@@ -21,7 +25,6 @@ AUTOMATABLE_PARAMS = {
     "send_reverb",
     "duck_volume",
 }
-
 
 @dataclass(frozen=True)
 class AutomationPoint:
@@ -107,6 +110,20 @@ def parse_ms(value: Any, field_name: str) -> int:
     minutes = int(parts[-2])
     hours = int(parts[0]) if len(parts) == 3 else 0
     return int(round(((hours * 3600) + (minutes * 60) + seconds) * 1000))
+
+
+def parse_timestamp(value: str | None) -> float | None:
+    if not value:
+        return None
+    text = value.strip()
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        if len(text) >= 5 and (text[-5] in {"+", "-"}) and text[-3] != ":":
+            text = f"{text[:-2]}:{text[-2:]}"
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 def parse_automation(payload: dict[str, Any], default_target: str | None = None) -> Automation:
@@ -202,6 +219,147 @@ def write_payload(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def playhead_ms_from_state(path: Path, now: float | None = None) -> int:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    explicit = payload.get("playhead_ms", payload.get("mix_playhead_ms"))
+    if explicit is not None:
+        return max(0, parse_ms(explicit, "state playhead"))
+    window_started_at = parse_timestamp(payload.get("window_started_at"))
+    if window_started_at is not None:
+        window_start_ms = parse_ms(payload.get("window_start_ms", 0), "state window start")
+        return max(0, window_start_ms + int(round(((now if now is not None else time()) - window_started_at) * 1000)))
+    mix_started_at = parse_timestamp(payload.get("mix_started_at"))
+    if mix_started_at is not None:
+        return max(0, int(round(((now if now is not None else time()) - mix_started_at) * 1000)))
+    started_at = parse_timestamp(payload.get("started_at"))
+    if started_at is None:
+        raise ValueError(f"state has no started_at/playhead_ms: {path}")
+    elapsed_ms = max(0, int(round(((now if now is not None else time()) - started_at) * 1000)))
+    order = payload.get("order")
+    if not isinstance(order, list):
+        return elapsed_ms
+
+    durations: dict[str, int] = {}
+    inline_durations = payload.get("timeline_durations_ms")
+    if isinstance(inline_durations, dict):
+        durations.update(
+            {
+                str(track): int(duration)
+                for track, duration in inline_durations.items()
+                if isinstance(duration, (int, float)) and duration > 0
+            }
+        )
+    cache_path = path.parent / "timeline-duration-cache.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = {}
+        if isinstance(cached, dict):
+            durations.update(
+                {
+                    str(track): int(duration)
+                    for track, duration in cached.items()
+                    if isinstance(duration, (int, float)) and duration > 0
+                }
+            )
+
+    index = int(payload.get("index", 0) or 0)
+    prior_tracks = [str(track) for track in order[: max(0, index)]]
+    if prior_tracks and any(track not in durations for track in prior_tracks):
+        return elapsed_ms
+    return sum(durations.get(track, 0) for track in prior_tracks) + elapsed_ms
+
+
+def read_playlist(path: Path) -> list[str]:
+    tracks = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not tracks:
+        raise ValueError(f"playlist is empty: {path}")
+    return tracks
+
+
+def slug(value: str, fallback: str) -> str:
+    stem = Path(value).stem or fallback
+    text = re.sub(r"[^a-zA-Z0-9]+", "-", stem.lower()).strip("-")
+    return text or fallback
+
+
+def probe_duration_ms(path: str) -> int:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nw=1:nk=1",
+            path,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    duration_seconds = float(result.stdout.strip())
+    if duration_seconds <= 0:
+        raise ValueError(f"could not determine positive duration for {path}")
+    return int(round(duration_seconds * 1000))
+
+
+def playlist_to_session_payload(
+    tracks: list[str],
+    *,
+    start_ms: int,
+    decks: list[str],
+    gap_ms: int,
+    overlap_ms: int,
+    default_duration_ms: int | None,
+    probe: bool,
+) -> dict[str, Any]:
+    if gap_ms and overlap_ms:
+        raise ValueError("gap_ms and overlap_ms cannot both be set")
+    if not decks:
+        decks = [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+    if len(decks) > MAX_DECKS:
+        raise ValueError(f"too many decks: {len(decks)} > {MAX_DECKS}")
+
+    cursor_ms = start_ms
+    clips: list[dict[str, Any]] = []
+    for index, track in enumerate(tracks):
+        if probe:
+            duration_ms = probe_duration_ms(track)
+        elif default_duration_ms is not None:
+            duration_ms = default_duration_ms
+        else:
+            duration_ms = None
+        clip: dict[str, Any] = {
+            "id": f"clip-{index + 1:03d}-{slug(track, f'track-{index + 1}')}",
+            "deck": decks[index % len(decks)],
+            "path": track,
+            "start_ms": cursor_ms,
+            "trim_start_ms": 0,
+        }
+        if duration_ms is not None:
+            clip["duration_ms"] = duration_ms
+            cursor_ms += max(0, duration_ms + gap_ms - overlap_ms)
+        clips.append(clip)
+
+    payload = {
+        "version": 1,
+        "decks": decks,
+        "clips": clips,
+        "mic_lean_ins": [],
+        "automations": [],
+    }
+    parse_session(payload)
+    return payload
 
 
 def parse_session(payload: dict[str, Any]) -> MixSession:
@@ -393,6 +551,49 @@ def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None
     return None
 
 
+def event_start_ms(item: dict[str, Any]) -> int:
+    return parse_ms(item.get("start_ms", item.get("start", 0)), "event start")
+
+
+def event_end_ms(item: dict[str, Any]) -> int | None:
+    duration = item.get("duration_ms", item.get("duration"))
+    if duration is None:
+        return None
+    return event_start_ms(item) + parse_ms(duration, "event duration")
+
+
+def guard_live_edit(
+    *,
+    label: str,
+    start_ms: int,
+    lock_before_ms: int | None,
+    force: bool,
+) -> None:
+    if force or lock_before_ms is None:
+        return
+    if start_ms < lock_before_ms:
+        raise ValueError(
+            f"{label} is before the live edit lock ({start_ms}ms < {lock_before_ms}ms); "
+            "only future events can be edited without --force"
+        )
+
+
+def guard_event_live_edit(
+    payload: dict[str, Any],
+    event_id: str,
+    *,
+    lock_before_ms: int | None,
+    force: bool,
+) -> None:
+    found = find_event(payload, event_id)
+    if found is None:
+        raise ValueError(f"event id does not exist: {event_id}")
+    collection, index = found
+    item = payload[collection][index]
+    start_ms = event_start_ms(item)
+    guard_live_edit(label=f"event {event_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+
+
 def require_unique_event_id(payload: dict[str, Any], event_id: str) -> None:
     if find_event(payload, event_id) is not None:
         raise ValueError(f"event id already exists: {event_id}")
@@ -410,9 +611,17 @@ def add_clip(
     gain_db: float,
     fade_in_ms: int,
     fade_out_ms: int,
+    lock_before_ms: int | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
     require_unique_event_id(next_payload, clip_id)
+    guard_live_edit(
+        label=f"clip {clip_id}",
+        start_ms=parse_ms(start, f"clip {clip_id} start"),
+        lock_before_ms=lock_before_ms,
+        force=force,
+    )
     clip: dict[str, Any] = {
         "id": clip_id,
         "deck": deck,
@@ -442,9 +651,13 @@ def add_mic_lean_in(
     duck_volume: float | None,
     lowpass_hz: float | None,
     duck_ms: int,
+    lock_before_ms: int | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
     require_unique_event_id(next_payload, lean_id)
+    start_ms = parse_ms(start, f"mic lean-in {lean_id} start")
+    guard_live_edit(label=f"mic lean-in {lean_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
     lean_in: dict[str, Any] = {"id": lean_id, "start": start, "text": text}
     if voice is not None:
         lean_in["voice"] = voice
@@ -452,7 +665,6 @@ def add_mic_lean_in(
         lean_in["rate"] = rate
     lean_in["volume"] = volume
     if duck_volume is not None:
-        start_ms = parse_ms(start, f"mic lean-in {lean_id} start")
         lean_in["ducking"] = {
             "target": "master",
             "param": "duck_volume",
@@ -475,11 +687,18 @@ def add_mic_lean_in(
     return next_payload
 
 
-def remove_event(payload: dict[str, Any], event_id: str) -> dict[str, Any]:
+def remove_event(
+    payload: dict[str, Any],
+    event_id: str,
+    *,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
     found = find_event(next_payload, event_id)
     if found is None:
         raise ValueError(f"event id does not exist: {event_id}")
+    guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
     collection, index = found
     del next_payload[collection][index]
     next_payload["automations"] = [
@@ -493,11 +712,25 @@ def remove_event(payload: dict[str, Any], event_id: str) -> dict[str, Any]:
     return next_payload
 
 
-def move_event(payload: dict[str, Any], event_id: str, start: str) -> dict[str, Any]:
+def move_event(
+    payload: dict[str, Any],
+    event_id: str,
+    start: str,
+    *,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
     found = find_event(next_payload, event_id)
     if found is None:
         raise ValueError(f"event id does not exist: {event_id}")
+    guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
+    guard_live_edit(
+        label=f"new start for {event_id}",
+        start_ms=parse_ms(start, f"event {event_id} start"),
+        lock_before_ms=lock_before_ms,
+        force=force,
+    )
     collection, index = found
     next_payload[collection][index]["start"] = start
     parse_session(next_payload)
@@ -510,15 +743,48 @@ def add_automation(
     target: str,
     param: str,
     points_json: str,
+    lock_before_ms: int | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
     points = json.loads(points_json)
     if not isinstance(points, list):
         raise ValueError("--points-json must be a JSON list")
+    for point in points:
+        if isinstance(point, dict):
+            guard_live_edit(
+                label=f"automation {target}.{param}",
+                start_ms=parse_ms(point.get("at_ms", point.get("at", 0)), "automation point time"),
+                lock_before_ms=lock_before_ms,
+                force=force,
+            )
     automation = {"target": target, "param": param, "points": points}
     next_payload.setdefault("automations", []).append(automation)
     parse_session(next_payload)
     return next_payload
+
+
+def add_live_edit_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--lock-before",
+        help="Reject edits before this mix timestamp. Use the current playhead for live editing.",
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        help="Read the live edit lock from a runner state file started_at/playhead_ms.",
+    )
+    parser.add_argument("--force", action="store_true", help="Allow edits before the live edit lock.")
+
+
+def live_edit_lock(args: argparse.Namespace) -> int | None:
+    if getattr(args, "lock_before", None) and getattr(args, "state", None):
+        raise ValueError("--lock-before and --state cannot both be used")
+    if getattr(args, "lock_before", None):
+        return parse_ms(args.lock_before, "live edit lock")
+    if getattr(args, "state", None):
+        return playhead_ms_from_state(args.state)
+    return None
 
 
 def main() -> int:
@@ -529,6 +795,17 @@ def main() -> int:
     summary_parser = sub.add_parser("summary")
     summary_parser.add_argument("session", type=Path)
     sub.add_parser("template")
+
+    import_playlist_parser = sub.add_parser("import-playlist")
+    import_playlist_parser.add_argument("session", type=Path)
+    import_playlist_parser.add_argument("--playlist", type=Path, required=True)
+    import_playlist_parser.add_argument("--start", default="0")
+    import_playlist_parser.add_argument("--decks", default="deck-1,deck-2,deck-3,deck-4")
+    import_playlist_parser.add_argument("--gap-ms", type=int, default=0)
+    import_playlist_parser.add_argument("--overlap-ms", type=int, default=0)
+    import_playlist_parser.add_argument("--default-duration")
+    import_playlist_parser.add_argument("--probe", action=argparse.BooleanOptionalAction, default=True)
+
     add_clip_parser = sub.add_parser("add-clip")
     add_clip_parser.add_argument("session", type=Path)
     add_clip_parser.add_argument("--create", action="store_true")
@@ -541,6 +818,7 @@ def main() -> int:
     add_clip_parser.add_argument("--gain-db", type=float, default=0.0)
     add_clip_parser.add_argument("--fade-in-ms", type=int, default=0)
     add_clip_parser.add_argument("--fade-out-ms", type=int, default=0)
+    add_live_edit_args(add_clip_parser)
 
     add_mic_parser = sub.add_parser("add-mic")
     add_mic_parser.add_argument("session", type=Path)
@@ -554,29 +832,50 @@ def main() -> int:
     add_mic_parser.add_argument("--duck-volume", type=float)
     add_mic_parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     add_mic_parser.add_argument("--duck-ms", type=int, default=2500)
+    add_live_edit_args(add_mic_parser)
 
     remove_parser = sub.add_parser("remove")
     remove_parser.add_argument("session", type=Path)
     remove_parser.add_argument("--id", required=True)
+    add_live_edit_args(remove_parser)
 
     move_parser = sub.add_parser("move")
     move_parser.add_argument("session", type=Path)
     move_parser.add_argument("--id", required=True)
     move_parser.add_argument("--start", required=True)
+    add_live_edit_args(move_parser)
 
     automate_parser = sub.add_parser("automate")
     automate_parser.add_argument("session", type=Path)
     automate_parser.add_argument("--target", required=True)
     automate_parser.add_argument("--param", required=True)
     automate_parser.add_argument("--points-json", required=True)
+    add_live_edit_args(automate_parser)
     args = parser.parse_args()
 
     if args.command == "template":
         print(json.dumps(template_session(), indent=2, sort_keys=True))
         return 0
 
+    if args.command == "import-playlist":
+        tracks = read_playlist(args.playlist)
+        decks = [deck.strip() for deck in args.decks.split(",") if deck.strip()]
+        payload = playlist_to_session_payload(
+            tracks,
+            start_ms=parse_ms(args.start, "timeline start"),
+            decks=decks,
+            gap_ms=args.gap_ms,
+            overlap_ms=args.overlap_ms,
+            default_duration_ms=parse_ms(args.default_duration, "default duration") if args.default_duration else None,
+            probe=args.probe,
+        )
+        write_payload(args.session, payload)
+        print(f"imported {len(tracks)} playlist tracks into timestamped session {args.session}")
+        return 0
+
     if args.command == "add-clip":
         payload = base_payload(args.session, args.create)
+        lock_before_ms = live_edit_lock(args)
         updated = add_clip(
             payload,
             clip_id=args.id,
@@ -588,6 +887,8 @@ def main() -> int:
             gain_db=args.gain_db,
             fade_in_ms=args.fade_in_ms,
             fade_out_ms=args.fade_out_ms,
+            lock_before_ms=lock_before_ms,
+            force=args.force,
         )
         write_payload(args.session, updated)
         print(f"added clip {args.id}")
@@ -595,6 +896,7 @@ def main() -> int:
 
     if args.command == "add-mic":
         payload = base_payload(args.session, args.create)
+        lock_before_ms = live_edit_lock(args)
         updated = add_mic_lean_in(
             payload,
             lean_id=args.id,
@@ -606,25 +908,43 @@ def main() -> int:
             duck_volume=args.duck_volume,
             lowpass_hz=args.lowpass_hz,
             duck_ms=args.duck_ms,
+            lock_before_ms=lock_before_ms,
+            force=args.force,
         )
         write_payload(args.session, updated)
         print(f"added mic lean-in {args.id}")
         return 0
 
     if args.command == "remove":
-        write_payload(args.session, remove_event(load_payload(args.session), args.id))
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            remove_event(load_payload(args.session), args.id, lock_before_ms=lock_before_ms, force=args.force),
+        )
         print(f"removed {args.id}")
         return 0
 
     if args.command == "move":
-        write_payload(args.session, move_event(load_payload(args.session), args.id, args.start))
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            move_event(load_payload(args.session), args.id, args.start, lock_before_ms=lock_before_ms, force=args.force),
+        )
         print(f"moved {args.id}")
         return 0
 
     if args.command == "automate":
+        lock_before_ms = live_edit_lock(args)
         write_payload(
             args.session,
-            add_automation(load_payload(args.session), target=args.target, param=args.param, points_json=args.points_json),
+            add_automation(
+                load_payload(args.session),
+                target=args.target,
+                param=args.param,
+                points_json=args.points_json,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
         )
         print(f"added automation {args.target}.{args.param}")
         return 0

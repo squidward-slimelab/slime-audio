@@ -88,16 +88,16 @@ Both receivers buffer the stream and start at the same UTC timestamp. Real sync 
 
 ## Stream Local Files
 
-From the repo root, `scripts/slime_audio_stream.py` decodes a local audio file and sends it through the same UDP protocol as voice. It can target any combo of connected receivers by discovered machine name, explicit `host:port`, or `all`.
+From the repo root, `scripts/slime_audio_stream.py` decodes a local audio file and sends it through shared-stream backends. It can target any combo of connected receivers by discovered machine name, explicit `host:port`, or `all`.
 
 ```bash
-python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT
-python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
+python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT --mode snapcast
+python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --mode snapcast
 ```
 
-The streamer uses FFmpeg for decoding and shared-stream transport. Packet mode is fine for TTS and short samples; for multi-room music, use multicast mode so every receiver listens to one shared FFmpeg UDP stream with `ffplay`. Multicast mode starts the selected receivers' shared stream listeners before playback.
+The streamer uses FFmpeg for decoding and shared-stream transport. Packet audio mode has been removed from the Python tools; use Snapcast for room playback and multicast only for debugging the shared-stream listener path.
 
-Receivers muted from the tray are excluded from `--target all` streams. Packet streams refresh discovered subscribers while playing, so muting a tray stops future packets within a few seconds instead of only taking effect on the next track. Use `--include-muted` only for diagnostics or intentional override.
+Receivers muted from the tray are excluded from `--target all` streams. Use `--include-muted` only for diagnostics or intentional override.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
@@ -105,9 +105,11 @@ python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
+Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, exit count, last stderr time, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, or is stopped. After a skip, run discovery and compare `shared_stream_exits`, `shared_stream_last_stderr_ms`, and `telemetry_path` against the sender/session logs.
+
 ## Linux Headless Receiver
 
-`SlimeAudio.Headless` is a cross-platform receiver for Linux debugging and CI. It speaks the same discovery, reset, packet-audio, and shared-stream control protocol as the Windows tray app, but runs as a console process.
+`SlimeAudio.Headless` is a cross-platform receiver for Linux debugging and CI. It speaks the same discovery, reset, and shared-stream control protocol as the Windows tray app, but runs as a console process.
 
 ```bash
 dotnet run --project apps/SlimeAudio/src/SlimeAudio.Headless/SlimeAudio.Headless.csproj -c Release -- --port 47777
@@ -118,7 +120,7 @@ Use `--no-audio` for protocol/debug smoke tests without opening an audio device.
 
 ## Timed Spotify Drops
 
-For agent DJ/sample-drop mode, use the Python drop runner from the repo root. It pre-renders phrases, polls `spogo status`, checks the current Spotify track and progress, and sends SlimeAudio packets only while Spotify is playing. The runner defaults to 5 second status polling and backs off up to 30 seconds on failures; local probing showed 5 seconds was clean and 1.5 seconds was too aggressive.
+The old packet-audio Spotify drop runner is disabled. For agent DJ/sample-drop mode, plan mic lean-ins as timestamped mix-session events, then render and stream the session through Snapcast.
 
 If Spotify returns stale `progress_ms: 0`, timed drops do not fire by default until the runner has a reliable song clock from either non-zero Spotify progress or an observed track change.
 
@@ -139,11 +141,13 @@ If Spotify returns stale `progress_ms: 0`, timed drops do not fire by default un
 ```
 
 ```bash
-python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
+python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:12.000 --text "ride this bit" --volume 1.7 --duck-volume 0.45
+python3 scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --count 3
+python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target all
 ```
 
 ## Design Notes
 
 - No remote volume control. Room volume is human-side until we have microphones or real SPL sensing.
-- UDP is fine for first-pass LAN TTS and bumpers. For long shared streams, prefer FFmpeg multicast mode over packet mode.
+- Audio should use Snapcast or multicast shared streams. UDP remains for receiver discovery/control messages, not music transport.
 - Time sync is coarse wall-clock sync right now. Next step is sender-side ping/offset estimation per receiver.

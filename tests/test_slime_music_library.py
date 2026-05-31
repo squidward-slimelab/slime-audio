@@ -143,7 +143,7 @@ class SlimeMusicLibraryTests(unittest.TestCase):
             conn = connect(temp / "library.sqlite3")
             scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
 
-            command_backfill_tunebat_local(conn, analyzer, limit=1, max_seconds=30, force=False, emit=False)
+            command_backfill_tunebat_local(conn, analyzer, limit=1, max_seconds=30, force=False, include_derived=False, emit=False)
 
             row = conn.execute("SELECT tunebat_key, tunebat_camelot, tunebat_bpm FROM tracks").fetchone()
             self.assertEqual(row["tunebat_key"], "A minor")

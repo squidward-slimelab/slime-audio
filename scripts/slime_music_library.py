@@ -750,12 +750,25 @@ def command_backfill_tunebat_local(
     limit: int,
     max_seconds: int,
     force: bool,
+    include_derived: bool,
     emit: bool = True,
 ) -> None:
     if limit < 1:
         raise SystemExit("limit must be at least 1")
     started = time.monotonic()
-    where = "" if force else "WHERE tunebat_bpm IS NULL"
+    filters = []
+    if not force:
+        filters.append("tunebat_bpm IS NULL")
+    if not include_derived:
+        filters.extend(
+            [
+                "normalized_title NOT IN ('vocals', 'drums', 'bass', 'other', 'piano', 'guitar', 'accompaniment', 'no vocals', 'instrumental')",
+                "lower(preferred_path) NOT LIKE '%/separated/%'",
+                "lower(preferred_path) NOT LIKE '%/htdemucs/%'",
+                "lower(preferred_path) NOT LIKE '%/stems/%'",
+            ]
+        )
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
     rows = conn.execute(
         f"""
         SELECT duplicate_key, preferred_path, title_guess, artist_guess
@@ -855,6 +868,7 @@ def parse_args() -> argparse.Namespace:
     backfill_parser.add_argument("--limit", type=int, default=10)
     backfill_parser.add_argument("--max-seconds", type=int, default=900)
     backfill_parser.add_argument("--force", action=argparse.BooleanOptionalAction, default=False)
+    backfill_parser.add_argument("--include-derived", action=argparse.BooleanOptionalAction, default=False)
 
     route_parser = sub.add_parser("route")
     route_parser.add_argument("path", type=Path)
@@ -913,7 +927,7 @@ def main() -> int:
         command_analyze_tunebat_local(conn, args.duplicate_key, args.analyzer, args.path)
         return 0
     if args.command == "backfill-tunebat-local":
-        command_backfill_tunebat_local(conn, args.analyzer, args.limit, args.max_seconds, args.force)
+        command_backfill_tunebat_local(conn, args.analyzer, args.limit, args.max_seconds, args.force, args.include_derived)
         return 0
     if args.command == "route":
         command_route(conn, args.path)

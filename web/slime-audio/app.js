@@ -29,7 +29,6 @@ const els = {
   automationList: document.querySelector("#automation-list"),
 };
 
-const FALLBACK_TRACK_MS = 180000;
 const MIN_STAGE_WIDTH = 1440;
 const LANE_LABEL_WIDTH = 96;
 const DECK_LANES = ["deck-3", "deck-1", "deck-2", "deck-4"];
@@ -80,16 +79,23 @@ function currentEvent(events, data = state.data) {
 }
 
 function eventStart(event) {
-  return event.start_ms ?? ((event.index ?? 0) * FALLBACK_TRACK_MS);
+  return event.start_ms;
 }
 
 function eventEnd(event) {
-  return event.end_ms ?? eventStart(event) + inferredDuration(event);
+  const start = eventStart(event);
+  if (event.end_ms !== null && event.end_ms !== undefined) return event.end_ms;
+  if (start === null || start === undefined) return null;
+  return start + inferredDuration(event);
+}
+
+function isTimed(event) {
+  return eventStart(event) !== null && eventStart(event) !== undefined && eventEnd(event) !== null && eventEnd(event) !== undefined;
 }
 
 function inferredDuration(event) {
   if (event.duration_ms) return event.duration_ms;
-  return FALLBACK_TRACK_MS;
+  return 0;
 }
 
 function activeElapsedMs(data = state.data) {
@@ -103,7 +109,10 @@ function nowPositionMs(data, events) {
   const current = currentEvent(events, data);
   if (!current) return state.lastPositionMs;
   const elapsed = activeElapsedMs(data);
-  const position = eventStart(current) + Math.min(elapsed, inferredDuration(current));
+  const start = eventStart(current);
+  if (start === null || start === undefined) return state.lastPositionMs;
+  const duration = inferredDuration(current);
+  const position = start + (duration ? Math.min(elapsed, duration) : elapsed);
   state.lastPositionMs = position;
   return position;
 }
@@ -128,7 +137,9 @@ function updateNow(data) {
   const transition = now.transition;
   els.transition.textContent = transition
     ? `next: ${shortPath(transition.next)} | key ${transition.key_relation} | pitch ${transition.pitch_shift_semitones >= 0 ? "+" : ""}${transition.pitch_shift_semitones} | tempo ${transition.target_tempo_shift_pct}%`
-    : "";
+    : currentEvent(state.data?.session?.events || [], data)?.transition_gap_ms
+      ? `last transition gap: ${fmtMs(currentEvent(state.data?.session?.events || [], data).transition_gap_ms)}`
+      : "";
 }
 
 function eventLabel(event) {
@@ -141,13 +152,15 @@ function eventMeta(event) {
   if (event.kind === "automation") return `${fmtMs(event.start_ms)} - ${fmtMs(event.end_ms)}`;
   if (event.kind === "vocal") return `${fmtMs(event.start_ms)} voice drop`;
   const artistAlbum = [event.artist, event.album].filter(Boolean).join(" - ");
-  const time = event.start_ms === null || event.start_ms === undefined ? `slot ${(event.index ?? 0) + 1}` : fmtMs(event.start_ms);
-  return `${time} ${artistAlbum}`;
+  const start = eventStart(event);
+  const time = start === null || start === undefined ? "missing timestamp" : fmtMs(start);
+  const gap = event.transition_gap_ms ? ` gap ${fmtMs(event.transition_gap_ms)}` : "";
+  return `${time}${gap} ${artistAlbum}`;
 }
 
 function groupEvents(events) {
   const lanes = new Map(DECK_LANES.map((lane) => [lane, []]));
-  for (const event of events) {
+  for (const event of events.filter(isTimed)) {
     const lane = event.deck || event.kind || "timeline";
     if (!lanes.has(lane)) lanes.set(lane, []);
     lanes.get(lane).push(event);
@@ -158,11 +171,12 @@ function groupEvents(events) {
 function laneInfo(lane) {
   const match = /^deck-(\d+)$/.exec(lane);
   if (!match) return { number: "", name: lane };
-  return { number: match[1], name: "track" };
+  return { number: match[1], name: "deck" };
 }
 
 function timelineScale(events) {
-  const max = Math.max(60000, ...events.map(eventEnd));
+  const timestamped = events.filter(isTimed).map(eventEnd);
+  const max = Math.max(60000, ...timestamped);
   const stageWidth = Math.max(MIN_STAGE_WIDTH, Math.ceil(max / 1000) * 5);
   return { max, stageWidth };
 }
@@ -183,18 +197,19 @@ function renderAxis(scale) {
 
 function renderTimeline(events) {
   els.timeline.replaceChildren();
-  if (!events.length) {
+  const timedEvents = events.filter(isTimed);
+  if (!timedEvents.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = "no timeline events yet";
+    empty.textContent = events.length ? "events are missing timestamp data" : "no timeline events yet";
     els.timeline.append(empty);
     return;
   }
-  const scale = timelineScale(events);
+  const scale = timelineScale(timedEvents);
   state.scale = scale;
   renderAxis(scale);
   els.timeline.style.setProperty("--stage-width", `${scale.stageWidth}px`);
-  const lanes = groupEvents(events);
+  const lanes = groupEvents(timedEvents);
   for (const [lane, items] of lanes.entries()) {
     const row = document.createElement("div");
     row.className = `lane ${DECK_LANES.includes(lane) ? "deck-lane" : "utility-lane"}`;
@@ -221,12 +236,12 @@ function renderTimeline(events) {
       track.append(empty);
     }
     for (const event of items) {
-      const el = document.createElement("div");
-      el.className = `event ${event.kind || "event"} ${event.status || ""}`;
       const start = eventStart(event);
       const end = eventEnd(event);
+      const el = document.createElement("div");
+      el.className = `event ${event.kind || "event"} ${event.status || ""}`;
       el.style.left = `${(start / scale.max) * scale.stageWidth}px`;
-      el.style.width = `${Math.max(96, ((end - start) / scale.max) * scale.stageWidth)}px`;
+      el.style.width = `${Math.max(16, ((end - start) / scale.max) * scale.stageWidth)}px`;
       el.title = `${eventLabel(event)}\n${eventMeta(event)}\n${event.path || ""}`;
       if (event.kind !== "automation") {
         const title = document.createElement("div");
@@ -254,11 +269,18 @@ function renderSummary(events) {
     acc[event.kind] = (acc[event.kind] || 0) + 1;
     return acc;
   }, {});
+  const untimed = events.filter((event) => !isTimed(event)).length;
   els.summary.replaceChildren();
   for (const [key, value] of Object.entries(counts)) {
     const pill = document.createElement("span");
     pill.className = "pill";
     pill.textContent = `${value} ${key}`;
+    els.summary.append(pill);
+  }
+  if (untimed) {
+    const pill = document.createElement("span");
+    pill.className = "pill warning";
+    pill.textContent = `${untimed} untimed`;
     els.summary.append(pill);
   }
 }
@@ -333,7 +355,7 @@ function render() {
   updateNow(state.data);
   const events = state.data.session?.events || [];
   els.timelineTitle.textContent = "session timeline";
-  els.timelineSubtitle.textContent = state.data.session?.path || state.data.state_path;
+  els.timelineSubtitle.textContent = `native timestamped mix session | ${state.data.session?.path || state.data.state_path}`;
   els.updated.textContent = `updated ${state.data.generated_at}`;
   els.transport.textContent = activeNow(state.data)?.track ? "live playhead active" : "waiting for transport";
   renderSummary(events);

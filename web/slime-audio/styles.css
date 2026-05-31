@@ -187,6 +187,11 @@ h2 {
   font-variant-numeric: tabular-nums;
 }
 
+.pill.warning {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
 .time-axis {
   position: relative;
   height: 34px;
@@ -307,7 +312,6 @@ h2 {
   position: absolute;
   top: 12px;
   min-width: 64px;
-  max-width: 520px;
   height: 60px;
   padding: 8px 10px;
   border: 1px solid var(--line);

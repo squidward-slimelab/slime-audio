@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import load_session, parse_ms, session_summary
+from slime_audio_session import load_session, parse_ms, playhead_ms_from_state, session_summary
 from slime_audio_session import main as session_main
 
 
@@ -27,6 +27,32 @@ class SlimeAudioSessionTests(unittest.TestCase):
     def test_parse_ms_accepts_clock_strings(self):
         self.assertEqual(parse_ms("01:02.500", "time"), 62_500)
         self.assertEqual(parse_ms("1:02:03", "time"), 3_723_000)
+
+    def test_playhead_from_playlist_state_uses_duration_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            (temp / "timeline-duration-cache.json").write_text(
+                json.dumps({"/music/a.flac": 10_000, "/music/b.flac": 20_000}),
+                encoding="utf-8",
+            )
+            state = temp / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "started_at": "2026-05-30T19:00:00-0400",
+                        "index": 2,
+                        "order": ["/music/a.flac", "/music/b.flac", "/music/c.flac"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            state_payload = json.loads(state.read_text(encoding="utf-8"))
+            state_payload["started_at"] = "1970-01-01T00:00:00+0000"
+            state.write_text(json.dumps(state_payload), encoding="utf-8")
+            playhead = playhead_ms_from_state(state, now=5)
+
+        self.assertEqual(playhead, 35_000)
 
     def test_session_allows_non_contiguous_overlapping_clips_on_different_decks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -236,6 +262,41 @@ class SlimeAudioSessionTests(unittest.TestCase):
         lean_in = session.mic_lean_ins[0]
         self.assertEqual([effect.param for effect in lean_in.effects], ["duck_volume", "lowpass_hz"])
 
+    def test_cli_imports_playlist_as_timestamped_timeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            playlist = temp / "playlist.txt"
+            session_path = temp / "session.json"
+            playlist.write_text("/music/one.flac\n/music/two.flac\n/music/three.flac\n", encoding="utf-8")
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "import-playlist",
+                        str(session_path),
+                        "--playlist",
+                        str(playlist),
+                        "--start",
+                        "00:05.000",
+                        "--decks",
+                        "deck-1,deck-2",
+                        "--default-duration",
+                        "00:10.000",
+                        "--overlap-ms",
+                        "2000",
+                        "--no-probe",
+                    ]
+                ),
+                0,
+            )
+
+            session = load_session(session_path)
+
+        self.assertEqual([clip.start_ms for clip in session.clips], [5_000, 13_000, 21_000])
+        self.assertEqual([clip.deck for clip in session.clips], ["deck-1", "deck-2", "deck-1"])
+        self.assertEqual([clip.duration_ms for clip in session.clips], [10_000, 10_000, 10_000])
+
     def test_cli_remove_deletes_targeted_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"
@@ -262,6 +323,58 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["clips"], [])
         self.assertEqual(payload["automations"], [])
         self.assertEqual(session.clips, [])
+
+    def test_live_edit_lock_rejects_past_edits_without_force(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "past", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000},
+                            {"id": "future", "deck": "deck-1", "path": "/music/b.flac", "start": 30_000, "duration": 20_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "live edit lock"):
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "move",
+                        str(path),
+                        "--id",
+                        "past",
+                        "--start",
+                        "00:12.000",
+                        "--lock-before",
+                        "00:10.000",
+                    ]
+                )
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "move",
+                        str(path),
+                        "--id",
+                        "future",
+                        "--start",
+                        "00:35.000",
+                        "--lock-before",
+                        "00:10.000",
+                    ]
+                ),
+                0,
+            )
+
+            session = load_session(path)
+
+        self.assertEqual(session.clips[1].start_ms, 35_000)
 
 
 if __name__ == "__main__":

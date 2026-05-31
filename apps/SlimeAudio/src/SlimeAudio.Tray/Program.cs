@@ -222,12 +222,23 @@ internal sealed class MulticastReceiver : IDisposable
     private Process? _process;
     private string? _lastStatus;
     private string? _serverHost;
+    private long _startedUnixTimeMs;
+    private long _lastExitUnixTimeMs;
+    private long _lastStderrUnixTimeMs;
+    private int _exitCount;
     private int _volumePercent = 100;
 
     public event EventHandler<string>? StatusChanged;
     public bool IsRunning => _process is { HasExited: false };
     public int? ExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
     public string? LastStatus => _lastStatus;
+    public string? ServerHost => _serverHost;
+    public int? ProcessId => _process is { HasExited: false } ? _process.Id : null;
+    public long StartedUnixTimeMs => Interlocked.Read(ref _startedUnixTimeMs);
+    public long LastExitUnixTimeMs => Interlocked.Read(ref _lastExitUnixTimeMs);
+    public long LastStderrUnixTimeMs => Interlocked.Read(ref _lastStderrUnixTimeMs);
+    public int ExitCount => Volatile.Read(ref _exitCount);
+    public string TelemetryPath => ClientTelemetry.Path;
     public int VolumePercent => _volumePercent;
 
     public MulticastReceiver(MulticastOptions options)
@@ -246,7 +257,8 @@ internal sealed class MulticastReceiver : IDisposable
 
         try
         {
-            var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
+            var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:info\"";
+            ClientTelemetry.Write("snapclient_starting", new { serverHost, snapcastPort = _options.SnapcastPort });
             _process = Process.Start(new ProcessStartInfo
             {
                 FileName = ResolveToolPath("snapclient.exe"),
@@ -258,16 +270,23 @@ internal sealed class MulticastReceiver : IDisposable
             if (_process is not null)
             {
                 var process = _process;
+                Interlocked.Exchange(ref _startedUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                ClientTelemetry.Write("snapclient_started", new { serverHost, snapcastPort = _options.SnapcastPort, processId = process.Id });
                 process.EnableRaisingEvents = true;
                 process.ErrorDataReceived += (_, e) =>
                 {
                     if (!string.IsNullOrWhiteSpace(e.Data))
                     {
+                        Interlocked.Exchange(ref _lastStderrUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                        ClientTelemetry.Write("snapclient_stderr", new { processId = process.Id, line = TrimStatus(e.Data) });
                         SetStatus(TrimStatus(e.Data));
                     }
                 };
                 process.Exited += (_, _) =>
                 {
+                    Interlocked.Increment(ref _exitCount);
+                    Interlocked.Exchange(ref _lastExitUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    ClientTelemetry.Write("snapclient_exited", new { processId = process.Id, process.ExitCode, serverHost });
                     SetStatus($"Shared stream exited: {process.ExitCode}");
                 };
                 process.BeginErrorReadLine();
@@ -277,6 +296,7 @@ internal sealed class MulticastReceiver : IDisposable
         }
         catch (Exception ex)
         {
+            ClientTelemetry.Write("snapclient_start_failed", new { serverHost, snapcastPort = _options.SnapcastPort, error = ex.Message });
             SetStatus($"Snapclient failed: {ex.Message}");
         }
     }
@@ -284,6 +304,7 @@ internal sealed class MulticastReceiver : IDisposable
     public void RememberServer(string serverHost)
     {
         _serverHost = serverHost;
+        ClientTelemetry.Write("snapclient_server_remembered", new { serverHost, snapcastPort = _options.SnapcastPort });
         SetStatus($"Shared stream available at {serverHost}:{_options.SnapcastPort}");
     }
 
@@ -302,6 +323,7 @@ internal sealed class MulticastReceiver : IDisposable
     {
         if (_process is { HasExited: false })
         {
+            ClientTelemetry.Write("snapclient_stopping", new { processId = _process.Id, serverHost = _serverHost });
             _process.Kill(entireProcessTree: true);
         }
         _process?.Dispose();
@@ -322,12 +344,14 @@ internal sealed class MulticastReceiver : IDisposable
             _options.SnapcastControlPort,
             Environment.MachineName,
             _volumePercent).ConfigureAwait(false);
+        ClientTelemetry.Write("snapclient_volume", new { serverHost = _serverHost, percent = _volumePercent });
         SetStatus($"Snapclient volume {_volumePercent}%");
     }
 
     private void SetStatus(string status)
     {
         _lastStatus = status;
+        ClientTelemetry.Write("status", new { status = TrimStatus(status), snapclientRunning = IsRunning, snapclientExitCode = ExitCode });
         StatusChanged?.Invoke(this, status);
     }
 
@@ -342,6 +366,46 @@ internal sealed class MulticastReceiver : IDisposable
     public void Dispose()
     {
         Stop();
+    }
+}
+
+internal static class ClientTelemetry
+{
+    private static readonly object Lock = new();
+
+    public static string Path { get; } = System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SlimeAudio",
+        "telemetry.jsonl");
+
+    public static void Write(string eventName, object? data = null)
+    {
+        try
+        {
+            var directory = System.IO.Path.GetDirectoryName(Path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                local_time = DateTimeOffset.Now.ToString("O"),
+                machine = Environment.MachineName,
+                version = VersionInfo.DisplayVersion,
+                event_name = eventName,
+                data
+            });
+            lock (Lock)
+            {
+                File.AppendAllText(Path, payload + Environment.NewLine, Encoding.UTF8);
+            }
+        }
+        catch
+        {
+            // Telemetry must never break playback or tray startup.
+        }
     }
 }
 
@@ -644,7 +708,14 @@ internal sealed class AudioReceiver : IDisposable
             latestSessionId,
             _multicast.IsRunning,
             _multicast.ExitCode,
-            _multicast.LastStatus);
+            _multicast.LastStatus,
+            _multicast.ServerHost,
+            _multicast.ProcessId,
+            _multicast.StartedUnixTimeMs,
+            _multicast.LastExitUnixTimeMs,
+            _multicast.ExitCount,
+            _multicast.LastStderrUnixTimeMs,
+            _multicast.TelemetryPath);
     }
 
     public void Dispose()

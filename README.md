@@ -109,31 +109,23 @@ Use `track_uri` for exact matching. `track_id` and `track_name` also work for qu
 
 ## Local File Streaming
 
-Stream any local audio file through the same SlimeAudio UDP path as voice. The script discovers receivers, accepts receiver names, `host:port`, or `all`, and decodes with FFmpeg.
+Stream any local audio file through the shared SlimeAudio backends. The script discovers receivers, accepts receiver names, `host:port`, or `all`, and decodes with FFmpeg.
 
 ```bash
-python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT
-python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --delay-ms 3000
+python3 scripts/slime_audio_stream.py ./song.flac --target SPATULA --target SPONGEBOT --mode snapcast
+python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --mode snapcast
 ```
 
-All targets receive one shared session id and start timestamp, so connected rooms begin together. Use `--dry-run` to see resolved receivers without sending audio.
+Use `--dry-run` to see resolved receivers without sending audio.
 
-For multi-room music, use multicast mode. This is one live FFmpeg UDP stream instead of separate per-host packet playback. The streamer starts shared stream listeners on the selected receivers before playback; add `--stop-listeners-when-done` when you want it to shut them down after the file exits.
+Receiver discovery reports Snapcast client telemetry from each tray: server host, snapclient PID, start time, exit count, last stderr time, last status, and the local `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` path. Use that after audible skips to see whether the receiver process exited/restarted or merely stayed connected while the sender/window changed.
+
+For multi-room music, use Snapcast or multicast mode. These are shared streams instead of per-host packet playback. Multicast starts shared stream listeners on the selected receivers before playback; add `--stop-listeners-when-done` when you want it to shut them down after the file exits.
 
 ```bash
 python3 scripts/slime_audio_stream.py ./mix.flac --target all --mode multicast
 python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
-```
-
-Persistent playlist runs can be edited while playback continues. Queue commands only touch future tracks: the current track and completed tracks are protected. By default, the runner also reloads the playlist file between tracks and appends newly added entries without restarting audio.
-
-```bash
-python3 scripts/slime_audio_playlist_runner.py --playlist runtime/set.txt --target all --mode multicast
-python3 scripts/slime_audio_playlist_runner.py queue-append --state runtime/playlist-state.json /mnt/rockhouse/Music/Artist/Album/song.flac
-python3 scripts/slime_audio_playlist_runner.py queue-swap --state runtime/playlist-state.json /old/future.flac /new/future.flac
-python3 scripts/slime_audio_playlist_runner.py queue-remove --state runtime/playlist-state.json /future/nope.flac
-python3 scripts/slime_audio_playlist_runner.py queue-move --state runtime/playlist-state.json /future/hook.flac --after /future/bridge.flac
 ```
 
 Linux debugging receiver:
@@ -151,9 +143,9 @@ SlimeAudio has a first-pass DJ brain for local files. It caches track metadata i
 ```bash
 python3 scripts/slime_audio_dj.py analyze ./track-a.wav ./track-b.wav
 python3 scripts/slime_audio_dj.py structure ./track-a.wav
+python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
 python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
 python3 scripts/slime_audio_dj.py rank ./now-playing.wav --playlist runtime/candidates.txt --limit 8
-python3 scripts/slime_audio_playlist_runner.py --playlist runtime/late-friday-fresh-playlist.txt --target all --dj-plan --dry-run
 ```
 
 Transition plans include:
@@ -166,37 +158,46 @@ Transition plans include:
 
 Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
 
+Tension analysis turns those per-track structure points into absolute mix-session timestamps. `slime_audio_dj.py tension` emits candidate commentary windows with `reason` and `talking_points` fields derived from analysis facts only: track position, detected structure, BPM/key estimates, energy movement, and transition-plan notes. Use that JSON as an input to the commentary planner when a live set should speak around musical pressure instead of generic track starts.
+
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 
 ## Live Mix Sessions
 
-Live mix sessions are the control-plane shape for the next SlimeAudio engine. They are intentionally planned data, not manual performance gestures: every gain ramp, filter move, pitch/tempo change, TTS lean-in, and ducking move should be encoded as automation before playback reaches it. Clips can start at any timeline position, so tracks do not need to be stacked back-to-back. Use `trim_start` and `duration` to pull sections from songs for overlays, hooks, bridges, and loops.
+Live mix sessions are the canonical control-plane shape for DJ sets. They are intentionally planned data, not manual performance gestures: every gain ramp, filter move, pitch/tempo change, TTS lean-in, and ducking move should be encoded as automation before playback reaches it. Clips use absolute mix timestamps like an Ableton arrangement, so tracks do not need to be stacked back-to-back. Use `start`, `trim_start`, and `duration` to pull sections from songs for overlays, hooks, bridges, and loops.
 
 ```bash
 python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
 python3 scripts/slime_audio_session.py summary runtime/mix-session.json
+python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json --playlist runtime/set.txt --start 00:00.000 --decks deck-1,deck-2,deck-3,deck-4
 python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000
 python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45
 python3 scripts/slime_audio_session.py automate runtime/mix-session.json --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]'
+python3 scripts/slime_audio_session.py move runtime/mix-session.json --id break-loop --start 01:16.000 --state runtime/saturday-4h-dj-mix-state.json
 python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --lowpass-hz 1400
-python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --output runtime/mix-session-render.wav
-python3 scripts/slime_audio_stream.py runtime/mix-session-render.wav --target all --mode snapcast
+python3 scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json --count 3
+python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --output runtime/mix-session-render.wav
+python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target all
 ```
 
-The first implementation validates and edits the session format. The playback engine should consume this format next, keeping the current FFmpeg multicast path stable while adding a mutable schedule/control API.
+`import-playlist` is a migration helper: it probes track durations with `ffprobe`, assigns clips to decks, and writes absolute `start_ms` values. After import, future edits should add/move/remove timestamped clips instead of mutating playlist slots. For live editing, pass `--state runtime/mix-session-state.json` or `--lock-before` to edit commands so normal operations reject anything before the current playhead; use `--force` only for deliberate repair work.
+
+`scripts/slime_audio_session_runner.py` consumes the native timestamped session directly. It renders short future windows, streams them through Snapcast/multicast, reloads `mix-session.json` before each window, and records `session_window_*` history events. Future adds/moves/removes take effect on the next render window without interrupting audio already under the playhead.
 
 Lean-ins are scheduled session events, not immediate side streams. A lean-in has an exact mix timeline `start`, spoken text, voice `volume`, and paired `duck_volume`/`lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
+
+`scripts/slime_audio_commentary_planner.py` creates and updates the commentary plan independently of music playback. It reads the native session and live state, chooses future tension/intro/transition/track windows with spacing rules, writes mic lean-ins with duck + low-pass automation, and appends `commentary_planned` JSONL records with the text, timing, related track, and reason.
 
 ## Web Dashboard
 
 The dashboard is local and read-only. It serves current runner state as JSON and renders the browser UI from `web/slime-audio/`.
 
 ```bash
-python3 scripts/slime_audio_web.py --state runtime/saturday-fresh-day-state.json --port 8765
+python3 scripts/slime_audio_web.py --state runtime/mix-session-state.json --session runtime/mix-session.json --port 8765
 ```
 
-Open `http://127.0.0.1:8765`. If `--state` is omitted, the server uses the newest `runtime/*state.json`, which is usually the active playlist runner. The browser polls `/api/state` every few seconds, shows the current track and scrub progress from `started_at`, and draws one session timeline. If `runtime/mix-session.json` exists, it shows native clips, vocal drops, and automation points. Until runners write native session files, legacy playlist runner state is projected into the same session shape without probing every audio file on load.
+Open `http://127.0.0.1:8765`. The browser polls `/api/state`, shows the current render window/playhead, and draws the native timestamped mix session: clips, vocal drops, and automation points. The dashboard no longer projects legacy playlist state.
 
 Install the dashboard as a user service:
 
@@ -270,7 +271,7 @@ systemctl --user enable --now slime-music-library.timer
 
 The service uses `runtime/slime-music-library.lock`, so overlapping timer runs skip instead of fighting SQLite or hammering the network shares. Lyrics are intentionally not scraped by the maintenance service; import verified lyrics or sidecar files explicitly so we do not fill the database with junk.
 
-`scripts/slime_audio_playlist_runner.py` uses this database by default when it exists. If a playlist points at a weaker duplicate, the runner resolves it to the preferred copy before streaming and records both `track` and `resolved_track` in playback history. Disable that with `--no-prefer-library-source`.
+Session-building tools should use this database when selecting clip paths. Prefer the `preferred_path` from `tracks`/candidate output so playback uses the best available duplicate source.
 
 Custom mounts can be supplied as `server:share:priority:/absolute/path`:
 

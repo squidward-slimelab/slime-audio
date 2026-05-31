@@ -7,9 +7,10 @@ import json
 import subprocess
 import tempfile
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
-from slime_audio_session import Automation, MicLeanIn, MixSession, load_session
+from slime_audio_session import Automation, AutomationPoint, Clip, MicLeanIn, MixSession, load_session, parse_ms
 
 
 def seconds(ms: int) -> str:
@@ -22,6 +23,77 @@ def shell_escape_filter(value: str) -> str:
 
 def gain_multiplier(db: float) -> float:
     return 10 ** (db / 20)
+
+
+def shift_automation_window(automation: Automation, from_ms: int) -> Automation | None:
+    points = sorted(automation.points, key=lambda point: point.at_ms)
+    shifted: list[AutomationPoint] = []
+    last_before: AutomationPoint | None = None
+    for point in points:
+        if point.at_ms < from_ms:
+            last_before = point
+            continue
+        if last_before is not None and not shifted:
+            shifted.append(AutomationPoint(at_ms=0, value=last_before.value, curve=last_before.curve))
+        shifted.append(replace(point, at_ms=point.at_ms - from_ms))
+    if not shifted:
+        return None
+    return replace(automation, points=shifted)
+
+
+def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | None = None) -> MixSession:
+    if from_ms <= 0 and duration_ms is None:
+        return session
+    window_end_ms = from_ms + duration_ms if duration_ms is not None else None
+
+    clips: list[Clip] = []
+    for clip in session.clips:
+        if clip.end_ms is not None and clip.end_ms <= from_ms:
+            continue
+        if window_end_ms is not None and clip.start_ms >= window_end_ms:
+            continue
+        if clip.start_ms < from_ms and clip.duration_ms is None:
+            continue
+        overlap_ms = max(0, from_ms - clip.start_ms)
+        duration_ms = clip.duration_ms - overlap_ms if clip.duration_ms is not None else None
+        if duration_ms is not None and window_end_ms is not None:
+            duration_ms = min(duration_ms, max(0, window_end_ms - max(clip.start_ms, from_ms)))
+        if duration_ms is not None and duration_ms <= 0:
+            continue
+        shifted_automations = [
+            shifted for automation in clip.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
+        ]
+        clips.append(
+            replace(
+                clip,
+                start_ms=max(0, clip.start_ms - from_ms),
+                trim_start_ms=clip.trim_start_ms + overlap_ms,
+                duration_ms=duration_ms,
+                automations=shifted_automations,
+            )
+        )
+
+    mic_lean_ins = [
+        replace(
+            lean_in,
+            start_ms=lean_in.start_ms - from_ms,
+            effects=[
+                shifted for effect in lean_in.effects if (shifted := shift_automation_window(effect, from_ms)) is not None
+            ],
+        )
+        for lean_in in session.mic_lean_ins
+        if lean_in.start_ms >= from_ms and (window_end_ms is None or lean_in.start_ms < window_end_ms)
+    ]
+    automations = [
+        shifted for automation in session.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
+    ]
+    return MixSession(
+        version=session.version,
+        decks=session.decks,
+        clips=clips,
+        mic_lean_ins=mic_lean_ins,
+        automations=automations,
+    )
 
 
 def synthesize_kokoro(base_url: str, voice: str, text: str, output_path: Path, timeout: int) -> None:
@@ -92,7 +164,13 @@ def window_from_automation(automation: Automation) -> tuple[int, int, float]:
     return automation.points[0].at_ms, automation.points[-1].at_ms, float(automation.points[0].value)
 
 
-def build_filter_complex(session: MixSession, lean_in_audio: dict[str, Path], sample_rate: int, channels: int) -> str:
+def build_filter_complex(
+    session: MixSession,
+    lean_in_audio: dict[str, Path],
+    sample_rate: int,
+    channels: int,
+    output_duration_ms: int | None = None,
+) -> str:
     filters: list[str] = []
     music_labels: list[str] = []
     for index, clip in enumerate(session.clips):
@@ -153,11 +231,21 @@ def build_filter_complex(session: MixSession, lean_in_audio: dict[str, Path], sa
         )
         mix_labels.append(f"[{label}]")
 
-    filters.append(f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=longest:normalize=0,alimiter=limit=0.98[out]")
+    output_filters = "alimiter=limit=0.98"
+    if output_duration_ms is not None:
+        output_filters = f"atrim=duration={seconds(output_duration_ms)}," + output_filters
+    filters.append(f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=longest:normalize=0,{output_filters}[out]")
     return ";".join(filters)
 
 
-def ffmpeg_command(session: MixSession, lean_in_audio: dict[str, Path], output: Path, sample_rate: int, channels: int) -> list[str]:
+def ffmpeg_command(
+    session: MixSession,
+    lean_in_audio: dict[str, Path],
+    output: Path,
+    sample_rate: int,
+    channels: int,
+    output_duration_ms: int | None = None,
+) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for clip in session.clips:
         command.extend(["-i", clip.path])
@@ -168,7 +256,7 @@ def ffmpeg_command(session: MixSession, lean_in_audio: dict[str, Path], output: 
     command.extend(
         [
             "-filter_complex",
-            build_filter_complex(session, lean_in_audio, sample_rate, channels),
+            build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms),
             "-map",
             "[out]",
             "-acodec",
@@ -231,11 +319,19 @@ def main() -> int:
     parser.add_argument("--tts-timeout-seconds", type=int, default=90)
     parser.add_argument("--sample-rate", type=int, default=48_000)
     parser.add_argument("--channels", type=int, default=2)
+    parser.add_argument(
+        "--from",
+        dest="from_time",
+        default="0",
+        help="Render a live-edit window starting at this mix timestamp/playhead.",
+    )
+    parser.add_argument("--duration", help="Render only this much timeline after --from.")
     parser.add_argument("--skip-tts", action="store_true", help="Use tiny silent lean-in placeholders; useful for command validation.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    session = load_session(args.session)
+    duration_ms = parse_ms(args.duration, "render duration") if args.duration else None
+    session = shift_session_window(load_session(args.session), parse_ms(args.from_time, "render start"), duration_ms)
     with tempfile.TemporaryDirectory(prefix="slime-session-mixdown-") as temp:
         lean_audio = prepare_lean_in_audio(
             session,
@@ -247,7 +343,7 @@ def main() -> int:
             args.channels,
             args.skip_tts or args.dry_run,
         )
-        command = ffmpeg_command(session, lean_audio, args.output, args.sample_rate, args.channels)
+        command = ffmpeg_command(session, lean_audio, args.output, args.sample_rate, args.channels, duration_ms)
         if args.dry_run:
             print(json.dumps({"command": command, "filter_complex": command[command.index("-filter_complex") + 1]}, indent=2))
             return 0

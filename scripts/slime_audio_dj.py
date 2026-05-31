@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from slime_audio_session import Clip, MixSession, load_session, parse_session, playhead_ms_from_state
 from slime_audio_stream import convert_to_stream_wav
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +72,22 @@ class TransitionPlan:
     key_relation: str
     phrase_wait_beats: int
     notes: list[str]
+
+
+@dataclass(frozen=True)
+class TensionWindow:
+    start_ms: int
+    end_ms: int
+    kind: str
+    confidence: float
+    reason: str
+    talking_points: list[str]
+    clip_id: str | None = None
+    track: str | None = None
+    next_clip_id: str | None = None
+    next_track: str | None = None
+    source_start_ms: int | None = None
+    source_end_ms: int | None = None
 
 
 def load_cache(path: Path) -> dict[str, dict]:
@@ -320,6 +337,16 @@ def coerce_structure(values: list[StructureWindow] | list[dict] | None) -> list[
     return result
 
 
+def coerce_analysis(value: TrackAnalysis | dict) -> TrackAnalysis:
+    if isinstance(value, TrackAnalysis):
+        return value
+    payload = dict(value)
+    if isinstance(payload.get("beatgrid"), dict):
+        payload["beatgrid"] = BeatGrid(**payload["beatgrid"])
+    payload["structure"] = coerce_structure(payload.get("structure"))
+    return TrackAnalysis(**payload)
+
+
 def beatgrid_asdict(value: BeatGrid | dict | None) -> dict | None:
     if value is None:
         return None
@@ -510,6 +537,121 @@ def transition_plan(source: TrackAnalysis, target: TrackAnalysis, max_pitch_shif
     )
 
 
+def clip_end_ms(clip: Clip, analysis: TrackAnalysis | None = None) -> int:
+    if clip.duration_ms is not None:
+        return clip.start_ms + clip.duration_ms
+    if analysis is not None:
+        remaining_ms = max(0, int(round(analysis.duration_s * 1000)) - clip.trim_start_ms)
+        return clip.start_ms + remaining_ms
+    return clip.start_ms
+
+
+def track_label(path_text: str | None) -> str:
+    if not path_text:
+        return "unknown track"
+    stem = Path(path_text).stem
+    return stem or Path(path_text).name or path_text
+
+
+def talking_points_for_suggestion(kind: str, track: str, reason: str, analysis: TrackAnalysis) -> list[str]:
+    points = []
+    if kind == "pre-drop":
+        points.append(f"detected release point in {track}; speak briefly before it and clear the drop")
+    elif kind == "build":
+        points.append(f"{track} is gaining energy; use it to set up the next musical move")
+    elif kind == "breakdown":
+        points.append(f"{track} has a lower-energy pocket with room for a short vocal")
+    elif kind == "intro":
+        points.append(f"{track} is in an opening phrase, useful for framing without stepping on a hook")
+    points.append(reason)
+    if analysis.bpm:
+        points.append(f"analysis estimate: {analysis.bpm:g} bpm")
+    if analysis.camelot:
+        points.append(f"analysis estimate: {analysis.camelot} camelot")
+    return points[:4]
+
+
+def session_tension_windows(
+    session: MixSession,
+    analyses_by_path: dict[str, TrackAnalysis | dict],
+    *,
+    max_pitch_shift: int = 2,
+    transition_lead_ms: int = 8_000,
+) -> list[TensionWindow]:
+    analyses = {str(Path(path)): coerce_analysis(analysis) for path, analysis in analyses_by_path.items()}
+    analyses.update({path: coerce_analysis(analysis) for path, analysis in analyses_by_path.items()})
+    clips = sorted(session.clips, key=lambda clip: (clip.start_ms, clip.deck, clip.id))
+    windows: list[TensionWindow] = []
+
+    for clip in clips:
+        analysis = analyses.get(clip.path) or analyses.get(str(Path(clip.path)))
+        if analysis is None:
+            continue
+        clip_end = clip_end_ms(clip, analysis)
+        track = track_label(clip.path)
+        for suggestion in suggested_lean_in_windows(coerce_structure(analysis.structure)):
+            source_ms = int(suggestion["at_ms"])
+            absolute_ms = clip.start_ms + max(0, source_ms - clip.trim_start_ms)
+            if absolute_ms < clip.start_ms or absolute_ms >= clip_end:
+                continue
+            kind = str(suggestion["kind"])
+            confidence = float(suggestion["confidence"])
+            source_end_ms = source_ms + 6_000
+            end_ms = min(clip_end, absolute_ms + 6_000)
+            reason = f"{track}: {suggestion['reason']}"
+            windows.append(
+                TensionWindow(
+                    start_ms=absolute_ms,
+                    end_ms=end_ms,
+                    kind=kind,
+                    confidence=round(confidence, 3),
+                    reason=reason,
+                    talking_points=talking_points_for_suggestion(kind, track, str(suggestion["reason"]), analysis),
+                    clip_id=clip.id,
+                    track=clip.path,
+                    source_start_ms=source_ms,
+                    source_end_ms=source_end_ms,
+                )
+            )
+
+    for left, right in zip(clips, clips[1:]):
+        left_analysis = analyses.get(left.path) or analyses.get(str(Path(left.path)))
+        right_analysis = analyses.get(right.path) or analyses.get(str(Path(right.path)))
+        if left_analysis is None or right_analysis is None:
+            continue
+        plan = transition_plan(left_analysis, right_analysis, max_pitch_shift=max_pitch_shift)
+        start_ms = max(left.start_ms, right.start_ms - transition_lead_ms)
+        end_ms = min(right.start_ms, start_ms + transition_lead_ms)
+        if end_ms <= start_ms:
+            end_ms = start_ms + 4_000
+        notes = plan.notes[:] or []
+        if plan.target_tempo_shift_pct is not None:
+            notes.append(f"tempo shift {plan.target_tempo_shift_pct:+.2f}%")
+        notes.append(f"key relation: {plan.key_relation}")
+        if plan.pitch_shift_semitones:
+            notes.append(f"pitch target {plan.pitch_shift_semitones:+d} semitones")
+        reason = f"transition into {track_label(right.path)}: {', '.join(notes[:3])}"
+        windows.append(
+            TensionWindow(
+                start_ms=start_ms,
+                end_ms=end_ms,
+                kind="transition",
+                confidence=plan.score,
+                reason=reason,
+                talking_points=[
+                    f"{track_label(left.path)} into {track_label(right.path)}",
+                    *notes[:3],
+                ],
+                clip_id=left.id,
+                track=left.path,
+                next_clip_id=right.id,
+                next_track=right.path,
+            )
+        )
+
+    return sorted(windows, key=lambda item: (item.start_ms, -item.confidence, item.kind))
+
+
 def analyze_with_cache(paths: list[Path], cache_path: Path, backend: str, sample_rate: int) -> list[TrackAnalysis]:
     cache = load_cache(cache_path)
     analyses: list[TrackAnalysis] = []
@@ -517,7 +659,7 @@ def analyze_with_cache(paths: list[Path], cache_path: Path, backend: str, sample
     for path in paths:
         key = cache_key(path)
         if key in cache:
-            analyses.append(TrackAnalysis(**cache[key]))
+            analyses.append(coerce_analysis(cache[key]))
             continue
         analysis = analyze_track(path, backend=backend, sample_rate=sample_rate)
         cache[key] = asdict(analysis)
@@ -534,6 +676,24 @@ def parse_track_list(values: list[str], playlist: Path | None) -> list[Path]:
         paths.extend(Path(line.strip()) for line in playlist.read_text(encoding="utf-8").splitlines() if line.strip())
     if not paths:
         raise SystemExit("provide tracks as args or --playlist")
+    return paths
+
+
+def session_tracks(session: MixSession, *, from_ms: int | None = None, horizon_ms: int | None = None) -> list[Path]:
+    end_ms = from_ms + horizon_ms if from_ms is not None and horizon_ms is not None else None
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for clip in sorted(session.clips, key=lambda item: (item.start_ms, item.deck, item.id)):
+        if from_ms is not None and clip.duration_ms is not None and clip.start_ms + clip.duration_ms < from_ms:
+            continue
+        if end_ms is not None and clip.start_ms > end_ms:
+            continue
+        if clip.path in seen:
+            continue
+        seen.add(clip.path)
+        paths.append(Path(clip.path))
+    if not paths:
+        raise SystemExit("session has no clips to analyze")
     return paths
 
 
@@ -573,8 +733,31 @@ def main() -> int:
     structure_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     structure_parser.add_argument("--sample-rate", type=int, default=44_100)
 
+    tension_parser = sub.add_parser("tension")
+    tension_parser.add_argument("tracks", nargs="*")
+    tension_parser.add_argument("--playlist", type=Path)
+    tension_parser.add_argument("--session", type=Path)
+    tension_parser.add_argument("--state", type=Path)
+    tension_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    tension_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
+    tension_parser.add_argument("--sample-rate", type=int, default=44_100)
+    tension_parser.add_argument("--max-pitch-shift", type=int, default=2)
+    tension_parser.add_argument("--transition-lead-ms", type=int, default=8_000)
+    tension_parser.add_argument("--from-ms", type=int)
+    tension_parser.add_argument("--horizon-ms", type=int)
+    tension_parser.add_argument("--min-confidence", type=float, default=0.0)
+    tension_parser.add_argument("--limit", type=int, default=24)
+
     args = parser.parse_args()
-    tracks = parse_track_list(args.tracks, args.playlist)
+    session = None
+    from_ms = args.from_ms if getattr(args, "command", None) == "tension" and args.from_ms is not None else None
+    if getattr(args, "command", None) == "tension" and args.state is not None and from_ms is None and args.state.exists():
+        from_ms = playhead_ms_from_state(args.state)
+    if getattr(args, "command", None) == "tension" and args.session is not None:
+        session = load_session(args.session)
+        tracks = session_tracks(session, from_ms=from_ms, horizon_ms=args.horizon_ms)
+    else:
+        tracks = parse_track_list(args.tracks, args.playlist)
     if args.command == "rank":
         tracks = [Path(args.source)] + tracks
     analyses = analyze_with_cache(tracks, args.cache, args.backend, args.sample_rate)
@@ -609,6 +792,37 @@ def main() -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command == "tension":
+        if session is None:
+            clips_payload = []
+            cursor_ms = 0
+            for index, analysis in enumerate(analyses):
+                duration_ms = int(round(analysis.duration_s * 1000))
+                clips_payload.append(
+                    {
+                        "id": f"track-{index + 1}",
+                        "deck": f"deck-{(index % 4) + 1}",
+                        "path": analysis.path,
+                        "start": cursor_ms,
+                        "duration": duration_ms,
+                    }
+                )
+                cursor_ms += duration_ms
+            session = parse_session({"version": 1, "decks": ["deck-1", "deck-2", "deck-3", "deck-4"], "clips": clips_payload, "mic_lean_ins": []})
+        analyses_by_path = {analysis.path: analysis for analysis in analyses}
+        windows = session_tension_windows(
+            session,
+            analyses_by_path,
+            max_pitch_shift=args.max_pitch_shift,
+            transition_lead_ms=args.transition_lead_ms,
+        )
+        if from_ms is not None:
+            windows = [window for window in windows if window.end_ms >= from_ms]
+        if args.horizon_ms is not None and from_ms is not None:
+            windows = [window for window in windows if window.start_ms <= from_ms + args.horizon_ms]
+        windows = [window for window in windows if window.confidence >= args.min_confidence]
+        print(json.dumps([asdict(window) for window in windows[: args.limit]], indent=2, sort_keys=True))
         return 0
 
     plans = [

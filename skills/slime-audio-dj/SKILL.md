@@ -19,11 +19,12 @@ Keep this skill generic and portable.
 
 - `scripts/slime_music_library.py`: scan and query the SQLite music database.
 - `scripts/slime_audio_dj.py`: analyze BPM, beat offset, key, Camelot code, energy, and transition compatibility.
-- `scripts/slime_audio_playlist_runner.py`: run persistent playlists, preserve state, use preferred library files, write playback history, and optionally show DJ transition plans.
 - `scripts/slime_audio_stream.py`: discover receivers and stream local files.
 - `scripts/slime_audio_session.py`: maintain planned mix-session clips, mic lean-ins, and automation.
 - `scripts/slime_audio_lean_ins.py`: add scheduled lean-ins to a mix session.
+- `scripts/slime_audio_commentary_planner.py`: add tasteful future commentary lean-ins with spacing, context, and logs.
 - `scripts/slime_audio_session_mixdown.py`: render session clips and lean-ins into one Snapcast-ready mix file.
+- `scripts/slime_audio_session_runner.py`: run the native timestamped session in live-editable render windows.
 - `scripts/slime_audio_tts.py` and `scripts/slime_audio_drops.py`: legacy Spotify/drop helpers; do not use them for Snapcast-era mix lean-ins unless explicitly working on legacy Spotify playback.
 
 ## Default Workflow
@@ -52,27 +53,59 @@ Keep this skill generic and portable.
 
    ```bash
    python3 scripts/slime_audio_dj.py structure ./track.flac
+   python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
    python3 scripts/slime_audio_dj.py plan --playlist runtime/current-playlist.txt
    python3 scripts/slime_audio_dj.py rank ./current-track.flac --playlist runtime/candidates.txt --limit 12
    ```
 
-6. Dry-run the queue before starting:
+6. Treat `runtime/mix-session.json` as the canonical live set state. Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
+
+7. If starting from an old ordered playlist, immediately import it into a timestamped session and do future edits against the session:
 
    ```bash
-   python3 scripts/slime_audio_playlist_runner.py --playlist runtime/current-playlist.txt --target TARGET --dj-plan --dry-run
+   python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json \
+     --playlist runtime/current-playlist.txt \
+     --start 00:00.000 \
+     --decks deck-1,deck-2,deck-3,deck-4
    ```
 
-7. Start playback only after target selection is explicit:
+8. Add, move, trim, overlap, or automate clips by timestamp. During playback, include `--state runtime/<active-state>.json` or `--lock-before <mix-time>` so edits before the playhead are rejected unless `--force` is explicit:
 
    ```bash
-   python3 scripts/slime_audio_playlist_runner.py --playlist runtime/current-playlist.txt --target TARGET --dj-plan
+   python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json \
+     --create \
+     --id next-drop \
+     --deck deck-2 \
+     --path ./track.flac \
+     --start 02:16.000 \
+     --trim-start 01:04.000 \
+     --duration 00:32.000 \
+     --state runtime/saturday-4h-dj-mix-state.json
    ```
+
+9. Dry-run the timestamped mix render before starting, or render only the future window when applying a live swap from the current playhead:
+
+   ```bash
+   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --output runtime/mix-render.wav --dry-run
+   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 02:10.000 --output runtime/mix-render-from-playhead.wav --dry-run
+   ```
+
+10. Start playback from the native timestamped session runner:
+
+   ```bash
+   python3 scripts/slime_audio_session_runner.py \
+     --session runtime/mix-session.json \
+     --state runtime/mix-session-state.json \
+     --target TARGET
+   ```
+
+Do not use legacy slot queues for DJ sets.
 
 ## Live Set Rules
 
-- Treat the playlist, state file, playback history, and commentary plan as live state.
+- Treat the mix session, playback history, and commentary plan as live state.
 - Extend the future queue while playback continues whenever possible.
-- Append or swap upcoming tracks; do not disturb the currently playing track unless explicitly asked.
+- Add, remove, trim, move, or automate future timestamped clips; do not disturb audio already under the playhead unless explicitly asked.
 - When extending, re-rank from the current or next track so the transition still makes sense.
 - Treat complaints or steering from the operator as hard constraints for future selections.
 - Keep a small scratchpad of current vibe, banned artists or genres, energy target, and planned arc in ignored runtime files.
@@ -86,8 +119,51 @@ The DJ should host the set, not just play files.
 - Keep commentary short and focused on the music: mood, texture, rhythm, genre lineage, energy, transition intent, or why the next track fits.
 - Use artist, lyrics, and release context when available, but verify uncertain facts before saying them.
 - Look ahead for likely tension points using energy, BPM, key relation, beat offset, track position, and transition notes.
+- Prefer `scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json` for live sets. It writes future mic lean-ins and `runtime/commentary-plan.jsonl` without restarting playback.
 - Use `scripts/slime_audio_dj.py structure` to find raw-audio intro, breakdown, build, drop, outro, and pre-drop lean-in windows before placing commentary.
+- Use `scripts/slime_audio_dj.py tension` to convert those windows into absolute mix-session timestamps with reasons and talking points. Keep talking points grounded in analysis facts; do not invent artist, release, or lyric context.
 - Keep commentary planning separate from the music queue so new lean-ins can be added without restarting playback.
+
+## Audio Clip Exports
+
+When sending a standalone song section or drop clip to the operator, export it like a DJ edit, not like an arbitrary timestamp crop.
+
+- Pick candidate source tracks from the library or local files first. Prefer tracks likely to have useful tension/release: dance, bass, pop, rock, or anything with strong section contrast.
+- Analyze each candidate and read the structure output before cutting:
+
+  ```bash
+  python3 scripts/slime_audio_dj.py structure ./track.flac --cache runtime/dj-analysis-cache.json
+  ```
+
+- Prefer candidates with explicit `build`, `drop`, or `pre_drop` structure events. If several drops are present, choose the strongest musical moment by looking for:
+  - a high-confidence build immediately before the drop
+  - a drop start on a phrase boundary
+  - a clear energy jump from the preceding section
+  - enough room before the drop to include a short build or pre-drop cue
+- If the structure detector finds multiple drop windows, compare their timestamps and confidence. A later drop with a stronger build can be better than the first detected drop.
+- Quantize clip start and end to the detected beat grid, preferably phrase boundaries. Use the detected BPM and beat offset from the structure output; do not cut raw detector timestamps unless they already land on beat.
+- Include enough pre-drop or build context for the cut to make musical sense, but keep the exported clip short.
+- When using `ffmpeg`, explicitly map the audio stream and exclude embedded artwork/data streams. Some music files include cover art, and implicit stream selection can produce a silent-looking export:
+
+  ```bash
+  ffmpeg -y \
+    -ss START_SECONDS \
+    -t DURATION_SECONDS \
+    -i ./track.flac \
+    -map 0:a:0 -vn -sn -dn \
+    -af "afade=t=in:st=0:d=0.03,afade=t=out:st=OUT_FADE_START:d=0.22,volume=0.85" \
+    -codec:a libmp3lame -b:a 192k \
+    runtime/drop-clip.mp3
+  ```
+
+- Verify the rendered clip is not silent before sending it:
+
+  ```bash
+  ffmpeg -hide_banner -i runtime/drop-clip.mp3 -af volumedetect -f null -
+  ```
+
+  Treat `mean_volume: -inf dB`, `max_volume: -inf dB`, or all-zero `astats` output as a failed export. Re-cut before uploading.
+- Mention the source track and the beat/phrase alignment when sending the clip, especially if the clip is being used to judge the analyzer.
 
 ## Lean-Ins
 

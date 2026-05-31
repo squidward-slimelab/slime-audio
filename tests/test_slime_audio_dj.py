@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_dj import (
+    StructureWindow,
     TrackAnalysis,
     beat_grid,
     camelot,
@@ -14,9 +15,11 @@ from slime_audio_dj import (
     key_match,
     relative_tonic,
     semitone_distance,
+    session_tension_windows,
     suggested_lean_in_windows,
     transition_plan,
 )
+from slime_audio_session import parse_session
 
 
 def track(path: str, bpm: float, tonic: int, mode: str, energy: float = 0.2) -> TrackAnalysis:
@@ -34,6 +37,11 @@ def track(path: str, bpm: float, tonic: int, mode: str, energy: float = 0.2) -> 
         energy=energy,
         loudness_db=-12.0,
         confidence={"bpm": 0.9, "key": 0.9},
+        structure=[
+            StructureWindow("intro", 0, 16_000, 0.55, "opening phrase region"),
+            StructureWindow("build", 48_000, 64_000, 0.74, "energy rising into a likely transition"),
+            StructureWindow("drop", 64_000, 80_000, 0.91, "energy crosses high threshold"),
+        ],
     )
 
 
@@ -110,6 +118,33 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertIn("build", kinds)
         self.assertIn("drop", kinds)
         self.assertTrue(any(item["kind"] == "pre-drop" for item in suggestions))
+
+    def test_session_tension_windows_maps_track_structure_to_mix_time(self):
+        session = parse_session(
+            {
+                "version": 1,
+                "decks": ["deck-1", "deck-2"],
+                "clips": [
+                    {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 120_000, "duration": 120_000},
+                    {"id": "b", "deck": "deck-2", "path": "/music/b.flac", "start": 240_000, "duration": 120_000},
+                ],
+                "mic_lean_ins": [],
+            }
+        )
+        analyses = {
+            "/music/a.flac": track("/music/a.flac", 124, 9, "minor", energy=0.3),
+            "/music/b.flac": track("/music/b.flac", 126, 0, "major", energy=0.31),
+        }
+
+        windows = session_tension_windows(session, analyses)
+        pre_drop = next(window for window in windows if window.kind == "pre-drop" and window.clip_id == "a")
+        transition = next(window for window in windows if window.kind == "transition")
+
+        self.assertEqual(pre_drop.start_ms, 182_500)
+        self.assertIn("speak briefly", " ".join(pre_drop.talking_points))
+        self.assertEqual(transition.start_ms, 232_000)
+        self.assertEqual(transition.next_clip_id, "b")
+        self.assertIn("key relation", transition.reason)
 
 
 if __name__ == "__main__":

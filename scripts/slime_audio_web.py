@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from slime_audio_session import load_payload, parse_ms, parse_session
+from slime_audio_session import load_payload, parse_ms, parse_session, playhead_ms_from_state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
-DEFAULT_STATE = REPO_ROOT / "runtime" / "playlist-state.json"
+DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 
 
@@ -42,59 +42,6 @@ def format_title(path_text: str) -> dict[str, str]:
     return {"title": title, "artist": artist, "album": album, "path": path_text}
 
 
-def playlist_state_to_session(state: dict[str, Any]) -> dict[str, Any]:
-    order = list(state.get("order") or [])
-    completed = set(state.get("completed") or [])
-    current = state.get("current")
-    failed = set(state.get("failed") or [])
-    current_index = int(state.get("index", 0) or 0)
-    clips: list[dict[str, Any]] = []
-    for index, track in enumerate(order):
-        if track in failed:
-            status = "failed"
-        elif track == current:
-            status = "current"
-        elif track in completed or index < current_index:
-            status = "done"
-        else:
-            status = "planned"
-        clips.append(
-            {
-                "id": f"track-{index + 1}",
-                "deck": "deck-1",
-                "path": str(track),
-                "status": status,
-                "index": index,
-                "resolved_path": state.get("resolved_current") if track == current else None,
-            }
-        )
-    return {
-        "version": 1,
-        "source": "playlist-runner-state",
-        "source_state": state,
-        "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
-        "clips": clips,
-        "mic_lean_ins": [],
-        "automations": [],
-    }
-
-
-def legacy_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": clip.get("id"),
-        "kind": "song",
-        "deck": clip.get("deck"),
-        "index": clip.get("index"),
-        "start_ms": None,
-        "trim_start_ms": None,
-        "duration_ms": None,
-        "end_ms": None,
-        "status": clip.get("status"),
-        "resolved_path": clip.get("resolved_path"),
-        **format_title(str(clip.get("path") or "")),
-    }
-
-
 def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
     start_ms = parse_ms(clip.get("start_ms", clip.get("start", 0)), "clip start")
     duration = clip.get("duration_ms", clip.get("duration"))
@@ -117,11 +64,10 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
 
 
 def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    if payload.get("source") != "playlist-runner-state":
-        parse_session(payload)
+    parse_session(payload)
     events: list[dict[str, Any]] = []
     for clip in payload.get("clips", []):
-        event = legacy_clip_event(clip) if payload.get("source") == "playlist-runner-state" else session_clip_event(clip)
+        event = session_clip_event(clip)
         events.append(event)
         for automation in clip.get("automations", []):
             events.append(automation_payload(automation, owner=str(clip.get("id"))))
@@ -165,11 +111,25 @@ def now_from_state(state: dict[str, Any], session_payload: dict[str, Any]) -> di
     current = state.get("current")
     started_at = parse_timestamp(state.get("started_at"))
     elapsed_ms = max(0, int(round((time.time() - started_at) * 1000))) if started_at is not None and current else None
+    try:
+        playhead_ms = playhead_ms_from_state(Path(str(state.get("_state_path", "")))) if state.get("_state_path") else None
+    except Exception:
+        playhead_ms = None
     current_event = next(
         (
             event
             for event in session_events(session_payload)
-            if event.get("status") == "current" or (current and event.get("path") == current)
+            if (
+                event.get("status") == "current"
+                or (current and event.get("path") == current)
+                or (
+                    playhead_ms is not None
+                    and event.get("kind") == "song"
+                    and isinstance(event.get("start_ms"), int)
+                    and isinstance(event.get("end_ms"), int)
+                    and event["start_ms"] <= playhead_ms < event["end_ms"]
+                )
+            )
         ),
         None,
     )
@@ -188,18 +148,19 @@ def now_from_state(state: dict[str, Any], session_payload: dict[str, Any]) -> di
 
 def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[str, Any]:
     state = load_payload(state_path) if state_path.exists() else {}
-    if session_path and session_path.exists():
-        session_payload = load_payload(session_path)
-        session_source = str(session_path)
-    else:
-        session_payload = playlist_state_to_session(state)
-        session_source = str(state_path)
+    state["_state_path"] = str(state_path)
+    if not session_path or not session_path.exists():
+        raise FileNotFoundError(f"native mix session is required: {session_path or DEFAULT_SESSION}")
+    session_payload = load_payload(session_path)
+    session_source = str(session_path)
     return {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "state_path": str(state_path),
         "now": now_from_state(state, session_payload),
         "session": {
             "path": session_source,
+            "source": session_payload.get("source", "mix-session"),
+            "timeline_mode": session_payload.get("timeline_mode", "native"),
             "raw": session_payload,
             "events": session_events(session_payload),
         },
@@ -209,8 +170,10 @@ def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[st
 def choose_state_path(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit
+    if DEFAULT_STATE.exists():
+        return DEFAULT_STATE
     candidates = sorted(
-        (path for path in (REPO_ROOT / "runtime").glob("*state.json") if path.is_file()),
+        (path for path in (REPO_ROOT / "runtime").glob("*session-state.json") if path.is_file()),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )

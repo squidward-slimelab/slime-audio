@@ -51,7 +51,17 @@ public sealed class AudioPacketTests
             MaxBufferedPackets: 10,
             MaxBufferedPacketSpan: 12,
             LatestSequence: 99,
-            LatestSessionId: "abc");
+            LatestSessionId: "abc",
+            SharedStreamListening: true,
+            SharedStreamExitCode: 12,
+            SharedStreamStatus: "snapclient warning",
+            SharedStreamServerHost: "192.168.0.122",
+            SharedStreamProcessId: 1234,
+            SharedStreamStartedUnixTimeMs: 1000,
+            SharedStreamLastExitUnixTimeMs: 2000,
+            SharedStreamExitCount: 2,
+            SharedStreamLastStderrUnixTimeMs: 1500,
+            SharedStreamTelemetryPath: @"C:\Users\slimeq\AppData\Local\SlimeAudio\telemetry.jsonl");
         var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123, StreamMuted: true, Diagnostics: diagnostics);
 
         var decoded = DiscoveryResponse.FromJson(original.ToJson());
@@ -61,6 +71,10 @@ public sealed class AudioPacketTests
         Assert.True(decoded.StreamMuted);
         Assert.Equal(42, decoded.Diagnostics?.ReceivedPackets);
         Assert.Equal(5, decoded.Diagnostics?.MissingFrames);
+        Assert.True(decoded.Diagnostics?.SharedStreamListening);
+        Assert.Equal(2, decoded.Diagnostics?.SharedStreamExitCount);
+        Assert.Equal("192.168.0.122", decoded.Diagnostics?.SharedStreamServerHost);
+        Assert.EndsWith("telemetry.jsonl", decoded.Diagnostics?.SharedStreamTelemetryPath);
     }
 
     [Fact]
