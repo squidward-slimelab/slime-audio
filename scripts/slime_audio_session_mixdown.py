@@ -25,6 +25,13 @@ def gain_multiplier(db: float) -> float:
     return 10 ** (db / 20)
 
 
+def tempo_factor(clip: Clip) -> float:
+    factor = 1 + (clip.tempo_shift_pct / 100)
+    if factor <= 0:
+        raise ValueError(f"clip {clip.id} tempo_shift_pct produces non-positive tempo")
+    return factor
+
+
 def atempo_filters(factor: float) -> list[str]:
     if factor <= 0:
         raise ValueError("tempo factor must be positive")
@@ -48,8 +55,14 @@ def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
         filters.append(f"aresample={sample_rate}")
         filters.extend(atempo_filters(1 / pitch_factor))
     if clip.tempo_shift_pct:
-        filters.extend(atempo_filters(1 + (clip.tempo_shift_pct / 100)))
+        filters.extend(atempo_filters(tempo_factor(clip)))
     return filters
+
+
+def source_duration_ms(clip: Clip) -> int | None:
+    if clip.duration_ms is None:
+        return None
+    return max(1, int(round(clip.duration_ms * tempo_factor(clip))))
 
 
 def shift_automation_window(automation: Automation, from_ms: int) -> Automation | None:
@@ -94,7 +107,7 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
             replace(
                 clip,
                 start_ms=max(0, clip.start_ms - from_ms),
-                trim_start_ms=clip.trim_start_ms + overlap_ms,
+                trim_start_ms=clip.trim_start_ms + int(round(overlap_ms * tempo_factor(clip))),
                 duration_ms=duration_ms,
                 automations=shifted_automations,
             )
@@ -201,7 +214,8 @@ def build_filter_complex(
     filters: list[str] = []
     music_labels: list[str] = []
     for index, clip in enumerate(session.clips):
-        duration = f":duration={seconds(clip.duration_ms)}" if clip.duration_ms is not None else ""
+        source_duration = source_duration_ms(clip)
+        duration = f":duration={seconds(source_duration)}" if source_duration is not None else ""
         label = f"music{index}"
         volume = gain_multiplier(clip.gain_db)
         fade_in_ms = clip.fade_in_ms

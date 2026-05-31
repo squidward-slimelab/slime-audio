@@ -81,10 +81,13 @@ Keep this skill generic and portable.
      --session runtime/mix-session.json \
      --state runtime/mix-session-state.json \
      --double-every 2 \
+     --max-render-tempo-shift-pct 4 \
+     --max-render-pitch-shift-semitones 2 \
      --apply
    ```
 
    The planner must respect the live lock from runner state, keep already-rendered audio intact, and only rewrite clips safely in the future.
+   Use `--max-render-pitch-shift-semitones 0` when a routine should preserve original keys and avoid rendered key correction.
 
 6. Treat `runtime/mix-session.json` as the canonical live set state. Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
 
@@ -147,6 +150,7 @@ These are part of the normal workflow, not future wishes.
 - Live commentary planning: use `slime_audio_commentary_planner.py` to add future mic lean-ins independently of music selection. It writes normal session lean-ins with ducking/low-pass automation and appends `commentary_planned` logs tying text to timing, track context, and reason.
 - Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
 - Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, and master duck automation only when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
+- Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
 - Live set constraints: use `slime_audio_candidates.py set-constraints` for persistent operator steering. Future candidate generation must respect the scratchpad after restarts.
 
 ## Receiver Health

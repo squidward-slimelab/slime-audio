@@ -98,6 +98,47 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertFalse(any(clip.get("planner_role") == "drop-double" for clip in planned["clips"]))
         self.assertIn("cut", moves[-1].reason)
 
+    def test_small_rendered_tempo_and_pitch_shift_can_enable_overlay(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 120_000},
+                {"id": "next", "deck": "deck-1", "path": "/music/next.flac", "start_ms": 140_000, "duration_ms": 120_000},
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        planned, moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac", bpm=120, tonic=0, mode="major"),
+                "/music/next.flac": analysis("/music/next.flac", bpm=121, tonic=2, mode="major"),
+            },
+            lock_before_ms=0,
+            double_every=10,
+        )
+
+        clips = {clip["id"]: clip for clip in planned["clips"]}
+        self.assertLess(clips["next"]["start_ms"], clips["current"]["start_ms"] + clips["current"]["duration_ms"])
+        self.assertNotEqual(clips["next"]["pitch_shift_semitones"], 0)
+        self.assertNotEqual(clips["next"]["tempo_shift_pct"], 0)
+        self.assertIn("overlap", moves[-1].reason)
+
+        no_pitch, no_pitch_moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac", bpm=120, tonic=0, mode="major"),
+                "/music/next.flac": analysis("/music/next.flac", bpm=121, tonic=2, mode="major"),
+            },
+            lock_before_ms=0,
+            max_pitch_shift_semitones=0,
+        )
+        no_pitch_clips = {clip["id"]: clip for clip in no_pitch["clips"]}
+        self.assertEqual(no_pitch_clips["next"]["start_ms"], no_pitch_clips["current"]["start_ms"] + no_pitch_clips["current"]["duration_ms"])
+        self.assertIn("cut", no_pitch_moves[-1].reason)
+
 
 if __name__ == "__main__":
     unittest.main()

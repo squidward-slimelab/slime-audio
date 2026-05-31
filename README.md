@@ -146,7 +146,7 @@ python3 scripts/slime_audio_dj.py structure ./track-a.wav
 python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
 python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
 python3 scripts/slime_audio_dj.py rank ./now-playing.wav --playlist runtime/candidates.txt --limit 8
-python3 scripts/slime_audio_mix_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --apply
+python3 scripts/slime_audio_mix_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --max-render-tempo-shift-pct 4 --max-render-pitch-shift-semitones 2 --apply
 ```
 
 Transition plans include:
@@ -161,7 +161,7 @@ Structure analysis adds a rough beat grid and phrase-aware windows such as intro
 
 Tension analysis turns those per-track structure points into absolute mix-session timestamps. `slime_audio_dj.py tension` emits candidate commentary windows with `reason` and `talking_points` fields derived from analysis facts only: track position, detected structure, BPM/key estimates, energy movement, and transition-plan notes. Use that JSON as an input to the commentary planner when a live set should speak around musical pressure instead of generic track starts.
 
-Mix planning turns the analysis into executable session edits. `slime_audio_mix_planner.py` reads the live runner state as a lock, analyzes only current/future clips, and only creates overlays when the transition clears tempo/key compatibility gates. Safe overlays get phrase-sized starts, explicit clip fade lengths, optional drop-double clips from detected build/drop windows, and master duck automation around handoffs. Unsafe transitions remain hard cuts; the renderer does not add implicit auto-crossfades just because clips overlap. Run the planner immediately after importing a playlist and again when extending the future set; a straight import is not a finished DJ set.
+Mix planning turns the analysis into executable session edits. `slime_audio_mix_planner.py` reads the live runner state as a lock, analyzes only current/future clips, and only creates overlays when the transition clears tempo/key compatibility gates. Safe overlays get phrase-sized starts, explicit clip fade lengths, optional drop-double clips from detected build/drop windows, rendered tempo/key correction within configured limits, and master duck automation around handoffs. Use `--max-render-pitch-shift-semitones 0` when a routine should preserve original keys instead of allowing key correction. Unsafe transitions remain hard cuts; the renderer does not add implicit auto-crossfades just because clips overlap. Run the planner immediately after importing a playlist and again when extending the future set; a straight import is not a finished DJ set.
 
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 

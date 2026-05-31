@@ -22,7 +22,8 @@ DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4"]
 DEFAULT_LOCK_LEAD_MS = 20_000
 DEFAULT_DOUBLE_DURATION_MS = 12_000
 MIN_OVERLAY_SCORE = 0.72
-MAX_OVERLAY_TEMPO_SHIFT_PCT = 1.5
+MAX_RENDER_TEMPO_SHIFT_PCT = 4.0
+MAX_RENDER_PITCH_SHIFT_SEMITONES = 2
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,13 @@ def phrase_ms(analysis: TrackAnalysis | None) -> int:
     return 16_000
 
 
-def safe_overlay_plan(source: TrackAnalysis | None, target: TrackAnalysis | None) -> tuple[Any | None, str]:
+def safe_overlay_plan(
+    source: TrackAnalysis | None,
+    target: TrackAnalysis | None,
+    *,
+    max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
+    max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
+) -> tuple[Any | None, str]:
     if source is None or target is None:
         return None, "missing analysis"
     plan = transition_plan(source, target)
@@ -67,15 +74,28 @@ def safe_overlay_plan(source: TrackAnalysis | None, target: TrackAnalysis | None
         return None, f"transition score {plan.score} below overlay threshold"
     if plan.key_relation == "clash":
         return None, "key clash"
-    if plan.pitch_shift_semitones:
-        return None, f"requires pitch shift {plan.pitch_shift_semitones:+d}"
-    if tempo_shift > MAX_OVERLAY_TEMPO_SHIFT_PCT:
+    if abs(plan.pitch_shift_semitones) > max_pitch_shift_semitones:
+        return None, f"pitch shift {plan.pitch_shift_semitones:+d} exceeds allowed render shift"
+    if tempo_shift > max_tempo_shift_pct:
         return None, f"tempo shift {tempo_shift:.2f}% too large for current renderer"
-    return plan, f"score {plan.score}; {plan.key_relation}; tempo {plan.target_tempo_shift_pct or 0.0:+.2f}%"
+    pitch_note = f"; pitch {plan.pitch_shift_semitones:+d}" if plan.pitch_shift_semitones else ""
+    return plan, f"score {plan.score}; {plan.key_relation}; tempo {plan.target_tempo_shift_pct or 0.0:+.2f}%{pitch_note}"
 
 
-def transition_overlap_ms(source: TrackAnalysis | None, target: TrackAnalysis | None, shorter_ms: int) -> int:
-    plan, _reason = safe_overlay_plan(source, target)
+def transition_overlap_ms(
+    source: TrackAnalysis | None,
+    target: TrackAnalysis | None,
+    shorter_ms: int,
+    *,
+    max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
+    max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
+) -> int:
+    plan, _reason = safe_overlay_plan(
+        source,
+        target,
+        max_tempo_shift_pct=max_tempo_shift_pct,
+        max_pitch_shift_semitones=max_pitch_shift_semitones,
+    )
     if plan is None:
         return 0
     base = phrase_ms(source)
@@ -120,6 +140,8 @@ def plan_future_mix(
     *,
     lock_before_ms: int,
     double_every: int = 2,
+    max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
+    max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
     next_payload = copy.deepcopy(payload)
     normalize_clip_times(next_payload)
@@ -143,7 +165,13 @@ def plan_future_mix(
             continue
         analysis = analyses.get(str(clip.get("path")))
         shorter = min(duration_ms, int(previous.get("duration_ms") or duration_ms) if previous else duration_ms)
-        overlap = transition_overlap_ms(previous_analysis, analysis, shorter)
+        overlap = transition_overlap_ms(
+            previous_analysis,
+            analysis,
+            shorter,
+            max_tempo_shift_pct=max_tempo_shift_pct,
+            max_pitch_shift_semitones=max_pitch_shift_semitones,
+        )
         start_ms = cursor if previous is None else max(lock_before_ms, clip_end(previous) - overlap)
         end_ms = start_ms + duration_ms
         deck = choose_deck(rebuilt, start_ms, end_ms, avoid={previous_deck} if overlap else set())
@@ -152,7 +180,12 @@ def plan_future_mix(
         clip["deck"] = deck
         clip["fade_in_ms"] = min(overlap, 24_000) if overlap else 0
         clip["fade_out_ms"] = min(overlap, 24_000) if overlap else 0
-        plan, overlay_reason = safe_overlay_plan(previous_analysis, analysis)
+        plan, overlay_reason = safe_overlay_plan(
+            previous_analysis,
+            analysis,
+            max_tempo_shift_pct=max_tempo_shift_pct,
+            max_pitch_shift_semitones=max_pitch_shift_semitones,
+        )
         if plan is not None:
             clip["tempo_shift_pct"] = plan.target_tempo_shift_pct or 0.0
             clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
@@ -252,6 +285,8 @@ def main() -> int:
     parser.add_argument("--lock-before-ms", type=int)
     parser.add_argument("--lock-lead-ms", type=int, default=DEFAULT_LOCK_LEAD_MS)
     parser.add_argument("--double-every", type=int, default=2)
+    parser.add_argument("--max-render-tempo-shift-pct", type=float, default=MAX_RENDER_TEMPO_SHIFT_PCT)
+    parser.add_argument("--max-render-pitch-shift-semitones", type=int, default=MAX_RENDER_PITCH_SHIFT_SEMITONES)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -259,7 +294,14 @@ def main() -> int:
     normalize_clip_times(payload)
     lock_before_ms = args.lock_before_ms if args.lock_before_ms is not None else state_lock_ms(args.state, args.lock_lead_ms)
     analyses = analyze_session_paths(payload, args.cache, args.backend, args.sample_rate, lock_before_ms=lock_before_ms)
-    planned_payload, moves = plan_future_mix(payload, analyses, lock_before_ms=lock_before_ms, double_every=args.double_every)
+    planned_payload, moves = plan_future_mix(
+        payload,
+        analyses,
+        lock_before_ms=lock_before_ms,
+        double_every=args.double_every,
+        max_tempo_shift_pct=args.max_render_tempo_shift_pct,
+        max_pitch_shift_semitones=args.max_render_pitch_shift_semitones,
+    )
     result = {"lock_before_ms": lock_before_ms, "moves": [asdict(move) for move in moves], "clip_count": len(planned_payload.get("clips", []))}
     if args.apply:
         write_payload(args.session, planned_payload)

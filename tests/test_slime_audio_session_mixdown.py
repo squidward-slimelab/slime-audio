@@ -112,6 +112,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("aresample=48000", filters)
         self.assertIn("atempo=0.943874", filters)
         self.assertIn("atempo=1.030000", filters)
+        self.assertIn("atrim=start=0.000:duration=10.300", filters)
 
     def test_session_duration_includes_lean_in_effect_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -212,6 +213,37 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("atrim=start=8.000:duration=13.000", filters)
         self.assertIn("adelay=0:all=1", filters)
         self.assertIn("adelay=18000:all=1", filters)
+
+    def test_shift_session_window_converts_timeline_overlap_to_source_trim_with_tempo_shift(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "fast",
+                                "deck": "deck-1",
+                                "path": "/music/fast.flac",
+                                "start": 0,
+                                "trim_start": 1_000,
+                                "duration": 20_000,
+                                "tempo_shift_pct": 5,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            shifted = shift_session_window(load_session(session_path), 4_000)
+            filters = build_filter_complex(shifted, {}, 48_000, 2)
+
+        self.assertEqual(shifted.clips[0].trim_start_ms, 5_200)
+        self.assertEqual(shifted.clips[0].duration_ms, 16_000)
+        self.assertIn("atrim=start=5.200:duration=16.800", filters)
+        self.assertIn("atempo=1.050000", filters)
 
     def test_shift_session_window_limits_duration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
