@@ -134,6 +134,18 @@ Keep this skill generic and portable.
    python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 02:10.000 --output runtime/mix-render-from-playhead.wav --dry-run
    ```
 
+   To send the operator a verifiable mix artifact, render an MP3 review file directly from the planned session:
+
+   ```bash
+   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json \
+     --output runtime/mix-review.mp3 \
+     --format mp3 \
+     --mp3-bitrate 192k \
+     --verify
+   ```
+
+   Use `--from` and `--duration` for a short proof clip around a transition. Keep `--verify` on so empty/silent renders fail before upload.
+
 10. Start playback from the native timestamped session runner:
 
    ```bash
@@ -165,6 +177,7 @@ These are part of the normal workflow, not future wishes.
 - Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, and master duck automation only when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
 - Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
 - Quantized beat jumps: use `slime_audio_session.py beat-jump` for +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat offsets from cached BPM/beat-offset analysis. Prefer it over manual millisecond edits whenever planning instant doubles, half-beat delays, phrase jumps, or off-beat cuts.
+- Review file export: use `slime_audio_session_mixdown.py --output runtime/mix-review.mp3 --format mp3 --verify` to render the actual planned mix to a shareable file before or after playback. For transition QA, render a shorter window with `--from` and `--duration`, then upload or link that artifact for operator review.
 - Live set constraints: use `slime_audio_candidates.py set-constraints` for persistent operator steering. Future candidate generation must respect the scratchpad after restarts.
 
 ## Receiver Health

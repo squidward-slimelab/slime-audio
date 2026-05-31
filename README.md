@@ -182,6 +182,7 @@ python3 scripts/slime_audio_session.py beat-jump runtime/mix-session.json --id b
 python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --lowpass-hz 1400
 python3 scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json --count 3
 python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --output runtime/mix-session-render.wav
+python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --duration 00:45.000 --output runtime/mix-review.mp3 --format mp3 --verify
 python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target all
 ```
 
@@ -190,6 +191,8 @@ python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json
 `beat-jump` is the quantized edit path for doubles and rhythmic offsets. It reads cached BPM/beat-offset analysis, supports +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat moves, and snaps either `--field start` or `--field trim-start` to the track grid. Low-confidence beatgrids are rejected unless `--force` is explicit.
 
 `scripts/slime_audio_session_runner.py` consumes the native timestamped session directly. It renders short future windows, streams them through Snapcast/multicast, reloads `mix-session.json` before each window, and records `session_window_*` history events. Future adds/moves/removes take effect on the next render window without interrupting audio already under the playhead.
+
+For review and verification, render the planned mix directly to a file with `slime_audio_session_mixdown.py`. Use WAV/FLAC for lossless checks or MP3 for shareable review artifacts; `--verify` probes duration and rejects silent output. `--from` and `--duration` are the quickest way to export a transition proof clip without rendering the whole set.
 
 Lean-ins are scheduled session events, not immediate side streams. A lean-in has an exact mix timeline `start`, spoken text, voice `volume`, and paired `duck_volume`/`lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
 

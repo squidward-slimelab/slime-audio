@@ -298,6 +298,8 @@ def ffmpeg_command(
     sample_rate: int,
     channels: int,
     output_duration_ms: int | None = None,
+    output_format: str = "auto",
+    mp3_bitrate: str = "192k",
 ) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     for clip in session.clips:
@@ -312,16 +314,75 @@ def ffmpeg_command(
             build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms),
             "-map",
             "[out]",
-            "-acodec",
-            "pcm_s16le",
-            "-ac",
-            str(channels),
-            "-ar",
-            str(sample_rate),
+            *output_codec_args(output, output_format, sample_rate, channels, mp3_bitrate),
             str(output),
         ]
     )
     return command
+
+
+def resolved_output_format(output: Path, output_format: str) -> str:
+    if output_format != "auto":
+        return output_format
+    suffix = output.suffix.lower()
+    if suffix == ".mp3":
+        return "mp3"
+    if suffix == ".flac":
+        return "flac"
+    return "wav"
+
+
+def output_codec_args(output: Path, output_format: str, sample_rate: int, channels: int, mp3_bitrate: str) -> list[str]:
+    resolved = resolved_output_format(output, output_format)
+    common = ["-ac", str(channels), "-ar", str(sample_rate)]
+    if resolved == "wav":
+        return ["-acodec", "pcm_s16le", *common]
+    if resolved == "flac":
+        return ["-acodec", "flac", *common]
+    if resolved == "mp3":
+        return ["-acodec", "libmp3lame", "-b:a", mp3_bitrate, *common]
+    raise ValueError(f"unsupported output format: {output_format}")
+
+
+def verify_rendered_audio(output: Path) -> None:
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=nw=1:nk=1",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    duration = float(probe.stdout.strip() or "0")
+    if duration <= 0:
+        raise ValueError(f"rendered mix has no positive duration: {output}")
+    volume = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-i",
+            str(output),
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    text = f"{volume.stdout}\n{volume.stderr}"
+    if "mean_volume: -inf dB" in text or "max_volume: -inf dB" in text:
+        raise ValueError(f"rendered mix is silent: {output}")
 
 
 def prepare_lean_in_audio(
@@ -372,6 +433,8 @@ def main() -> int:
     parser.add_argument("--tts-timeout-seconds", type=int, default=90)
     parser.add_argument("--sample-rate", type=int, default=48_000)
     parser.add_argument("--channels", type=int, default=2)
+    parser.add_argument("--format", choices=["auto", "wav", "mp3", "flac"], default="auto")
+    parser.add_argument("--mp3-bitrate", default="192k")
     parser.add_argument(
         "--from",
         dest="from_time",
@@ -380,6 +443,7 @@ def main() -> int:
     )
     parser.add_argument("--duration", help="Render only this much timeline after --from.")
     parser.add_argument("--skip-tts", action="store_true", help="Use tiny silent lean-in placeholders; useful for command validation.")
+    parser.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True, help="Probe rendered duration and reject silent output.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -396,11 +460,22 @@ def main() -> int:
             args.channels,
             args.skip_tts or args.dry_run,
         )
-        command = ffmpeg_command(session, lean_audio, args.output, args.sample_rate, args.channels, duration_ms)
+        command = ffmpeg_command(
+            session,
+            lean_audio,
+            args.output,
+            args.sample_rate,
+            args.channels,
+            duration_ms,
+            args.format,
+            args.mp3_bitrate,
+        )
         if args.dry_run:
             print(json.dumps({"command": command, "filter_complex": command[command.index("-filter_complex") + 1]}, indent=2))
             return 0
         subprocess.run(command, check=True)
+        if args.verify:
+            verify_rendered_audio(args.output)
     print(f"rendered {args.output}")
     return 0
 

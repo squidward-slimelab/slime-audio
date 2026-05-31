@@ -82,6 +82,28 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("/music/bed.flac", command)
         self.assertIn("/tmp/lean.wav", command)
         self.assertEqual(command[-1], "/tmp/out.wav")
+        self.assertIn("pcm_s16le", command)
+
+    def test_ffmpeg_command_can_export_review_mp3(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "bed", "deck": "deck-1", "path": "/music/bed.flac", "start": 0, "duration": 1000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            command = ffmpeg_command(session, {}, Path("/tmp/review.mp3"), 48_000, 2)
+
+        self.assertIn("libmp3lame", command)
+        self.assertIn("-b:a", command)
+        self.assertIn("192k", command)
+        self.assertEqual(command[-1], "/tmp/review.mp3")
 
     def test_mixdown_filter_renders_tempo_and_pitch_shift_fields(self):
         with tempfile.TemporaryDirectory() as temp_dir:
