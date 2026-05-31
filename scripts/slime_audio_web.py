@@ -226,7 +226,18 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
         status = "window-active"
     stale = False
     updated_ts = parse_timestamp(updated_at if isinstance(updated_at, str) else None)
-    if updated_ts is not None and not completed_at and time.time() - updated_ts > 30:
+    stale_after_ts = updated_ts + 30 if updated_ts is not None else None
+    window_started_ts = parse_timestamp(state.get("window_started_at") if isinstance(state.get("window_started_at"), str) else None)
+    window_start_ms = state.get("window_start_ms")
+    window_end_ms = state.get("window_end_ms")
+    if (
+        window_started_ts is not None
+        and isinstance(window_start_ms, (int, float))
+        and isinstance(window_end_ms, (int, float))
+        and window_end_ms > window_start_ms
+    ):
+        stale_after_ts = max(stale_after_ts or 0, window_started_ts + ((window_end_ms - window_start_ms) / 1000) + 30)
+    if stale_after_ts is not None and not completed_at and time.time() > stale_after_ts:
         stale = True
         status = "stale"
     return {

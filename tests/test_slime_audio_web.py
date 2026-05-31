@@ -46,7 +46,7 @@ class SlimeAudioWebTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.object(web, "time") as fake_time:
-                fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:00-0400")
+                fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:01-0400")
                 data = web.load_dashboard_state(state_path, session_path)
 
         self.assertEqual(data["now"]["track"]["title"], "b")
@@ -129,7 +129,7 @@ class SlimeAudioWebTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch.object(web, "time") as fake_time:
-                fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:00-0400")
+                fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:01-0400")
                 data = web.load_dashboard_state(state_path, session_path)
 
         dashboard = data["dashboard"]
@@ -140,6 +140,43 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(dashboard["commentary"][0]["id"], "drop")
         self.assertEqual(dashboard["automation"][0]["param"], "gain_db")
         self.assertEqual(dashboard["health"]["runner_state"], "stale")
+
+    def test_native_runner_window_is_not_stale_between_state_writes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/A/B/a.flac", "start": 0, "duration": 240_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "current": "/music/A/B/a.flac",
+                        "started_at": "2026-05-30T12:00:00-0400",
+                        "window_started_at": "2026-05-30T12:00:00-0400",
+                        "window_start_ms": 0,
+                        "window_end_ms": 180_000,
+                        "updated_at": "2026-05-30T12:00:00-0400",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(web, "time") as fake_time:
+                fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:00-0400")
+                data = web.load_dashboard_state(state_path, session_path)
+
+        self.assertEqual(data["dashboard"]["transport"]["status"], "playing")
+        self.assertFalse(data["dashboard"]["transport"]["stale"])
+        self.assertEqual(data["dashboard"]["health"]["runner_state"], "ok")
 
     def test_choose_state_path_prefers_explicit_path(self):
         explicit = Path("/tmp/example-state.json")
