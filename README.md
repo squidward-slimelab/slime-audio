@@ -146,6 +146,7 @@ python3 scripts/slime_audio_dj.py structure ./track-a.wav
 python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
 python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
 python3 scripts/slime_audio_dj.py rank ./now-playing.wav --playlist runtime/candidates.txt --limit 8
+python3 scripts/slime_audio_mix_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --apply
 ```
 
 Transition plans include:
@@ -159,6 +160,8 @@ Transition plans include:
 Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
 
 Tension analysis turns those per-track structure points into absolute mix-session timestamps. `slime_audio_dj.py tension` emits candidate commentary windows with `reason` and `talking_points` fields derived from analysis facts only: track position, detected structure, BPM/key estimates, energy movement, and transition-plan notes. Use that JSON as an input to the commentary planner when a live set should speak around musical pressure instead of generic track starts.
+
+Mix planning turns the analysis into executable session edits. `slime_audio_mix_planner.py` reads the live runner state as a lock, analyzes only current/future clips, rewrites future clip starts into phrase-sized overlaps, adds drop-double clips from detected build/drop windows, writes explicit fade lengths, and adds master duck automation around handoffs. Run it immediately after importing a playlist and again when extending the future set; a straight import is not a finished DJ set.
 
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 

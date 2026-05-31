@@ -192,7 +192,9 @@ def build_filter_complex(
         duration = f":duration={seconds(clip.duration_ms)}" if clip.duration_ms is not None else ""
         label = f"music{index}"
         volume = gain_multiplier(clip.gain_db)
-        fade_in_ms, fade_out_ms = clip_fade_durations(session.clips, clip)
+        auto_fade_in_ms, auto_fade_out_ms = clip_fade_durations(session.clips, clip)
+        fade_in_ms = max(auto_fade_in_ms, clip.fade_in_ms)
+        fade_out_ms = max(auto_fade_out_ms, clip.fade_out_ms)
         fade_filters = ""
         if fade_in_ms:
             fade_filters += f"afade=t=in:st=0:d={seconds(fade_in_ms)},"

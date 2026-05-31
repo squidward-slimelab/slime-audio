@@ -20,6 +20,7 @@ Keep this skill generic and portable.
 - `scripts/slime_music_library.py`: scan and query the SQLite music database.
 - `scripts/slime_audio_candidates.py`: choose database-backed future tracks from preferred files, recent playback history, and live operator constraints.
 - `scripts/slime_audio_dj.py`: analyze BPM, beat offset, key, Camelot code, energy, and transition compatibility.
+- `scripts/slime_audio_mix_planner.py`: rewrite future mix-session clips into phrase-aware blends, drop doubles, and planned transition automation.
 - `scripts/slime_audio_stream.py`: discover receivers and stream local files.
 - `scripts/slime_audio_session.py`: maintain planned mix-session clips, mic lean-ins, and automation.
 - `scripts/slime_audio_lean_ins.py`: add scheduled lean-ins to a mix session.
@@ -72,6 +73,18 @@ Keep this skill generic and portable.
    python3 scripts/slime_audio_dj.py plan --playlist runtime/current-playlist.txt
    python3 scripts/slime_audio_dj.py rank ./current-track.flac --playlist runtime/candidates.txt --limit 12
    ```
+
+   Then run the real mix planner against the future session, especially after importing a straight playlist:
+
+   ```bash
+   python3 scripts/slime_audio_mix_planner.py \
+     --session runtime/mix-session.json \
+     --state runtime/mix-session-state.json \
+     --double-every 2 \
+     --apply
+   ```
+
+   The planner must respect the live lock from runner state, keep already-rendered audio intact, and only rewrite clips safely in the future.
 
 6. Treat `runtime/mix-session.json` as the canonical live set state. Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
 
@@ -133,6 +146,7 @@ These are part of the normal workflow, not future wishes.
 - Live future editing: use timestamped `mix-session.json` clips, not legacy queue slots. The session runner reloads future render windows, records `session_window_*` history, and future `add-clip`, `move`, `remove`, `add-mic`, and automation edits should use `--state` or `--lock-before` to protect audio under the playhead.
 - Live commentary planning: use `slime_audio_commentary_planner.py` to add future mic lean-ins independently of music selection. It writes normal session lean-ins with ducking/low-pass automation and appends `commentary_planned` logs tying text to timing, track context, and reason.
 - Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
+- Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks to create overlapped blends, drop-double clips, explicit clip fades, and master duck automation. Do not settle for a back-to-back playlist import when the operator asked for a DJ set.
 - Live set constraints: use `slime_audio_candidates.py set-constraints` for persistent operator steering. Future candidate generation must respect the scratchpad after restarts.
 
 ## Receiver Health
