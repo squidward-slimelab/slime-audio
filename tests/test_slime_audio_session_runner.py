@@ -2,10 +2,11 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -90,6 +91,29 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertIn("--mode", command)
         self.assertEqual(command[command.index("--mode") + 1], "snapcast")
         self.assertEqual(command[command.index("--delay-ms") + 1], "0")
+
+    def test_persistent_snapcast_reuses_fifo_handle_between_windows(self):
+        args = Namespace(
+            snapcast_fifo=Mock(),
+            channels=2,
+            sample_rate=48_000,
+        )
+        args.snapcast_fifo.open.return_value = "fifo-handle"
+        snapcast = runner.PersistentSnapcast(args)
+        snapcast.fifo_handle = args.snapcast_fifo.open("wb")
+
+        with patch.object(runner, "require_ffmpeg", return_value="ffmpeg"):
+            with patch.object(runner.subprocess, "Popen") as popen:
+                popen.return_value = Mock()
+                first = snapcast.start_window(Path("/tmp/a.wav"))
+                second = snapcast.start_window(Path("/tmp/b.wav"))
+
+        args.snapcast_fifo.open.assert_called_once_with("wb")
+        self.assertEqual(popen.call_count, 2)
+        self.assertIsNone(first.handle)
+        self.assertIsNone(second.handle)
+        self.assertEqual(popen.call_args_list[0].kwargs["stdout"], "fifo-handle")
+        self.assertEqual(popen.call_args_list[1].kwargs["stdout"], "fifo-handle")
 
 
 if __name__ == "__main__":

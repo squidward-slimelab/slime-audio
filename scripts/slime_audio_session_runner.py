@@ -70,6 +70,7 @@ class PersistentSnapcast:
         self.args = args
         self.targets: list[Receiver] = []
         self.server: subprocess.Popen[bytes] | None = None
+        self.fifo_handle: object | None = None
 
     def start(self) -> None:
         try:
@@ -108,6 +109,7 @@ class PersistentSnapcast:
         time.sleep(0.8)
         if self.server.poll() is not None:
             raise subprocess.CalledProcessError(self.server.returncode or 1, "snapserver")
+        self.fifo_handle = self.args.snapcast_fifo.open("wb")
         discovered = discover_receivers(47777, self.args.discover_timeout_ms)
         self.targets = resolve_targets(self.args.target, discovered, 47777, include_muted=False)
         if not self.targets:
@@ -115,7 +117,8 @@ class PersistentSnapcast:
         send_control(self.targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
 
     def start_window(self, audio_path: Path) -> RunningWindow:
-        handle = self.args.snapcast_fifo.open("wb")
+        if self.fifo_handle is None:
+            raise RuntimeError("snapcast fifo writer is not open")
         command = [
             require_ffmpeg(),
             "-hide_banner",
@@ -135,10 +138,15 @@ class PersistentSnapcast:
             str(self.args.sample_rate),
             "pipe:1",
         ]
-        process = subprocess.Popen(command, stdout=handle, start_new_session=True)
-        return RunningWindow(process, handle)
+        process = subprocess.Popen(command, stdout=self.fifo_handle, start_new_session=True)
+        return RunningWindow(process)
 
     def stop(self) -> None:
+        if self.fifo_handle is not None:
+            close = getattr(self.fifo_handle, "close", None)
+            if close is not None:
+                close()
+            self.fifo_handle = None
         if self.server is not None and self.server.poll() is None:
             self.server.terminate()
             try:
