@@ -47,9 +47,9 @@ The tray menu includes:
 
 - `Slime Audio <version>`
 - `Status`
-- `Mute stream here` / `Unmute stream here`
-- `Start shared stream listener`
-- `Stop shared stream listener`
+- `Receive stream here`
+- `Volume`
+- `Output device`
 - `Check for updates`
 - `Quit`
 
@@ -106,6 +106,13 @@ python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
 Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, exit count, last stderr time, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, or is stopped. After a skip, run discovery and compare `shared_stream_exits`, `shared_stream_last_stderr_ms`, and `telemetry_path` against the sender/session logs.
+
+The tray `Output device` menu lists devices reported by `snapclient.exe --list`. Picking one saves it to `%LOCALAPPDATA%\SlimeAudio\settings.json` and restarts the active Snapcast listener with `--soundcard`. You can also set it remotely:
+
+```bash
+python3 scripts/slime_audio_stream.py --target SPATULA --output-device "Speakers"
+python3 scripts/slime_audio_stream.py --target SPATULA --default-output-device
+```
 
 ## Linux Headless Receiver
 

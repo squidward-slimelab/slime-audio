@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_stream import (
     EFFECT_MESSAGE_PREFIX,
+    OUTPUT_DEVICE_MESSAGE_PREFIX,
     RESET_AUDIO_MESSAGE,
     Receiver,
     SHARED_STREAM_START_MESSAGE,
@@ -105,6 +106,21 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertIn("shared_stream_pid=1234", text)
         self.assertIn("shared_stream_exits=2", text)
         self.assertIn("telemetry_path=", text)
+        self.assertIn("output_device=default", text)
+
+    def test_format_diagnostics_includes_output_device(self):
+        text = format_diagnostics(
+            {
+                "SharedStreamOutputDevice": "Speakers",
+                "SharedStreamOutputDevices": ["Headphones", "Speakers"],
+            },
+        )
+
+        self.assertIn("output_device=Speakers", text)
+        self.assertIn("output_devices=Headphones,Speakers", text)
+
+    def test_output_device_control_message_prefix_is_stable(self):
+        self.assertEqual(OUTPUT_DEVICE_MESSAGE_PREFIX, b"SLIME_AUDIO_OUTPUT_DEVICE_V1 ")
 
 
 if __name__ == "__main__":

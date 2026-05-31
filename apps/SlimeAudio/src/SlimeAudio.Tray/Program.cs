@@ -70,9 +70,11 @@ internal sealed class TrayContext : ApplicationContext
     private readonly NotifyIcon _icon;
     private readonly ToolStripMenuItem _muteItem;
     private readonly ToolStripMenuItem _volumeMenu;
+    private readonly ToolStripMenuItem _outputDeviceMenu;
     private readonly List<ToolStripMenuItem> _volumeItems = new();
     private bool _updatingMuteMenu;
     private bool _updatingVolumeMenu;
+    private bool _updatingOutputDeviceMenu;
 
     public TrayContext(AudioReceiver receiver, MulticastReceiver multicast)
     {
@@ -91,6 +93,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             UpdateMuteMenu();
             UpdateVolumeMenu();
+            UpdateOutputDeviceMenu();
         };
         _icon.ContextMenuStrip.Items.Add($"Slime Audio {VersionInfo.DisplayVersion}", null, (_, _) => MessageBox.Show(DefaultStatus, "Slime Audio"));
         _icon.ContextMenuStrip.Items.Add("Status", null, (_, _) => MessageBox.Show(_icon.Text, "Slime Audio"));
@@ -109,10 +112,70 @@ internal sealed class TrayContext : ApplicationContext
             _volumeMenu.DropDownItems.Add(item);
         }
         _icon.ContextMenuStrip.Items.Add(_volumeMenu);
+        _outputDeviceMenu = new ToolStripMenuItem("Output device");
+        _icon.ContextMenuStrip.Items.Add(_outputDeviceMenu);
         _icon.ContextMenuStrip.Items.Add("Check for updates", null, async (_, _) => await CheckForUpdates());
         _icon.ContextMenuStrip.Items.Add("Quit", null, (_, _) => ExitThread());
         UpdateMuteMenu();
         _receiver.Start();
+    }
+
+    private void UpdateOutputDeviceMenu()
+    {
+        _updatingOutputDeviceMenu = true;
+        try
+        {
+            var selected = _multicast.OutputDevice;
+            _outputDeviceMenu.Text = string.IsNullOrWhiteSpace(selected) ? "Output device: Default" : $"Output device: {selected}";
+            _outputDeviceMenu.DropDownItems.Clear();
+
+            var defaultItem = new ToolStripMenuItem("System default")
+            {
+                CheckOnClick = true,
+                Checked = string.IsNullOrWhiteSpace(selected),
+            };
+            defaultItem.CheckedChanged += (_, _) => ApplyOutputDeviceMenuChange(defaultItem, null);
+            _outputDeviceMenu.DropDownItems.Add(defaultItem);
+
+            var devices = _multicast.ListOutputDevices(refresh: true);
+            if (devices.Count > 0)
+            {
+                _outputDeviceMenu.DropDownItems.Add(new ToolStripSeparator());
+            }
+            foreach (var device in devices)
+            {
+                var item = new ToolStripMenuItem(device.DisplayName)
+                {
+                    CheckOnClick = true,
+                    Checked = string.Equals(selected, device.Soundcard, StringComparison.Ordinal),
+                    Tag = device.Soundcard,
+                };
+                item.CheckedChanged += (_, _) => ApplyOutputDeviceMenuChange(item, device.Soundcard);
+                _outputDeviceMenu.DropDownItems.Add(item);
+            }
+
+            if (devices.Count == 0)
+            {
+                var item = new ToolStripMenuItem("No devices reported by snapclient") { Enabled = false };
+                _outputDeviceMenu.DropDownItems.Add(item);
+            }
+        }
+        finally
+        {
+            _updatingOutputDeviceMenu = false;
+        }
+    }
+
+    private void ApplyOutputDeviceMenuChange(ToolStripMenuItem item, string? soundcard)
+    {
+        if (_updatingOutputDeviceMenu || !item.Checked)
+        {
+            return;
+        }
+
+        _multicast.SetOutputDevice(soundcard);
+        _icon.Text = TrimForTray(string.IsNullOrWhiteSpace(soundcard) ? "Output device set to default" : $"Output device: {soundcard}");
+        UpdateOutputDeviceMenu();
     }
 
     private string DefaultStatus => $"Slime Audio {VersionInfo.DisplayVersion} listening on UDP {_receiver.Port}";
@@ -222,6 +285,8 @@ internal sealed class MulticastReceiver : IDisposable
     private Process? _process;
     private string? _lastStatus;
     private string? _serverHost;
+    private readonly ClientSettings _settings = ClientSettings.Load();
+    private IReadOnlyList<SnapclientOutputDevice>? _outputDevices;
     private long _startedUnixTimeMs;
     private long _lastExitUnixTimeMs;
     private long _lastStderrUnixTimeMs;
@@ -240,6 +305,7 @@ internal sealed class MulticastReceiver : IDisposable
     public int ExitCount => Volatile.Read(ref _exitCount);
     public string TelemetryPath => ClientTelemetry.Path;
     public int VolumePercent => _volumePercent;
+    public string? OutputDevice => _settings.OutputDevice;
 
     public MulticastReceiver(MulticastOptions options)
     {
@@ -257,21 +323,36 @@ internal sealed class MulticastReceiver : IDisposable
 
         try
         {
-            var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:info\"";
-            ClientTelemetry.Write("snapclient_starting", new { serverHost, snapcastPort = _options.SnapcastPort });
-            _process = Process.Start(new ProcessStartInfo
+            var startInfo = new ProcessStartInfo
             {
                 FileName = ResolveToolPath("snapclient.exe"),
-                Arguments = args,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardError = true,
-            });
+            };
+            startInfo.ArgumentList.Add("-h");
+            startInfo.ArgumentList.Add(serverHost);
+            startInfo.ArgumentList.Add("-p");
+            startInfo.ArgumentList.Add(_options.SnapcastPort.ToString());
+            startInfo.ArgumentList.Add("--hostID");
+            startInfo.ArgumentList.Add(Environment.MachineName);
+            startInfo.ArgumentList.Add("--logsink");
+            startInfo.ArgumentList.Add("stderr");
+            startInfo.ArgumentList.Add("--logfilter");
+            startInfo.ArgumentList.Add("*:info");
+            if (!string.IsNullOrWhiteSpace(_settings.OutputDevice))
+            {
+                startInfo.ArgumentList.Add("--soundcard");
+                startInfo.ArgumentList.Add(_settings.OutputDevice);
+            }
+
+            ClientTelemetry.Write("snapclient_starting", new { serverHost, snapcastPort = _options.SnapcastPort, outputDevice = _settings.OutputDevice });
+            _process = Process.Start(startInfo);
             if (_process is not null)
             {
                 var process = _process;
                 Interlocked.Exchange(ref _startedUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                ClientTelemetry.Write("snapclient_started", new { serverHost, snapcastPort = _options.SnapcastPort, processId = process.Id });
+                ClientTelemetry.Write("snapclient_started", new { serverHost, snapcastPort = _options.SnapcastPort, processId = process.Id, outputDevice = _settings.OutputDevice });
                 process.EnableRaisingEvents = true;
                 process.ErrorDataReceived += (_, e) =>
                 {
@@ -296,7 +377,7 @@ internal sealed class MulticastReceiver : IDisposable
         }
         catch (Exception ex)
         {
-            ClientTelemetry.Write("snapclient_start_failed", new { serverHost, snapcastPort = _options.SnapcastPort, error = ex.Message });
+            ClientTelemetry.Write("snapclient_start_failed", new { serverHost, snapcastPort = _options.SnapcastPort, outputDevice = _settings.OutputDevice, error = ex.Message });
             SetStatus($"Snapclient failed: {ex.Message}");
         }
     }
@@ -348,6 +429,70 @@ internal sealed class MulticastReceiver : IDisposable
         SetStatus($"Snapclient volume {_volumePercent}%");
     }
 
+    public void SetOutputDevice(string? soundcard)
+    {
+        _settings.OutputDevice = string.IsNullOrWhiteSpace(soundcard) ? null : soundcard.Trim();
+        _settings.Save();
+        ClientTelemetry.Write("snapclient_output_device", new { outputDevice = _settings.OutputDevice });
+        var serverHost = _serverHost;
+        var wasRunning = IsRunning;
+        if (wasRunning)
+        {
+            Stop();
+        }
+        if (wasRunning && !string.IsNullOrWhiteSpace(serverHost))
+        {
+            Start(serverHost);
+        }
+        else
+        {
+            SetStatus(string.IsNullOrWhiteSpace(_settings.OutputDevice) ? "Output device set to default" : $"Output device set: {_settings.OutputDevice}");
+        }
+    }
+
+    public IReadOnlyList<SnapclientOutputDevice> ListOutputDevices(bool refresh = false)
+    {
+        if (!refresh && _outputDevices is not null)
+        {
+            return _outputDevices;
+        }
+
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = ResolveToolPath("snapclient.exe"),
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            startInfo.ArgumentList.Add("--list");
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return Array.Empty<SnapclientOutputDevice>();
+            }
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+            var errorTask = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(2500))
+            {
+                process.Kill(entireProcessTree: true);
+                ClientTelemetry.Write("snapclient_output_devices_failed", new { error = "snapclient --list timed out" });
+                return Array.Empty<SnapclientOutputDevice>();
+            }
+            var output = outputTask.GetAwaiter().GetResult() + Environment.NewLine + errorTask.GetAwaiter().GetResult();
+            _outputDevices = SnapclientOutputDevice.ParseList(output);
+            ClientTelemetry.Write("snapclient_output_devices", new { devices = _outputDevices.Select(device => device.Soundcard).ToArray() });
+            return _outputDevices;
+        }
+        catch (Exception ex)
+        {
+            ClientTelemetry.Write("snapclient_output_devices_failed", new { error = ex.Message });
+            return Array.Empty<SnapclientOutputDevice>();
+        }
+    }
+
     private void SetStatus(string status)
     {
         _lastStatus = status;
@@ -366,6 +511,71 @@ internal sealed class MulticastReceiver : IDisposable
     public void Dispose()
     {
         Stop();
+    }
+}
+
+internal sealed class ClientSettings
+{
+    public string? OutputDevice { get; set; }
+
+    private static string Path => System.IO.Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SlimeAudio",
+        "settings.json");
+
+    public static ClientSettings Load()
+    {
+        try
+        {
+            if (!File.Exists(Path))
+            {
+                return new ClientSettings();
+            }
+
+            return JsonSerializer.Deserialize<ClientSettings>(File.ReadAllText(Path)) ?? new ClientSettings();
+        }
+        catch
+        {
+            return new ClientSettings();
+        }
+    }
+
+    public void Save()
+    {
+        var directory = System.IO.Path.GetDirectoryName(Path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        File.WriteAllText(Path, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+    }
+}
+
+internal sealed record SnapclientOutputDevice(string Soundcard, string DisplayName)
+{
+    public static IReadOnlyList<SnapclientOutputDevice> ParseList(string output)
+    {
+        var devices = new List<SnapclientOutputDevice>();
+        foreach (var rawLine in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+        {
+            var line = rawLine.Trim();
+            var separator = line.IndexOf(':');
+            if (separator <= 0 || !int.TryParse(line[..separator].Trim(), out _))
+            {
+                continue;
+            }
+
+            var soundcard = line[(separator + 1)..].Trim();
+            if (string.IsNullOrWhiteSpace(soundcard))
+            {
+                continue;
+            }
+
+            devices.Add(new SnapclientOutputDevice(soundcard, $"{devices.Count}: {soundcard}"));
+        }
+
+        return devices;
     }
 }
 
@@ -569,6 +779,13 @@ internal sealed class AudioReceiver : IDisposable
             return true;
         }
 
+        var outputDevice = OutputDeviceSelection.FromControlMessage(text);
+        if (outputDevice is not null)
+        {
+            _multicast.SetOutputDevice(outputDevice.Soundcard);
+            return true;
+        }
+
         var effect = EffectEnvelope.FromControlMessage(text);
         if (effect is not null)
         {
@@ -715,7 +932,9 @@ internal sealed class AudioReceiver : IDisposable
             _multicast.LastExitUnixTimeMs,
             _multicast.ExitCount,
             _multicast.LastStderrUnixTimeMs,
-            _multicast.TelemetryPath);
+            _multicast.TelemetryPath,
+            _multicast.OutputDevice,
+            _multicast.ListOutputDevices().Select(device => device.Soundcard).ToArray());
     }
 
     public void Dispose()

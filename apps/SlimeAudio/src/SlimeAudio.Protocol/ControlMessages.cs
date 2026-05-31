@@ -10,6 +10,7 @@ public static class ControlMessages
     public const string SharedStreamStop = "SLIME_AUDIO_SHARED_STREAM_STOP_V1";
     public const string ResetAudio = "SLIME_AUDIO_RESET_AUDIO_V1";
     public const string EffectPrefix = "SLIME_AUDIO_EFFECT_V1 ";
+    public const string OutputDevicePrefix = "SLIME_AUDIO_OUTPUT_DEVICE_V1 ";
 }
 
 public sealed record DiscoveryResponse(
@@ -70,7 +71,9 @@ public sealed record AudioDiagnostics(
     long SharedStreamLastExitUnixTimeMs = 0,
     int SharedStreamExitCount = 0,
     long SharedStreamLastStderrUnixTimeMs = 0,
-    string? SharedStreamTelemetryPath = null);
+    string? SharedStreamTelemetryPath = null,
+    string? SharedStreamOutputDevice = null,
+    string[]? SharedStreamOutputDevices = null);
 
 public sealed record EffectEnvelope(
     long StartUnixTimeMs,
@@ -92,6 +95,28 @@ public sealed record EffectEnvelope(
         try
         {
             return JsonSerializer.Deserialize<EffectEnvelope>(message[ControlMessages.EffectPrefix.Length..]);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+}
+
+public sealed record OutputDeviceSelection(string? Soundcard)
+{
+    public string ToControlMessage() => ControlMessages.OutputDevicePrefix + JsonSerializer.Serialize(this);
+
+    public static OutputDeviceSelection? FromControlMessage(string message)
+    {
+        if (!message.StartsWith(ControlMessages.OutputDevicePrefix, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<OutputDeviceSelection>(message[ControlMessages.OutputDevicePrefix.Length..]);
         }
         catch (JsonException)
         {

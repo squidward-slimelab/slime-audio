@@ -61,13 +61,20 @@ public sealed class AudioPacketTests
             SharedStreamLastExitUnixTimeMs: 2000,
             SharedStreamExitCount: 2,
             SharedStreamLastStderrUnixTimeMs: 1500,
-            SharedStreamTelemetryPath: @"C:\Users\slimeq\AppData\Local\SlimeAudio\telemetry.jsonl");
+            SharedStreamTelemetryPath: @"C:\Users\slimeq\AppData\Local\SlimeAudio\telemetry.jsonl",
+            SharedStreamOutputDevice: "Speakers",
+            SharedStreamOutputDevices: ["Headphones", "Speakers"]);
         var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123, StreamMuted: true, Diagnostics: diagnostics);
 
         var decoded = DiscoveryResponse.FromJson(original.ToJson());
 
         Assert.NotNull(decoded);
-        Assert.Equal(original, decoded);
+        Assert.Equal(original.App, decoded.App);
+        Assert.Equal(original.MachineName, decoded.MachineName);
+        Assert.Equal(original.UserName, decoded.UserName);
+        Assert.Equal(original.Version, decoded.Version);
+        Assert.Equal(original.Port, decoded.Port);
+        Assert.Equal(original.UnixTimeMs, decoded.UnixTimeMs);
         Assert.True(decoded.StreamMuted);
         Assert.Equal(42, decoded.Diagnostics?.ReceivedPackets);
         Assert.Equal(5, decoded.Diagnostics?.MissingFrames);
@@ -75,6 +82,8 @@ public sealed class AudioPacketTests
         Assert.Equal(2, decoded.Diagnostics?.SharedStreamExitCount);
         Assert.Equal("192.168.0.122", decoded.Diagnostics?.SharedStreamServerHost);
         Assert.EndsWith("telemetry.jsonl", decoded.Diagnostics?.SharedStreamTelemetryPath);
+        Assert.Equal("Speakers", decoded.Diagnostics?.SharedStreamOutputDevice);
+        Assert.Contains("Headphones", decoded.Diagnostics?.SharedStreamOutputDevices ?? []);
     }
 
     [Fact]
@@ -92,5 +101,17 @@ public sealed class AudioPacketTests
     public void ResetAudioControlMessageIsStable()
     {
         Assert.Equal("SLIME_AUDIO_RESET_AUDIO_V1", ControlMessages.ResetAudio);
+    }
+
+    [Fact]
+    public void OutputDeviceSelectionRoundTripsAsControlMessage()
+    {
+        var original = new OutputDeviceSelection("Speakers");
+
+        var decoded = OutputDeviceSelection.FromControlMessage(original.ToControlMessage());
+
+        Assert.NotNull(decoded);
+        Assert.Equal(original, decoded);
+        Assert.Equal("SLIME_AUDIO_OUTPUT_DEVICE_V1 ", ControlMessages.OutputDevicePrefix);
     }
 }

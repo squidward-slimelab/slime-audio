@@ -168,6 +168,11 @@ internal sealed class HeadlessReceiver : IDisposable
             ResetAudio();
             return true;
         }
+        if (OutputDeviceSelection.FromControlMessage(text) is not null)
+        {
+            SetMulticastStatus("output device selection ignored by headless receiver");
+            return true;
+        }
         return EffectEnvelope.FromControlMessage(text) is not null;
     }
 

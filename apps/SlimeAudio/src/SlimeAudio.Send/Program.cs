@@ -53,6 +53,17 @@ if (args.Length > 0 && args[0] == "reset-audio")
     return await SendControl(controlOptions.Targets, ControlMessages.ResetAudio);
 }
 
+if (args.Length > 0 && args[0] == "output-device")
+{
+    var outputOptions = Options.ParseOutputDevice(args.Skip(1).ToArray());
+    if (outputOptions is null)
+    {
+        Options.PrintUsage();
+        return 2;
+    }
+    return await SendControl(outputOptions.Targets, new OutputDeviceSelection(outputOptions.Soundcard).ToControlMessage());
+}
+
 var sendArgs = args.Length > 0 && args[0] == "send" ? args.Skip(1).ToArray() : args;
 var options = Options.Parse(sendArgs);
 if (options is null)
@@ -180,6 +191,8 @@ internal sealed record DiscoverOptions(int Port, int TimeoutMs);
 
 internal sealed record UpdateOptions(IReadOnlyList<string> Targets);
 
+internal sealed record OutputDeviceOptions(IReadOnlyList<string> Targets, string? Soundcard);
+
 internal sealed record Options(string File, IReadOnlyList<string> Targets, int DelayMs, int PacketDelayMs)
 {
     public static Options? Parse(string[] args)
@@ -243,6 +256,31 @@ internal sealed record Options(string File, IReadOnlyList<string> Targets, int D
         return targets.Count == 0 ? null : new UpdateOptions(targets);
     }
 
+    public static OutputDeviceOptions? ParseOutputDevice(string[] args)
+    {
+        var targets = new List<string>();
+        string? soundcard = null;
+        var hasChoice = false;
+        for (var i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--target" when i + 1 < args.Length:
+                    targets.Add(args[++i]);
+                    break;
+                case "--soundcard" when i + 1 < args.Length:
+                    soundcard = args[++i];
+                    hasChoice = true;
+                    break;
+                case "--default":
+                    soundcard = null;
+                    hasChoice = true;
+                    break;
+            }
+        }
+        return targets.Count == 0 || !hasChoice ? null : new OutputDeviceOptions(targets, soundcard);
+    }
+
     public static void PrintUsage()
     {
         Console.Error.WriteLine("usage:");
@@ -250,6 +288,8 @@ internal sealed record Options(string File, IReadOnlyList<string> Targets, int D
         Console.Error.WriteLine("  SlimeAudio.Send update --target SPATULA:47777");
         Console.Error.WriteLine("  SlimeAudio.Send shared-start --target SPATULA:47777 [--target SPONGEBOT:47777]");
         Console.Error.WriteLine("  SlimeAudio.Send shared-stop --target SPATULA:47777 [--target SPONGEBOT:47777]");
+        Console.Error.WriteLine("  SlimeAudio.Send output-device --target SPATULA:47777 --soundcard \"Speakers\"");
+        Console.Error.WriteLine("  SlimeAudio.Send output-device --target SPATULA:47777 --default");
         Console.Error.WriteLine("  SlimeAudio.Send send --file bumper.wav --target SPATULA:47777 [--target SPONGEBOT:47777] [--delay-ms 1500]");
     }
 }

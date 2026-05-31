@@ -17,6 +17,7 @@ SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
 SHARED_STREAM_STOP_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_STOP_V1"
 RESET_AUDIO_MESSAGE = b"SLIME_AUDIO_RESET_AUDIO_V1"
 EFFECT_MESSAGE_PREFIX = b"SLIME_AUDIO_EFFECT_V1 "
+OUTPUT_DEVICE_MESSAGE_PREFIX = b"SLIME_AUDIO_OUTPUT_DEVICE_V1 "
 DEFAULT_PORT = 47777
 DEFAULT_LIVE_DELAY_MS = 7000
 DEFAULT_PREBUFFER_MS = 15000
@@ -68,6 +69,8 @@ def format_diagnostics(
         f"\tshared_stream_exits={diagnostics.get('SharedStreamExitCount', 0)}"
         f"\tshared_stream_last_stderr_ms={diagnostics.get('SharedStreamLastStderrUnixTimeMs', 0)}"
         f"\ttelemetry_path={diagnostics.get('SharedStreamTelemetryPath') or ''}"
+        f"\toutput_device={diagnostics.get('SharedStreamOutputDevice') or 'default'}"
+        f"\toutput_devices={','.join(diagnostics.get('SharedStreamOutputDevices') or [])}"
     )
 
 
@@ -81,7 +84,7 @@ def discover_receivers(port: int = DEFAULT_PORT, timeout_ms: int = 2500) -> list
         stop_at = time.monotonic() + (timeout_ms / 1000)
         while time.monotonic() < stop_at:
             try:
-                payload, address = sock.recvfrom(4096)
+                payload, address = sock.recvfrom(16384)
                 received_ms = time.time() * 1000
             except TimeoutError:
                 continue
@@ -403,6 +406,17 @@ def send_effect_control(
             )
 
 
+def send_output_device_control(targets: list[Receiver], soundcard: str | None) -> None:
+    payload = OUTPUT_DEVICE_MESSAGE_PREFIX + json.dumps(
+        {"Soundcard": soundcard},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        for target in targets:
+            sock.sendto(payload, (target.host, target.port))
+            print(f"output device {target.endpoint}\t{target.machine_name}\t{soundcard or 'default'}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Stream a local audio file to SlimeAudio receivers via shared-stream backends.")
     parser.add_argument("file", nargs="?", type=Path)
@@ -424,6 +438,8 @@ def main() -> int:
     parser.add_argument("--start-listeners", action="store_true", help="Start shared stream listeners on the selected targets and exit.")
     parser.add_argument("--stop-listeners", action="store_true", help="Stop shared stream listeners on the selected targets and exit.")
     parser.add_argument("--reset-audio", action="store_true", help="Reset active playback sessions on the selected targets and exit.")
+    parser.add_argument("--output-device", help="Set the target snapclient soundcard name or index and exit.")
+    parser.add_argument("--default-output-device", action="store_true", help="Reset the target snapclient soundcard to the system default and exit.")
     parser.add_argument("--no-auto-listeners", action="store_true", help="Do not auto-start shared stream listeners before multicast playback.")
     parser.add_argument("--stop-listeners-when-done", action="store_true", help="Stop shared stream listeners after multicast playback exits.")
     parser.add_argument("--effect", action="store_true", help="Send a synced music effect envelope and exit.")
@@ -436,12 +452,33 @@ def main() -> int:
     parser.add_argument("--effect-start-offset-ms", type=int, default=-250)
     args = parser.parse_args()
 
-    control_count = sum(1 for enabled in (args.start_listeners, args.stop_listeners, args.reset_audio) if enabled)
+    control_count = sum(
+        1
+        for enabled in (
+            args.start_listeners,
+            args.stop_listeners,
+            args.reset_audio,
+            args.output_device is not None,
+            args.default_output_device,
+        )
+        if enabled
+    )
     if control_count > 1:
-        raise SystemExit("--start-listeners, --stop-listeners, and --reset-audio are mutually exclusive")
+        raise SystemExit(
+            "--start-listeners, --stop-listeners, --reset-audio, --output-device, and "
+            "--default-output-device are mutually exclusive"
+        )
 
     discovered = discover_receivers(args.port, args.discover_timeout_ms)
-    include_muted = args.include_muted or args.start_listeners or args.stop_listeners or args.reset_audio or args.dry_run
+    include_muted = (
+        args.include_muted
+        or args.start_listeners
+        or args.stop_listeners
+        or args.reset_audio
+        or args.output_device is not None
+        or args.default_output_device
+        or args.dry_run
+    )
     targets = resolve_targets(args.target, discovered, args.port, include_muted=include_muted)
     if not targets:
         raise SystemExit("no targets resolved")
@@ -471,6 +508,10 @@ def main() -> int:
 
     if args.reset_audio:
         send_control(targets, RESET_AUDIO_MESSAGE, "reset audio")
+        return 0
+
+    if args.output_device is not None or args.default_output_device:
+        send_output_device_control(targets, None if args.default_output_device else args.output_device)
         return 0
 
     if args.effect:
