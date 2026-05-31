@@ -147,7 +147,7 @@ def plan_future_mix(
         rebuilt.append(clip)
         planned.append(PlannedMove("blend", str(clip.get("id")), start_ms, reason, str(previous.get("id")) if previous else None))
 
-        if index % max(1, double_every) == 0:
+        if previous is not None and index % max(1, double_every) == 0:
             drop = first_structure(analysis, {"drop", "build"})
             if drop is not None:
                 double_start = max(lock_before_ms, start_ms - min(phrase_ms(previous_analysis), 16_000))
