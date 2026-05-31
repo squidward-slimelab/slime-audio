@@ -5,6 +5,7 @@ const dashboardState = {
   scale: null,
   playheadEl: null,
   follow: false,
+  playheadSync: null,
 };
 
 const els = {
@@ -55,12 +56,39 @@ function generatedAtMs() {
 }
 
 function livePlayheadMs() {
+  const sync = dashboardState.playheadSync;
+  if (sync) {
+    if (!["playing", "window-active"].includes(sync.status)) return sync.baseMs;
+    return Math.min(sync.durationMs || sync.baseMs, sync.baseMs + Math.max(0, performance.now() - sync.clientMs));
+  }
   const transport = dashboardState.dashboard?.transport || {};
   const base = transport.playhead_ms;
   if (base === null || base === undefined) return null;
   if (!["playing", "window-active"].includes(transport.status)) return base;
   const duration = transport.duration_ms || base;
   return Math.min(duration, base + Math.max(0, Date.now() - generatedAtMs()));
+}
+
+function syncPlayhead(transport) {
+  const base = transport?.playhead_ms;
+  if (base === null || base === undefined) {
+    dashboardState.playheadSync = null;
+    return;
+  }
+  const current = livePlayheadMs();
+  const drift = current === null ? Infinity : Math.abs(current - base);
+  const statusChanged = dashboardState.playheadSync?.status !== transport.status;
+  if (!dashboardState.playheadSync || drift > 1500 || statusChanged) {
+    dashboardState.playheadSync = {
+      baseMs: base,
+      clientMs: performance.now(),
+      durationMs: transport.duration_ms || base,
+      status: transport.status,
+    };
+    return;
+  }
+  dashboardState.playheadSync.durationMs = transport.duration_ms || base;
+  dashboardState.playheadSync.status = transport.status;
 }
 
 function eventSignature(dashboard) {
@@ -71,7 +99,6 @@ function eventSignature(dashboard) {
       event.lane,
       event.start_ms,
       event.end_ms,
-      event.status,
       event.display_title,
     ])
   );
@@ -272,6 +299,7 @@ function updatePlayhead() {
 
 function render() {
   const dashboard = dashboardState.dashboard;
+  syncPlayhead(dashboard?.transport || {});
   renderTopline();
   renderList(els.nextList, dashboard.upcoming, "no future song clips");
   renderList(els.commentaryList, dashboard.commentary, "no planned lean-ins");
@@ -297,6 +325,11 @@ async function refresh() {
   render();
 }
 
+function animatePlayhead() {
+  updatePlayhead();
+  requestAnimationFrame(animatePlayhead);
+}
+
 async function tick() {
   try {
     await refresh();
@@ -315,4 +348,4 @@ els.timelineScroll.addEventListener("scroll", syncAxis, { passive: true });
 
 tick();
 setInterval(tick, 3000);
-setInterval(updatePlayhead, 1000);
+requestAnimationFrame(animatePlayhead);

@@ -493,7 +493,6 @@ h2 {
   box-shadow: 0 0 16px rgba(111, 184, 232, 0.95);
   pointer-events: none;
   z-index: 5;
-  transition: left 700ms linear;
 }
 
 .playhead::before {
