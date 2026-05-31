@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Diagnostics;
+using NAudio.CoreAudioApi;
 using SlimeAudio.Protocol;
 
 namespace SlimeAudio.Tray;
@@ -482,7 +483,7 @@ internal sealed class MulticastReceiver : IDisposable
                 return Array.Empty<SnapclientOutputDevice>();
             }
             var output = outputTask.GetAwaiter().GetResult() + Environment.NewLine + errorTask.GetAwaiter().GetResult();
-            _outputDevices = SnapclientOutputDevice.ParseList(output);
+            _outputDevices = SnapclientOutputDevice.ParseList(output, WindowsAudioDevices.GetFriendlyNames());
             ClientTelemetry.Write("snapclient_output_devices", new { devices = _outputDevices.Select(device => device.Soundcard).ToArray() });
             return _outputDevices;
         }
@@ -554,7 +555,7 @@ internal sealed class ClientSettings
 
 internal sealed record SnapclientOutputDevice(string Soundcard, string DisplayName)
 {
-    public static IReadOnlyList<SnapclientOutputDevice> ParseList(string output)
+    public static IReadOnlyList<SnapclientOutputDevice> ParseList(string output, IReadOnlyDictionary<string, string>? friendlyNames = null)
     {
         var devices = new List<SnapclientOutputDevice>();
         foreach (var rawLine in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
@@ -572,10 +573,30 @@ internal sealed record SnapclientOutputDevice(string Soundcard, string DisplayNa
                 continue;
             }
 
-            devices.Add(new SnapclientOutputDevice(soundcard, $"{devices.Count}: {soundcard}"));
+            var displayName = friendlyNames is not null && friendlyNames.TryGetValue(soundcard, out var friendlyName)
+                ? friendlyName
+                : soundcard;
+            devices.Add(new SnapclientOutputDevice(soundcard, $"{devices.Count}: {displayName}"));
         }
 
         return devices;
+    }
+}
+
+internal static class WindowsAudioDevices
+{
+    public static IReadOnlyDictionary<string, string> GetFriendlyNames()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            using var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+            return devices.ToDictionary(device => device.ID, device => device.FriendlyName, StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
     }
 }
 
