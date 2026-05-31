@@ -590,7 +590,7 @@ internal static class WindowsAudioDevices
         try
         {
             using var enumerator = new MMDeviceEnumerator();
-            using var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
+            var devices = enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
             return devices.ToDictionary(device => device.ID, device => device.FriendlyName, StringComparer.OrdinalIgnoreCase);
         }
         catch
