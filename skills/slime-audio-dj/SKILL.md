@@ -18,6 +18,7 @@ Keep this skill generic and portable.
 ## Core Tools
 
 - `scripts/slime_music_library.py`: scan and query the SQLite music database.
+- `scripts/slime_audio_candidates.py`: choose database-backed future tracks from preferred files, recent playback history, and live operator constraints.
 - `scripts/slime_audio_dj.py`: analyze BPM, beat offset, key, Camelot code, energy, and transition compatibility.
 - `scripts/slime_audio_stream.py`: discover receivers and stream local files.
 - `scripts/slime_audio_session.py`: maintain planned mix-session clips, mic lean-ins, and automation.
@@ -41,13 +42,27 @@ Keep this skill generic and portable.
    ```bash
    python3 scripts/slime_music_library.py stats
    python3 scripts/slime_music_library.py search "query"
+   python3 scripts/slime_audio_candidates.py candidates "query" --recent-limit 40 --limit 12
    ```
 
-   If the database is missing or stale, rescan configured sources before falling back to ad hoc filesystem search.
+   If the database is missing or stale, rescan configured sources before falling back to ad hoc filesystem search. Prefer candidates from `preferred_files`; they avoid recently played tracks, skip untagged root files by default, respect excludes, and include reasons for why each track was selected.
 
 3. Build a short runway, not a whole night. Prefer 30-60 minutes of music so the live set can adapt.
 
-4. Filter candidates against recent playback history, explicit operator constraints, and the requested mood or energy.
+4. Record operator steering before extending the future set:
+
+   ```bash
+   python3 scripts/slime_audio_candidates.py constraints --init
+   python3 scripts/slime_audio_candidates.py set-constraints \
+     --vibe "fresh daytime" \
+     --direction "brighter but not corny" \
+     --energy-target 0.65 \
+     --exclude-artist "Artist Name" \
+     --exclude-term "avoid this" \
+     --reason "operator steering"
+   ```
+
+   Keep current vibe, requested direction, energy target, excluded artists/terms, notes, and change reasons in the runtime constraints file. Candidate selection must read this scratchpad so steering survives restarts and affects future picks.
 
 5. Analyze and rank transitions:
 
@@ -109,6 +124,37 @@ Do not use legacy slot queues for DJ sets.
 - When extending, re-rank from the current or next track so the transition still makes sense.
 - Treat complaints or steering from the operator as hard constraints for future selections.
 - Keep a small scratchpad of current vibe, banned artists or genres, energy target, and planned arc in ignored runtime files.
+
+## Shipped DJ Capabilities
+
+These are part of the normal workflow, not future wishes.
+
+- Database-backed candidate selection: use `slime_audio_candidates.py` against the library DB, recent `runtime/play-history.jsonl`, preferred-file routing, excludes, vibe/direction, and energy target. Candidate output should carry reasons the DJ can explain.
+- Live future editing: use timestamped `mix-session.json` clips, not legacy queue slots. The session runner reloads future render windows, records `session_window_*` history, and future `add-clip`, `move`, `remove`, `add-mic`, and automation edits should use `--state` or `--lock-before` to protect audio under the playhead.
+- Live commentary planning: use `slime_audio_commentary_planner.py` to add future mic lean-ins independently of music selection. It writes normal session lean-ins with ducking/low-pass automation and appends `commentary_planned` logs tying text to timing, track context, and reason.
+- Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
+- Live set constraints: use `slime_audio_candidates.py set-constraints` for persistent operator steering. Future candidate generation must respect the scratchpad after restarts.
+
+## Receiver Health
+
+When playback skips, a tray update fails, or a receiver seems wedged, verify receiver state before changing the set.
+
+- Run discovery and read the reported app version, Snapcast listener state, exit count, last stderr/status, and telemetry path:
+
+  ```bash
+  python3 scripts/slime_audio_stream.py --target all --mode snapcast --dry-run --discover-timeout-ms 2500
+  ```
+
+- Do not assume an in-app/context-menu update succeeded. If one receiver remains on an older version while others report the release with needed telemetry, have the operator fully quit or kill stale tray/updater processes, install the current release manually, launch from the OS app menu, then re-run discovery.
+- If a receiver reports the expected version but `shared_stream_listening=false`, restart only that listener before playback:
+
+  ```bash
+  python3 scripts/slime_audio_stream.py --target TARGET --mode snapcast --start-listeners --discover-timeout-ms 2500
+  ```
+
+- After updating or restarting listeners, run a short Snapcast file to all targets and re-run discovery. A clean receiver sanity check means the expected version is present, `shared_stream_listening=true`, `shared_stream_exits` did not increase during playback, and no decode failures are reported.
+- If receiver telemetry stays clean but audible skips happen during a native session, compare sender/session logs with `session_window_*` history. Skips exactly on render-window boundaries usually point at the session runner or Snapcast FIFO handoff, not the tray receiver.
+- In persistent Snapcast mode, keep one parent FIFO writer open across render windows and swap only the ffmpeg child input. Closing the FIFO between windows can make snapserver emit EOF and create audible gaps even while receiver clients remain healthy.
 
 ## Commentary
 
