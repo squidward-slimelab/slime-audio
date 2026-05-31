@@ -21,6 +21,8 @@ from slime_audio_session import load_payload, parse_session, playhead_ms_from_st
 DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4"]
 DEFAULT_LOCK_LEAD_MS = 20_000
 DEFAULT_DOUBLE_DURATION_MS = 12_000
+MIN_OVERLAY_SCORE = 0.72
+MAX_OVERLAY_TEMPO_SHIFT_PCT = 1.5
 
 
 @dataclass(frozen=True)
@@ -56,16 +58,29 @@ def phrase_ms(analysis: TrackAnalysis | None) -> int:
     return 16_000
 
 
-def transition_overlap_ms(source: TrackAnalysis | None, target: TrackAnalysis | None, shorter_ms: int) -> int:
+def safe_overlay_plan(source: TrackAnalysis | None, target: TrackAnalysis | None) -> tuple[Any | None, str]:
     if source is None or target is None:
-        base = 12_000
-    else:
-        plan = transition_plan(source, target)
-        base = phrase_ms(source)
-        if plan.score >= 0.78:
-            base *= 2
-        elif plan.score < 0.55:
-            base = max(8_000, base // 2)
+        return None, "missing analysis"
+    plan = transition_plan(source, target)
+    tempo_shift = abs(plan.target_tempo_shift_pct or 0.0)
+    if plan.score < MIN_OVERLAY_SCORE:
+        return None, f"transition score {plan.score} below overlay threshold"
+    if plan.key_relation == "clash":
+        return None, "key clash"
+    if plan.pitch_shift_semitones:
+        return None, f"requires pitch shift {plan.pitch_shift_semitones:+d}"
+    if tempo_shift > MAX_OVERLAY_TEMPO_SHIFT_PCT:
+        return None, f"tempo shift {tempo_shift:.2f}% too large for current renderer"
+    return plan, f"score {plan.score}; {plan.key_relation}; tempo {plan.target_tempo_shift_pct or 0.0:+.2f}%"
+
+
+def transition_overlap_ms(source: TrackAnalysis | None, target: TrackAnalysis | None, shorter_ms: int) -> int:
+    plan, _reason = safe_overlay_plan(source, target)
+    if plan is None:
+        return 0
+    base = phrase_ms(source)
+    if plan.score >= 0.84:
+        base *= 2
     return max(4_000, min(base, shorter_ms // 3, 32_000))
 
 
@@ -135,19 +150,21 @@ def plan_future_mix(
 
         clip["start_ms"] = start_ms
         clip["deck"] = deck
-        clip["fade_in_ms"] = max(int(clip.get("fade_in_ms") or 0), min(overlap, 24_000))
-        clip["fade_out_ms"] = max(int(clip.get("fade_out_ms") or 0), min(overlap, 24_000))
-        if previous_analysis and analysis:
-            plan = transition_plan(previous_analysis, analysis)
+        clip["fade_in_ms"] = min(overlap, 24_000) if overlap else 0
+        clip["fade_out_ms"] = min(overlap, 24_000) if overlap else 0
+        plan, overlay_reason = safe_overlay_plan(previous_analysis, analysis)
+        if plan is not None:
             clip["tempo_shift_pct"] = plan.target_tempo_shift_pct or 0.0
             clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
-            reason = f"overlap {overlap}ms; score {plan.score}; {plan.key_relation}"
+            reason = f"overlap {overlap}ms; {overlay_reason}"
         else:
-            reason = f"overlap {overlap}ms"
+            clip["tempo_shift_pct"] = 0.0
+            clip["pitch_shift_semitones"] = 0
+            reason = f"cut; {overlay_reason}"
         rebuilt.append(clip)
         planned.append(PlannedMove("blend", str(clip.get("id")), start_ms, reason, str(previous.get("id")) if previous else None))
 
-        if previous is not None and index % max(1, double_every) == 0:
+        if previous is not None and overlap and plan is not None and index % max(1, double_every) == 0:
             drop = first_structure(analysis, {"drop", "build"})
             if drop is not None:
                 double_start = max(lock_before_ms, start_ms - min(phrase_ms(previous_analysis), 16_000))
@@ -184,7 +201,7 @@ def plan_future_mix(
         if not (automation.get("target") == "master" and automation.get("param") == "duck_volume" and automation.get("planner_role") == "mix-planner")
     ]
     for move in planned:
-        if move.kind != "blend":
+        if move.kind != "blend" or not move.reason.startswith("overlap "):
             continue
         next_payload.setdefault("automations", []).append(
             {

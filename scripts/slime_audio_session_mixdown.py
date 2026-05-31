@@ -164,21 +164,6 @@ def window_from_automation(automation: Automation) -> tuple[int, int, float]:
     return automation.points[0].at_ms, automation.points[-1].at_ms, float(automation.points[0].value)
 
 
-def clip_fade_durations(clips: list[Clip], clip: Clip) -> tuple[int, int]:
-    if clip.duration_ms is None:
-        return 0, 0
-    fade_in_ms = 0
-    fade_out_ms = 0
-    for other in clips:
-        if other.id == clip.id or other.duration_ms is None:
-            continue
-        if other.start_ms < clip.start_ms < other.end_ms:
-            fade_in_ms = max(fade_in_ms, min(clip.duration_ms, other.end_ms - clip.start_ms))
-        if clip.start_ms < other.start_ms < clip.end_ms:
-            fade_out_ms = max(fade_out_ms, min(clip.duration_ms, clip.end_ms - other.start_ms))
-    return fade_in_ms, fade_out_ms
-
-
 def build_filter_complex(
     session: MixSession,
     lean_in_audio: dict[str, Path],
@@ -192,9 +177,8 @@ def build_filter_complex(
         duration = f":duration={seconds(clip.duration_ms)}" if clip.duration_ms is not None else ""
         label = f"music{index}"
         volume = gain_multiplier(clip.gain_db)
-        auto_fade_in_ms, auto_fade_out_ms = clip_fade_durations(session.clips, clip)
-        fade_in_ms = max(auto_fade_in_ms, clip.fade_in_ms)
-        fade_out_ms = max(auto_fade_out_ms, clip.fade_out_ms)
+        fade_in_ms = clip.fade_in_ms
+        fade_out_ms = clip.fade_out_ms
         fade_filters = ""
         if fade_in_ms:
             fade_filters += f"afade=t=in:st=0:d={seconds(fade_in_ms)},"

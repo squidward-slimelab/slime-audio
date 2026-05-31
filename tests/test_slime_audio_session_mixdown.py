@@ -112,7 +112,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         self.assertEqual(session_duration_ms(session), 15_000)
 
-    def test_overlapping_clips_get_automatic_crossfades(self):
+    def test_overlapping_clips_only_fade_when_explicitly_planned(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
             session_path.write_text(
@@ -122,7 +122,14 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
                         "decks": ["deck-1", "deck-2"],
                         "clips": [
                             {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 30_000},
-                            {"id": "b", "deck": "deck-2", "path": "/music/b.flac", "start": 24_000, "duration": 30_000},
+                            {
+                                "id": "b",
+                                "deck": "deck-2",
+                                "path": "/music/b.flac",
+                                "start": 24_000,
+                                "duration": 30_000,
+                                "fade_in_ms": 4_000,
+                            },
                         ],
                     }
                 ),
@@ -130,8 +137,8 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             )
             filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
 
-        self.assertIn("afade=t=out:st=24.000:d=6.000", filters)
-        self.assertIn("afade=t=in:st=0:d=6.000", filters)
+        self.assertNotIn("afade=t=out:st=24.000:d=6.000", filters)
+        self.assertIn("afade=t=in:st=0:d=4.000", filters)
 
     def test_shift_session_window_trims_current_clip_and_shifts_future_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:

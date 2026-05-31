@@ -54,7 +54,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             {
                 "/music/current.flac": analysis("/music/current.flac"),
                 "/music/next.flac": analysis("/music/next.flac", tonic=0),
-                "/music/after.flac": analysis("/music/after.flac", tonic=7),
+                "/music/after.flac": analysis("/music/after.flac", tonic=0),
             },
             lock_before_ms=130_000,
             double_every=1,
@@ -69,6 +69,34 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertTrue(any(move.kind == "blend" for move in moves))
         self.assertTrue(any(move.kind == "double" for move in moves))
         self.assertTrue(any(item.get("planner_role") == "mix-planner" for item in planned["automations"]))
+
+    def test_incompatible_tracks_do_not_overlap_or_double(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 120_000},
+                {"id": "bad", "deck": "deck-1", "path": "/music/bad.flac", "start_ms": 140_000, "duration_ms": 120_000},
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        planned, moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac", bpm=120, tonic=0, mode="major"),
+                "/music/bad.flac": analysis("/music/bad.flac", bpm=132, tonic=6, mode="minor"),
+            },
+            lock_before_ms=0,
+            double_every=1,
+        )
+
+        clips = {clip["id"]: clip for clip in planned["clips"]}
+        self.assertEqual(clips["bad"]["start_ms"], clips["current"]["start_ms"] + clips["current"]["duration_ms"])
+        self.assertEqual(clips["bad"]["fade_in_ms"], 0)
+        self.assertFalse(any(clip.get("planner_role") == "drop-double" for clip in planned["clips"]))
+        self.assertIn("cut", moves[-1].reason)
 
 
 if __name__ == "__main__":
