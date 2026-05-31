@@ -83,6 +83,36 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("/tmp/lean.wav", command)
         self.assertEqual(command[-1], "/tmp/out.wav")
 
+    def test_mixdown_filter_renders_tempo_and_pitch_shift_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "shifted",
+                                "deck": "deck-1",
+                                "path": "/music/shifted.flac",
+                                "start": 0,
+                                "duration": 10_000,
+                                "tempo_shift_pct": 3.0,
+                                "pitch_shift_semitones": 1,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("asetrate=50854", filters)
+        self.assertIn("aresample=48000", filters)
+        self.assertIn("atempo=0.943874", filters)
+        self.assertIn("atempo=1.030000", filters)
+
     def test_session_duration_includes_lean_in_effect_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"

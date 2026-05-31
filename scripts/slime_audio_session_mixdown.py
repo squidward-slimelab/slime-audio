@@ -25,6 +25,33 @@ def gain_multiplier(db: float) -> float:
     return 10 ** (db / 20)
 
 
+def atempo_filters(factor: float) -> list[str]:
+    if factor <= 0:
+        raise ValueError("tempo factor must be positive")
+    filters = []
+    remaining = factor
+    while remaining > 2.0:
+        filters.append("atempo=2.000000")
+        remaining /= 2.0
+    while remaining < 0.5:
+        filters.append("atempo=0.500000")
+        remaining /= 0.5
+    filters.append(f"atempo={remaining:.6f}")
+    return filters
+
+
+def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
+    filters: list[str] = []
+    if clip.pitch_shift_semitones:
+        pitch_factor = 2 ** (clip.pitch_shift_semitones / 12)
+        filters.append(f"asetrate={max(1, int(round(sample_rate * pitch_factor)))}")
+        filters.append(f"aresample={sample_rate}")
+        filters.extend(atempo_filters(1 / pitch_factor))
+    if clip.tempo_shift_pct:
+        filters.extend(atempo_filters(1 + (clip.tempo_shift_pct / 100)))
+    return filters
+
+
 def shift_automation_window(automation: Automation, from_ms: int) -> Automation | None:
     points = sorted(automation.points, key=lambda point: point.at_ms)
     shifted: list[AutomationPoint] = []
@@ -185,10 +212,13 @@ def build_filter_complex(
         if fade_out_ms and clip.duration_ms is not None:
             fade_start_ms = max(0, clip.duration_ms - fade_out_ms)
             fade_filters += f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(fade_out_ms)},"
+        retime_filters = ",".join(time_pitch_filters(clip, sample_rate))
+        retime_filters = f"{retime_filters}," if retime_filters else ""
         filters.append(
             f"[{index}:a]"
             f"atrim=start={seconds(clip.trim_start_ms)}{duration},"
             "asetpts=PTS-STARTPTS,"
+            f"{retime_filters}"
             f"{fade_filters}"
             f"volume={volume:.6f},"
             f"adelay={clip.start_ms}:all=1,"
