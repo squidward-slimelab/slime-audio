@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_session import load_session, parse_ms, playhead_ms_from_state, session_summary
 from slime_audio_session import main as session_main
+from slime_audio_session_mixdown import shift_session_window
 
 
 def run_cli(argv: list[str]) -> int:
@@ -21,6 +22,38 @@ def run_cli(argv: list[str]) -> int:
             return session_main()
     finally:
         sys.argv = original_argv
+
+
+def write_analysis_cache(path: Path, track: str, *, bpm: float, beat_offset_ms: int = 0, confidence: float = 0.9) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "cache-key": {
+                    "path": track,
+                    "duration_s": 120.0,
+                    "sample_rate": 48000,
+                    "channels": 2,
+                    "bpm": bpm,
+                    "beat_offset_ms": beat_offset_ms,
+                    "key": None,
+                    "tonic": None,
+                    "mode": None,
+                    "camelot": None,
+                    "energy": 0.5,
+                    "loudness_db": -12.0,
+                    "confidence": {"bpm": confidence, "key": 0.0},
+                    "beatgrid": {
+                        "bpm": bpm,
+                        "beat_offset_ms": beat_offset_ms,
+                        "phrase_beats": 32,
+                        "phrase_ms": round((60_000 / bpm) * 32),
+                    },
+                    "structure": [],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 class SlimeAudioSessionTests(unittest.TestCase):
@@ -375,6 +408,132 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(path)
 
         self.assertEqual(session.clips[1].start_ms, 35_000)
+
+    def test_cli_beat_jump_offsets_trim_by_half_beat_from_cached_grid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/a.flac"
+            write_analysis_cache(cache, track, bpm=120, beat_offset_ms=0)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "double",
+                                "deck": "deck-1",
+                                "path": track,
+                                "start": 10_000,
+                                "trim_start": 1_000,
+                                "duration": 20_000,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "beat-jump",
+                        str(path),
+                        "--id",
+                        "double",
+                        "--beats",
+                        "1/2",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+            shifted = shift_session_window(session, 10_500)
+
+        self.assertEqual(session.clips[0].trim_start_ms, 1_250)
+        self.assertEqual(shifted.clips[0].trim_start_ms, 1_750)
+
+    def test_cli_beat_jump_offsets_start_by_half_beat_from_cached_grid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/b.flac"
+            write_analysis_cache(cache, track, bpm=128, beat_offset_ms=0)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "offset", "deck": "deck-1", "path": track, "start": 8_000, "trim_start": 0, "duration": 20_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "beat-jump",
+                        str(path),
+                        "--id",
+                        "offset",
+                        "--beats",
+                        "1/2",
+                        "--field",
+                        "start",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+
+        self.assertEqual(session.clips[0].start_ms, 8_234)
+
+    def test_cli_beat_jump_rejects_low_confidence_grid_without_force(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/loose.flac"
+            write_analysis_cache(cache, track, bpm=120, confidence=0.1)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "loose", "deck": "deck-1", "path": track, "start": 10_000, "trim_start": 1_000, "duration": 20_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "confidence too low"):
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "beat-jump",
+                        str(path),
+                        "--id",
+                        "loose",
+                        "--beats",
+                        "1",
+                        "--cache",
+                        str(cache),
+                    ]
+                )
 
 
 if __name__ == "__main__":

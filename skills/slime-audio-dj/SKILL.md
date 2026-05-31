@@ -114,6 +114,19 @@ Keep this skill generic and portable.
      --state runtime/saturday-4h-dj-mix-state.json
    ```
 
+   For doubles and rhythmic offsets, use cached beatgrid analysis instead of hand-entered millisecond nudges:
+
+   ```bash
+   python3 scripts/slime_audio_session.py beat-jump runtime/mix-session.json \
+     --id doubled-hook \
+     --beats 1/2 \
+     --field start \
+     --cache runtime/dj-analysis-cache.json \
+     --state runtime/mix-session-state.json
+   ```
+
+   Use `--field start` to delay/advance a clip on the mix timeline and `--field trim-start` to jump the source position while keeping the clip anchored. The command must reject weak BPM grids unless `--force` is explicit.
+
 9. Dry-run the timestamped mix render before starting, or render only the future window when applying a live swap from the current playhead:
 
    ```bash
@@ -151,6 +164,7 @@ These are part of the normal workflow, not future wishes.
 - Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
 - Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, and master duck automation only when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
 - Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
+- Quantized beat jumps: use `slime_audio_session.py beat-jump` for +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat offsets from cached BPM/beat-offset analysis. Prefer it over manual millisecond edits whenever planning instant doubles, half-beat delays, phrase jumps, or off-beat cuts.
 - Live set constraints: use `slime_audio_candidates.py set-constraints` for persistent operator steering. Future candidate generation must respect the scratchpad after restarts.
 
 ## Receiver Health

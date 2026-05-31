@@ -8,11 +8,15 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
 from time import time
 from typing import Any
 
 MAX_DECKS = 4
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DJ_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
+DEFAULT_MIN_BEATGRID_CONFIDENCE = 0.45
 AUTOMATABLE_PARAMS = {
     "gain_db",
     "lowpass_hz",
@@ -562,6 +566,71 @@ def event_end_ms(item: dict[str, Any]) -> int | None:
     return event_start_ms(item) + parse_ms(duration, "event duration")
 
 
+def parse_beats(value: str) -> Fraction:
+    try:
+        beats = Fraction(value)
+    except ValueError as error:
+        raise ValueError(f"invalid beat count: {value}") from error
+    if beats == 0:
+        raise ValueError("beat jump cannot be zero")
+    if abs(beats) not in {Fraction(1, 2), Fraction(1, 1), Fraction(2, 1), Fraction(4, 1), Fraction(8, 1)}:
+        raise ValueError("beat jump must be one of +/-1/2, +/-1, +/-2, +/-4, +/-8 beats")
+    return beats
+
+
+def cached_beatgrid(
+    cache_path: Path,
+    clip_path: str,
+    *,
+    min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
+    force: bool = False,
+) -> tuple[float, int, float]:
+    try:
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise ValueError(f"dj analysis cache not found: {cache_path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"dj analysis cache is not valid JSON: {cache_path}") from error
+    if not isinstance(cache, dict):
+        raise ValueError(f"dj analysis cache must be an object: {cache_path}")
+
+    normalized = str(Path(clip_path))
+    analysis = None
+    for value in cache.values():
+        if not isinstance(value, dict):
+            continue
+        path = str(value.get("path") or "")
+        if path == clip_path or str(Path(path)) == normalized:
+            analysis = value
+            break
+    if analysis is None:
+        raise ValueError(f"no cached beatgrid analysis for {clip_path}")
+
+    beatgrid = analysis.get("beatgrid") if isinstance(analysis.get("beatgrid"), dict) else {}
+    bpm = beatgrid.get("bpm", analysis.get("bpm"))
+    beat_offset_ms = beatgrid.get("beat_offset_ms", analysis.get("beat_offset_ms"))
+    confidence_payload = analysis.get("confidence") if isinstance(analysis.get("confidence"), dict) else {}
+    confidence = float(confidence_payload.get("bpm", 0.0) or 0.0)
+    if bpm is None or float(bpm) <= 0:
+        raise ValueError(f"cached analysis has no usable bpm for {clip_path}")
+    if beat_offset_ms is None:
+        raise ValueError(f"cached analysis has no usable beat offset for {clip_path}")
+    if confidence < min_confidence and not force:
+        raise ValueError(
+            f"cached beatgrid confidence too low for {clip_path}: {confidence:.3f} < {min_confidence:.3f}; use --force to override"
+        )
+    return float(bpm), parse_ms(beat_offset_ms, "beat offset"), confidence
+
+
+def beat_quantum_ms(bpm: float, beats: Fraction) -> float:
+    return (60_000 / bpm) / beats.denominator
+
+
+def quantize_ms(value_ms: int, *, offset_ms: int, quantum_ms: float) -> int:
+    steps = round((value_ms - offset_ms) / quantum_ms)
+    return int(round(offset_ms + (steps * quantum_ms)))
+
+
 def guard_live_edit(
     *,
     label: str,
@@ -737,6 +806,57 @@ def move_event(
     return next_payload
 
 
+def beat_jump_clip(
+    payload: dict[str, Any],
+    event_id: str,
+    beats_text: str,
+    *,
+    field: str = "trim-start",
+    cache_path: Path = DEFAULT_DJ_CACHE,
+    min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    beats = parse_beats(beats_text)
+    next_payload = copy.deepcopy(payload)
+    found = find_event(next_payload, event_id)
+    if found is None:
+        raise ValueError(f"event id does not exist: {event_id}")
+    collection, index = found
+    if collection != "clips":
+        raise ValueError(f"beat-jump only supports clips, not {collection}: {event_id}")
+    clip = next_payload[collection][index]
+    guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
+
+    bpm, beat_offset_ms, _confidence = cached_beatgrid(
+        cache_path,
+        str(clip.get("path") or ""),
+        min_confidence=min_confidence,
+        force=force,
+    )
+    quantum_ms = beat_quantum_ms(bpm, beats)
+    delta_ms = int(round(float(beats) * (60_000 / bpm)))
+    if field == "trim-start":
+        current_trim = parse_ms(clip.get("trim_start_ms", clip.get("trim_start", 0)), f"clip {event_id} trim_start")
+        updated_trim = quantize_ms(current_trim + delta_ms, offset_ms=beat_offset_ms, quantum_ms=quantum_ms)
+        if updated_trim < 0:
+            raise ValueError(f"beat jump would move clip {event_id} before source zero")
+        clip.pop("trim_start", None)
+        clip["trim_start_ms"] = updated_trim
+    elif field == "start":
+        current_start = event_start_ms(clip)
+        current_trim = parse_ms(clip.get("trim_start_ms", clip.get("trim_start", 0)), f"clip {event_id} trim_start")
+        timeline_offset_ms = current_start + beat_offset_ms - current_trim
+        updated_start = quantize_ms(current_start + delta_ms, offset_ms=timeline_offset_ms, quantum_ms=quantum_ms)
+        guard_live_edit(label=f"new start for {event_id}", start_ms=updated_start, lock_before_ms=lock_before_ms, force=force)
+        clip.pop("start", None)
+        clip["start_ms"] = updated_start
+    else:
+        raise ValueError("--field must be trim-start or start")
+    parse_session(next_payload)
+    return next_payload
+
+
 def add_automation(
     payload: dict[str, Any],
     *,
@@ -845,6 +965,15 @@ def main() -> int:
     move_parser.add_argument("--start", required=True)
     add_live_edit_args(move_parser)
 
+    beat_jump_parser = sub.add_parser("beat-jump")
+    beat_jump_parser.add_argument("session", type=Path)
+    beat_jump_parser.add_argument("--id", required=True)
+    beat_jump_parser.add_argument("--beats", required=True, help="Beat jump amount: +/-1/2, +/-1, +/-2, +/-4, or +/-8.")
+    beat_jump_parser.add_argument("--field", choices=["trim-start", "start"], default="trim-start")
+    beat_jump_parser.add_argument("--cache", type=Path, default=DEFAULT_DJ_CACHE)
+    beat_jump_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
+    add_live_edit_args(beat_jump_parser)
+
     automate_parser = sub.add_parser("automate")
     automate_parser.add_argument("session", type=Path)
     automate_parser.add_argument("--target", required=True)
@@ -931,6 +1060,24 @@ def main() -> int:
             move_event(load_payload(args.session), args.id, args.start, lock_before_ms=lock_before_ms, force=args.force),
         )
         print(f"moved {args.id}")
+        return 0
+
+    if args.command == "beat-jump":
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            beat_jump_clip(
+                load_payload(args.session),
+                args.id,
+                args.beats,
+                field=args.field,
+                cache_path=args.cache,
+                min_confidence=args.min_confidence,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
+        )
+        print(f"beat-jumped {args.id} {args.beats} beats on {args.field}")
         return 0
 
     if args.command == "automate":

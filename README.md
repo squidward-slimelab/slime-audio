@@ -178,6 +178,7 @@ python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json --id br
 python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45
 python3 scripts/slime_audio_session.py automate runtime/mix-session.json --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]'
 python3 scripts/slime_audio_session.py move runtime/mix-session.json --id break-loop --start 01:16.000 --state runtime/saturday-4h-dj-mix-state.json
+python3 scripts/slime_audio_session.py beat-jump runtime/mix-session.json --id break-loop --beats 1/2 --field start --cache runtime/dj-analysis-cache.json --state runtime/saturday-4h-dj-mix-state.json
 python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --lowpass-hz 1400
 python3 scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json --count 3
 python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --output runtime/mix-session-render.wav
@@ -185,6 +186,8 @@ python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json
 ```
 
 `import-playlist` is a migration helper: it probes track durations with `ffprobe`, assigns clips to decks, and writes absolute `start_ms` values. After import, future edits should add/move/remove timestamped clips instead of mutating playlist slots. For live editing, pass `--state runtime/mix-session-state.json` or `--lock-before` to edit commands so normal operations reject anything before the current playhead; use `--force` only for deliberate repair work.
+
+`beat-jump` is the quantized edit path for doubles and rhythmic offsets. It reads cached BPM/beat-offset analysis, supports +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat moves, and snaps either `--field start` or `--field trim-start` to the track grid. Low-confidence beatgrids are rejected unless `--force` is explicit.
 
 `scripts/slime_audio_session_runner.py` consumes the native timestamped session directly. It renders short future windows, streams them through Snapcast/multicast, reloads `mix-session.json` before each window, and records `session_window_*` history events. Future adds/moves/removes take effect on the next render window without interrupting audio already under the playhead.
 
