@@ -163,6 +163,8 @@ Tension analysis turns those per-track structure points into absolute mix-sessio
 
 Mix planning turns the analysis into executable session edits. `slime_audio_mix_planner.py` reads the live runner state as a lock, analyzes only current/future clips, and only creates overlays when the transition clears tempo/key compatibility gates. Safe overlays get phrase-sized starts, explicit clip fade lengths, optional drop-double clips from detected build/drop windows, rendered tempo/key correction within configured limits, and master duck automation around handoffs. Use `--max-render-pitch-shift-semitones 0` when a routine should preserve original keys instead of allowing key correction. Unsafe transitions remain hard cuts; the renderer does not add implicit auto-crossfades just because clips overlap. Run the planner immediately after importing a playlist and again when extending the future set; a straight import is not a finished DJ set.
 
+DJ analysis hydrates BPM/key/Camelot from `runtime/slime-music-library.sqlite3` TuneBat fields before using raw local estimates. Missing DB metadata should be filled with `scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY`; filename tags are ignored. The raw analyzer is useful for structure windows, but TuneBat-backed DB facts are the authority for beat/key planning.
+
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 
 ## Live Mix Sessions

@@ -1,4 +1,6 @@
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from slime_audio_dj import (
     StructureWindow,
     TrackAnalysis,
+    analyze_with_cache,
     beat_grid,
+    cache_key,
     camelot,
     detect_structure_windows,
     estimate_bpm,
@@ -20,6 +24,7 @@ from slime_audio_dj import (
     transition_plan,
 )
 from slime_audio_session import parse_session
+from slime_music_library import Source, command_set_tunebat, connect, scan
 
 
 def track(path: str, bpm: float, tonic: int, mode: str, energy: float = 0.2) -> TrackAnalysis:
@@ -145,6 +150,48 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertEqual(transition.start_ms, 232_000)
         self.assertEqual(transition.next_clip_id, "b")
         self.assertIn("key relation", transition.reason)
+
+    def test_analyze_with_cache_overrides_raw_cache_with_library_tunebat_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "Music"
+            track_path = root / "Artist" / "Album" / "01 - Song.mp3"
+            track_path.parent.mkdir(parents=True)
+            track_path.write_bytes(b"not real audio but good enough for cache-key")
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+            duplicate_key = conn.execute("SELECT duplicate_key FROM tracks").fetchone()["duplicate_key"]
+            command_set_tunebat(
+                conn,
+                duplicate_key,
+                "https://tunebat.com/Analyzer",
+                "Song",
+                "Artist",
+                "C# major",
+                "major",
+                "3B",
+                126.0,
+                None,
+                0.75,
+                None,
+                None,
+                {"source": "test"},
+                emit=False,
+            )
+            cache_path = temp / "dj-cache.json"
+            raw = track(str(track_path), 81.52, 6, "minor", energy=0.2)
+            cache_path.write_text(json.dumps({cache_key(track_path): raw.__dict__}, default=lambda value: value.__dict__), encoding="utf-8")
+
+            analysis = analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, temp / "library.sqlite3", temp / "missing-analyzer.js")[0]
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))[cache_key(track_path)]
+
+        self.assertEqual(analysis.bpm, 126.0)
+        self.assertEqual(analysis.camelot, "3B")
+        self.assertEqual(analysis.key, "C# major")
+        self.assertEqual(analysis.mode, "major")
+        self.assertEqual(analysis.confidence["bpm"], 1.0)
+        self.assertEqual(cached["bpm"], 126.0)
+        self.assertEqual(cached["camelot"], "3B")
 
 
 if __name__ == "__main__":

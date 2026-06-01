@@ -5,14 +5,17 @@ import argparse
 import audioop
 import json
 import math
+import sqlite3
 import tempfile
 import wave
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from slime_audio_session import Clip, MixSession, load_session, parse_session, playhead_ms_from_state
 from slime_audio_stream import convert_to_stream_wav
+from slime_music_library import DEFAULT_DB as DEFAULT_LIBRARY_DB
+from slime_music_library import DEFAULT_TUNEBAT_LOCAL_ANALYZER, store_tunebat_local_payload, tunebat_local_payload
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
@@ -423,6 +426,23 @@ def camelot(tonic: int | None, mode: str | None) -> str | None:
     return f"{number}{'B' if mode == 'major' else 'A'}"
 
 
+def tonic_mode_from_camelot(value: str | None) -> tuple[int | None, str | None]:
+    if not value:
+        return None, None
+    text = value.strip().upper()
+    if len(text) < 2 or text[-1] not in {"A", "B"}:
+        return None, None
+    try:
+        number = int(text[:-1])
+    except ValueError:
+        return None, None
+    if text[-1] == "B" and number in MAJOR_CAMELOT:
+        return MAJOR_CAMELOT.index(number), "major"
+    if text[-1] == "A" and number in MINOR_CAMELOT:
+        return MINOR_CAMELOT.index(number), "minor"
+    return None, None
+
+
 def key_name(tonic: int | None, mode: str | None) -> str | None:
     if tonic is None or mode is None:
         return None
@@ -455,6 +475,77 @@ def analyze_track(path: Path, backend: str = "auto", sample_rate: int = 44_100) 
         confidence={"bpm": bpm_confidence, "key": key_confidence},
         beatgrid=grid,
         structure=structure,
+    )
+
+
+def library_tunebat_row(conn: sqlite3.Connection, path: Path) -> sqlite3.Row | None:
+    path_text = str(path)
+    return conn.execute(
+        """
+        SELECT
+            files.duplicate_key,
+            tracks.preferred_path,
+            tracks.tunebat_key,
+            tracks.tunebat_mode,
+            tracks.tunebat_camelot,
+            tracks.tunebat_bpm,
+            tracks.tunebat_energy
+        FROM files
+        JOIN tracks ON tracks.duplicate_key = files.duplicate_key
+        WHERE files.path = ? OR tracks.preferred_path = ?
+        LIMIT 1
+        """,
+        (path_text, path_text),
+    ).fetchone()
+
+
+def ensure_library_tunebat(path: Path, db_path: Path, analyzer: Path) -> sqlite3.Row | None:
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    row = library_tunebat_row(conn, path)
+    if row is None:
+        conn.close()
+        return None
+    if row["tunebat_bpm"] is not None and row["tunebat_camelot"]:
+        conn.close()
+        return row
+    target_path = Path(row["preferred_path"] or path)
+    if not target_path.exists():
+        target_path = path
+    payload = tunebat_local_payload(analyzer, target_path)
+    store_tunebat_local_payload(conn, row["duplicate_key"], target_path, payload)
+    conn.commit()
+    refreshed = library_tunebat_row(conn, path)
+    conn.close()
+    return refreshed
+
+
+def with_library_tunebat(analysis: TrackAnalysis, row: sqlite3.Row | None) -> TrackAnalysis:
+    if row is None or row["tunebat_bpm"] is None:
+        return analysis
+    camelot_value = str(row["tunebat_camelot"] or "")
+    tonic, mode = tonic_mode_from_camelot(camelot_value)
+    if row["tunebat_mode"]:
+        mode = str(row["tunebat_mode"])
+    key_value = str(row["tunebat_key"] or "") or key_name(tonic, mode)
+    confidence = dict(analysis.confidence)
+    confidence["bpm"] = 1.0
+    if camelot_value or key_value:
+        confidence["key"] = 1.0
+    bpm = float(row["tunebat_bpm"])
+    grid = beat_grid(bpm, analysis.beat_offset_ms)
+    return replace(
+        analysis,
+        bpm=bpm,
+        key=key_value,
+        tonic=tonic,
+        mode=mode,
+        camelot=camelot_value or camelot(tonic, mode),
+        energy=float(row["tunebat_energy"]) if row["tunebat_energy"] is not None else analysis.energy,
+        confidence=confidence,
+        beatgrid=grid,
     )
 
 
@@ -652,16 +743,30 @@ def session_tension_windows(
     return sorted(windows, key=lambda item: (item.start_ms, -item.confidence, item.kind))
 
 
-def analyze_with_cache(paths: list[Path], cache_path: Path, backend: str, sample_rate: int) -> list[TrackAnalysis]:
+def analyze_with_cache(
+    paths: list[Path],
+    cache_path: Path,
+    backend: str,
+    sample_rate: int,
+    db_path: Path = DEFAULT_LIBRARY_DB,
+    tunebat_analyzer: Path = DEFAULT_TUNEBAT_LOCAL_ANALYZER,
+) -> list[TrackAnalysis]:
     cache = load_cache(cache_path)
     analyses: list[TrackAnalysis] = []
     changed = False
     for path in paths:
         key = cache_key(path)
         if key in cache:
-            analyses.append(coerce_analysis(cache[key]))
+            analysis = coerce_analysis(cache[key])
+            row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
+            analysis = with_library_tunebat(analysis, row)
+            cache[key] = asdict(analysis)
+            changed = True
+            analyses.append(analysis)
             continue
         analysis = analyze_track(path, backend=backend, sample_rate=sample_rate)
+        row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
+        analysis = with_library_tunebat(analysis, row)
         cache[key] = asdict(analysis)
         analyses.append(analysis)
         changed = True
@@ -701,12 +806,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Analyze tracks and plan Rekordbox-ish SlimeAudio transitions.")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_analysis_source_args(command_parser: argparse.ArgumentParser) -> None:
+        command_parser.add_argument("--db", type=Path, default=DEFAULT_LIBRARY_DB)
+        command_parser.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
+
     analyze_parser = sub.add_parser("analyze")
     analyze_parser.add_argument("tracks", nargs="*")
     analyze_parser.add_argument("--playlist", type=Path)
     analyze_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     analyze_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     analyze_parser.add_argument("--sample-rate", type=int, default=44_100)
+    add_analysis_source_args(analyze_parser)
 
     plan_parser = sub.add_parser("plan")
     plan_parser.add_argument("tracks", nargs="*")
@@ -715,6 +825,7 @@ def main() -> int:
     plan_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     plan_parser.add_argument("--sample-rate", type=int, default=44_100)
     plan_parser.add_argument("--max-pitch-shift", type=int, default=2)
+    add_analysis_source_args(plan_parser)
 
     rank_parser = sub.add_parser("rank")
     rank_parser.add_argument("source")
@@ -725,6 +836,7 @@ def main() -> int:
     rank_parser.add_argument("--sample-rate", type=int, default=44_100)
     rank_parser.add_argument("--max-pitch-shift", type=int, default=2)
     rank_parser.add_argument("--limit", type=int, default=10)
+    add_analysis_source_args(rank_parser)
 
     structure_parser = sub.add_parser("structure")
     structure_parser.add_argument("tracks", nargs="*")
@@ -732,6 +844,7 @@ def main() -> int:
     structure_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
     structure_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     structure_parser.add_argument("--sample-rate", type=int, default=44_100)
+    add_analysis_source_args(structure_parser)
 
     tension_parser = sub.add_parser("tension")
     tension_parser.add_argument("tracks", nargs="*")
@@ -747,6 +860,7 @@ def main() -> int:
     tension_parser.add_argument("--horizon-ms", type=int)
     tension_parser.add_argument("--min-confidence", type=float, default=0.0)
     tension_parser.add_argument("--limit", type=int, default=24)
+    add_analysis_source_args(tension_parser)
 
     args = parser.parse_args()
     session = None
@@ -760,7 +874,7 @@ def main() -> int:
         tracks = parse_track_list(args.tracks, args.playlist)
     if args.command == "rank":
         tracks = [Path(args.source)] + tracks
-    analyses = analyze_with_cache(tracks, args.cache, args.backend, args.sample_rate)
+    analyses = analyze_with_cache(tracks, args.cache, args.backend, args.sample_rate, args.db, args.tunebat_analyzer)
     if args.command == "analyze":
         print(json.dumps([asdict(analysis) for analysis in analyses], indent=2, sort_keys=True))
         return 0

@@ -10,6 +10,8 @@ from typing import Any
 
 from slime_audio_dj import (
     DEFAULT_CACHE,
+    DEFAULT_LIBRARY_DB,
+    DEFAULT_TUNEBAT_LOCAL_ANALYZER,
     TrackAnalysis,
     analyze_with_cache,
     coerce_analysis,
@@ -251,7 +253,16 @@ def plan_future_mix(
     return next_payload, planned
 
 
-def analyze_session_paths(payload: dict[str, Any], cache: Path, backend: str, sample_rate: int, *, lock_before_ms: int) -> dict[str, TrackAnalysis]:
+def analyze_session_paths(
+    payload: dict[str, Any],
+    cache: Path,
+    backend: str,
+    sample_rate: int,
+    *,
+    lock_before_ms: int,
+    db_path: Path = DEFAULT_LIBRARY_DB,
+    tunebat_analyzer: Path = DEFAULT_TUNEBAT_LOCAL_ANALYZER,
+) -> dict[str, TrackAnalysis]:
     paths = []
     seen = set()
     for clip in payload.get("clips", []):
@@ -261,7 +272,7 @@ def analyze_session_paths(payload: dict[str, Any], cache: Path, backend: str, sa
         if path and path not in seen:
             seen.add(path)
             paths.append(Path(path))
-    return {analysis.path: analysis for analysis in analyze_with_cache(paths, cache, backend, sample_rate)}
+    return {analysis.path: analysis for analysis in analyze_with_cache(paths, cache, backend, sample_rate, db_path, tunebat_analyzer)}
 
 
 def state_lock_ms(state_path: Path | None, lead_ms: int) -> int:
@@ -280,6 +291,8 @@ def main() -> int:
     parser.add_argument("--session", type=Path, default=Path("runtime/mix-session.json"))
     parser.add_argument("--state", type=Path)
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    parser.add_argument("--db", type=Path, default=DEFAULT_LIBRARY_DB)
+    parser.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
     parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
     parser.add_argument("--sample-rate", type=int, default=44_100)
     parser.add_argument("--lock-before-ms", type=int)
@@ -293,7 +306,15 @@ def main() -> int:
     payload = load_payload(args.session)
     normalize_clip_times(payload)
     lock_before_ms = args.lock_before_ms if args.lock_before_ms is not None else state_lock_ms(args.state, args.lock_lead_ms)
-    analyses = analyze_session_paths(payload, args.cache, args.backend, args.sample_rate, lock_before_ms=lock_before_ms)
+    analyses = analyze_session_paths(
+        payload,
+        args.cache,
+        args.backend,
+        args.sample_rate,
+        lock_before_ms=lock_before_ms,
+        db_path=args.db,
+        tunebat_analyzer=args.tunebat_analyzer,
+    )
     planned_payload, moves = plan_future_mix(
         payload,
         analyses,
