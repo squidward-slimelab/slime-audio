@@ -233,11 +233,22 @@ def crossfader_gain(position: float, side: str) -> float:
     return 1.0
 
 
-def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, int, float]]:
+def split_crossfader_segment(start_ms: int, end_ms: int, start_position: float, end_position: float) -> list[tuple[int, int, float, float]]:
+    if end_ms <= start_ms:
+        return []
+    if start_position == end_position or (start_position <= 0 <= end_position) is False and (end_position <= 0 <= start_position) is False:
+        return [(start_ms, end_ms, start_position, end_position)]
+    crossing = start_ms + int(round((0 - start_position) / (end_position - start_position) * (end_ms - start_ms)))
+    if crossing <= start_ms or crossing >= end_ms:
+        return [(start_ms, end_ms, start_position, end_position)]
+    return [(start_ms, crossing, start_position, 0.0), (crossing, end_ms, 0.0, end_position)]
+
+
+def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, int, float, float]]:
     side = session.fader_routing.get(clip.deck, "THRU").upper()
     if side == "THRU":
         return []
-    windows: list[tuple[int, int, float]] = []
+    windows: list[tuple[int, int, float, float]] = []
     automations = [
         automation
         for automation in session.automations
@@ -252,7 +263,20 @@ def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, 
             end_ms = max(0, right.at_ms - clip.start_ms)
             if end_ms <= start_ms:
                 continue
-            windows.append((start_ms, end_ms, crossfader_gain(float(left.value), side)))
+            for split_start, split_end, split_left, split_right in split_crossfader_segment(
+                start_ms,
+                end_ms,
+                float(left.value),
+                float(right.value),
+            ):
+                windows.append(
+                    (
+                        split_start,
+                        split_end,
+                        crossfader_gain(split_left, side),
+                        crossfader_gain(split_right, side),
+                    )
+                )
     return sorted(windows, key=lambda item: item[0])
 
 
@@ -266,9 +290,17 @@ def clip_effect_filters(session: MixSession, clip: Clip) -> str:
         filters.append(
             f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={gain_multiplier(gain_db):.6f}"
         )
-    for start_ms, end_ms, fader_gain in clip_crossfader_windows(session, clip):
+    for start_ms, end_ms, start_gain, end_gain in clip_crossfader_windows(session, clip):
+        if abs(start_gain - end_gain) < 0.000001:
+            volume_expr = f"{start_gain:.6f}"
+            eval_mode = ""
+        else:
+            duration = max(1, end_ms - start_ms)
+            slope = (end_gain - start_gain) / (duration / 1000)
+            volume_expr = f"'{start_gain:.6f}+({slope:.9f})*(t-{seconds(start_ms)})'"
+            eval_mode = ":eval=frame"
         filters.append(
-            f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={fader_gain:.6f}"
+            f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={volume_expr}{eval_mode}"
         )
     return ",".join(filters)
 

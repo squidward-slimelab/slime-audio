@@ -309,6 +309,35 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("volume=enable='between(t,0.000,10.000)':volume=0.000000", filters)
         self.assertIn("volume=enable='between(t,10.000,20.000)':volume=1.000000", filters)
 
+    def test_mixdown_filter_renders_gradual_crossfader_ramps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "fader_routing": {"deck_assignments": {"deck-1": "A", "deck-2": "B"}},
+                        "clips": [
+                            {"id": "left", "deck": "deck-1", "path": "/music/left.flac", "start": 0, "duration": 20_000},
+                            {"id": "right", "deck": "deck-2", "path": "/music/right.flac", "start": 0, "duration": 20_000},
+                        ],
+                        "automations": [
+                            {
+                                "target": "crossfader",
+                                "param": "position",
+                                "points": [{"at_ms": 0, "value": -1}, {"at_ms": 20_000, "value": 1}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("volume=enable='between(t,10.000,20.000)':volume='1.000000+(-0.100000000)*(t-10.000)':eval=frame", filters)
+        self.assertIn("volume=enable='between(t,0.000,10.000)':volume='0.000000+(0.100000000)*(t-0.000)':eval=frame", filters)
+
     def test_session_duration_includes_lean_in_effect_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
