@@ -63,9 +63,13 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         clips = {clip["id"]: clip for clip in planned["clips"]}
         self.assertLess(clips["after"]["start_ms"], clips["next"]["start_ms"] + clips["next"]["duration_ms"])
         self.assertGreater(clips["after"]["fade_in_ms"], 0)
-        self.assertIn("double-next", clips)
-        self.assertEqual(clips["double-next"]["planner_role"], "drop-double")
-        self.assertEqual(clips["double-next"]["trim_start_ms"], 64_000)
+        self.assertIn("double-after", clips)
+        self.assertEqual(clips["double-after"]["planner_role"], "drop-double")
+        self.assertEqual(clips["double-after"]["trim_start_ms"], 64_000)
+        self.assertEqual(
+            clips["double-after"]["start_ms"] + clips["double-after"]["duration_ms"],
+            clips["after"]["start_ms"],
+        )
         self.assertTrue(any(move.kind == "blend" for move in moves))
         self.assertTrue(any(move.kind == "double" for move in moves))
         self.assertTrue(any(item.get("planner_role") == "mix-planner" for item in planned["automations"]))

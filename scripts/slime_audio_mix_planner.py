@@ -202,8 +202,9 @@ def plan_future_mix(
         if previous is not None and overlap and plan is not None and index % max(1, double_every) == 0:
             drop = first_structure(analysis, {"drop", "build"})
             if drop is not None:
-                double_start = max(lock_before_ms, start_ms - min(phrase_ms(previous_analysis), 16_000))
-                double_duration = min(DEFAULT_DOUBLE_DURATION_MS, duration_ms - int(drop.start_ms), max(4_000, start_ms - double_start))
+                double_duration = min(DEFAULT_DOUBLE_DURATION_MS, duration_ms - int(drop.start_ms))
+                double_start = max(lock_before_ms, start_ms - double_duration)
+                double_duration = start_ms - double_start
                 if double_duration >= 4_000:
                     double_end = double_start + double_duration
                     double_deck = choose_deck(rebuilt, double_start, double_end, avoid={deck, previous_deck})
