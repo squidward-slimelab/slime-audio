@@ -7,6 +7,7 @@ import json
 import math
 import sqlite3
 import tempfile
+import time
 import wave
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -15,7 +16,12 @@ from pathlib import Path
 from slime_audio_session import Clip, MixSession, load_session, parse_session, playhead_ms_from_state
 from slime_audio_stream import convert_to_stream_wav
 from slime_music_library import DEFAULT_DB as DEFAULT_LIBRARY_DB
-from slime_music_library import DEFAULT_TUNEBAT_LOCAL_ANALYZER, store_tunebat_local_payload, tunebat_local_payload
+from slime_music_library import (
+    DEFAULT_TUNEBAT_LOCAL_ANALYZER,
+    connect as connect_library,
+    store_tunebat_local_payload,
+    tunebat_local_payload,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
@@ -111,6 +117,15 @@ def write_cache(path: Path, cache: dict[str, dict]) -> None:
 def cache_key(path: Path) -> str:
     stat = path.stat()
     return f"{path.resolve()}:{stat.st_size}:{int(stat.st_mtime)}"
+
+
+def analysis_db_path(path: Path) -> str:
+    return str(path.resolve())
+
+
+def file_identity(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return int(stat.st_size), int(stat.st_mtime_ns)
 
 
 def read_wav_mono(path: Path) -> tuple[int, int, bytes]:
@@ -356,6 +371,198 @@ def beatgrid_asdict(value: BeatGrid | dict | None) -> dict | None:
     if isinstance(value, BeatGrid):
         return asdict(value)
     return value
+
+
+def drop_candidates_for_analysis(analysis: TrackAnalysis) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    for window in coerce_structure(analysis.structure):
+        if window.kind == "drop":
+            candidates.append(
+                {
+                    "kind": "drop",
+                    "start_ms": window.start_ms,
+                    "end_ms": window.end_ms,
+                    "confidence": window.confidence,
+                    "reason": window.reason,
+                    "source_kind": window.kind,
+                }
+            )
+            candidates.append(
+                {
+                    "kind": "pre_drop",
+                    "start_ms": max(0, window.start_ms - 1500),
+                    "end_ms": window.start_ms,
+                    "confidence": window.confidence,
+                    "reason": "lead-in point before detected drop",
+                    "source_kind": window.kind,
+                }
+            )
+        elif window.kind == "build":
+            candidates.append(
+                {
+                    "kind": "build_to_drop",
+                    "start_ms": window.start_ms,
+                    "end_ms": window.end_ms,
+                    "confidence": window.confidence,
+                    "reason": window.reason,
+                    "source_kind": window.kind,
+                }
+            )
+    return candidates[:24]
+
+
+def load_analysis_from_db(db_path: Path, path: Path) -> TrackAnalysis | None:
+    if not db_path.exists():
+        return None
+    try:
+        size, mtime_ns = file_identity(path)
+    except FileNotFoundError:
+        return None
+    conn = connect_library(db_path)
+    identity_path = analysis_db_path(path)
+    row = conn.execute(
+        """
+        SELECT *
+        FROM track_dj_analysis
+        WHERE path = ? AND file_size = ? AND file_mtime_ns = ?
+        """,
+        (identity_path, size, mtime_ns),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        return None
+    structure_rows = conn.execute(
+        """
+        SELECT kind, start_ms, end_ms, confidence, reason
+        FROM track_dj_structure
+        WHERE path = ?
+        ORDER BY start_ms, kind, confidence DESC
+        """,
+        (identity_path,),
+    ).fetchall()
+    conn.close()
+    grid = beat_grid(float(row["bpm"]) if row["bpm"] is not None else None, row["beat_offset_ms"], int(row["phrase_beats"]))
+    if row["phrase_ms"] is not None:
+        grid = replace(grid, phrase_ms=int(row["phrase_ms"]))
+    return TrackAnalysis(
+        path=str(path),
+        duration_s=float(row["duration_s"]),
+        sample_rate=int(row["sample_rate"]),
+        channels=int(row["channels"]),
+        bpm=float(row["bpm"]) if row["bpm"] is not None else None,
+        beat_offset_ms=int(row["beat_offset_ms"]) if row["beat_offset_ms"] is not None else None,
+        key=row["key"],
+        tonic=int(row["tonic"]) if row["tonic"] is not None else None,
+        mode=row["mode"],
+        camelot=row["camelot"],
+        energy=float(row["energy"]),
+        loudness_db=float(row["loudness_db"]),
+        confidence={"bpm": float(row["bpm_confidence"] or 0.0), "key": float(row["key_confidence"] or 0.0)},
+        beatgrid=grid,
+        structure=[
+            StructureWindow(
+                kind=str(item["kind"]),
+                start_ms=int(item["start_ms"]),
+                end_ms=int(item["end_ms"]),
+                confidence=float(item["confidence"]),
+                reason=str(item["reason"] or ""),
+            )
+            for item in structure_rows
+        ],
+    )
+
+
+def store_analysis_in_db(db_path: Path, path: Path, analysis: TrackAnalysis) -> None:
+    size, mtime_ns = file_identity(path)
+    identity_path = analysis_db_path(path)
+    conn = connect_library(db_path)
+    now = int(time.time())
+    grid = analysis.beatgrid or beat_grid(analysis.bpm, analysis.beat_offset_ms)
+    confidence = analysis.confidence or {}
+    conn.execute(
+        """
+        INSERT INTO track_dj_analysis(
+            path, file_size, file_mtime_ns, duration_s, sample_rate, channels,
+            bpm, beat_offset_ms, key, tonic, mode, camelot, energy, loudness_db,
+            bpm_confidence, key_confidence, phrase_beats, phrase_ms, raw_json, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            file_size=excluded.file_size,
+            file_mtime_ns=excluded.file_mtime_ns,
+            duration_s=excluded.duration_s,
+            sample_rate=excluded.sample_rate,
+            channels=excluded.channels,
+            bpm=excluded.bpm,
+            beat_offset_ms=excluded.beat_offset_ms,
+            key=excluded.key,
+            tonic=excluded.tonic,
+            mode=excluded.mode,
+            camelot=excluded.camelot,
+            energy=excluded.energy,
+            loudness_db=excluded.loudness_db,
+            bpm_confidence=excluded.bpm_confidence,
+            key_confidence=excluded.key_confidence,
+            phrase_beats=excluded.phrase_beats,
+            phrase_ms=excluded.phrase_ms,
+            raw_json=excluded.raw_json,
+            updated_at=excluded.updated_at
+        """,
+        (
+            identity_path,
+            size,
+            mtime_ns,
+            analysis.duration_s,
+            analysis.sample_rate,
+            analysis.channels,
+            analysis.bpm,
+            analysis.beat_offset_ms,
+            analysis.key,
+            analysis.tonic,
+            analysis.mode,
+            analysis.camelot,
+            analysis.energy,
+            analysis.loudness_db,
+            float(confidence.get("bpm", 0.0) or 0.0),
+            float(confidence.get("key", 0.0) or 0.0),
+            int(grid.phrase_beats),
+            grid.phrase_ms,
+            json.dumps(asdict(analysis), sort_keys=True),
+            now,
+        ),
+    )
+    conn.execute("DELETE FROM track_dj_structure WHERE path = ?", (identity_path,))
+    conn.execute("DELETE FROM track_dj_drop_candidates WHERE path = ?", (identity_path,))
+    conn.executemany(
+        """
+        INSERT INTO track_dj_structure(path, kind, start_ms, end_ms, confidence, reason)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (identity_path, window.kind, window.start_ms, window.end_ms, window.confidence, window.reason)
+            for window in coerce_structure(analysis.structure)
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO track_dj_drop_candidates(path, kind, start_ms, end_ms, confidence, reason, source_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                identity_path,
+                str(candidate["kind"]),
+                int(candidate["start_ms"]),
+                int(candidate["end_ms"]),
+                float(candidate["confidence"]),
+                str(candidate["reason"]),
+                str(candidate["source_kind"]),
+            )
+            for candidate in drop_candidates_for_analysis(analysis)
+        ],
+    )
+    conn.commit()
+    conn.close()
 
 
 def goertzel_power(samples: list[float], rate: int, frequency: float) -> float:
@@ -756,11 +963,20 @@ def analyze_with_cache(
     changed = False
     for path in paths:
         key = cache_key(path)
+        stored = load_analysis_from_db(db_path, path)
+        if stored is not None:
+            row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
+            analysis = with_library_tunebat(stored, row)
+            cache[key] = asdict(analysis)
+            changed = True
+            analyses.append(analysis)
+            continue
         if key in cache:
             analysis = coerce_analysis(cache[key])
             row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
             analysis = with_library_tunebat(analysis, row)
             cache[key] = asdict(analysis)
+            store_analysis_in_db(db_path, path, analysis)
             changed = True
             analyses.append(analysis)
             continue
@@ -768,6 +984,7 @@ def analyze_with_cache(
         row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
         analysis = with_library_tunebat(analysis, row)
         cache[key] = asdict(analysis)
+        store_analysis_in_db(db_path, path, analysis)
         analyses.append(analysis)
         changed = True
     if changed:

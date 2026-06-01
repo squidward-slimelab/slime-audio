@@ -89,7 +89,7 @@ Keep this skill generic and portable.
    python3 scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY
    ```
 
-   `slime_audio_dj.py` and `slime_audio_mix_planner.py` hydrate from `runtime/slime-music-library.sqlite3` and update `runtime/dj-analysis-cache.json` with the stored TuneBat values. Treat the raw analyzer as fallback structure help, not as authority for beat/key decisions.
+   `slime_audio_dj.py` and `slime_audio_mix_planner.py` hydrate from `runtime/slime-music-library.sqlite3` and mirror results into `runtime/dj-analysis-cache.json` for older live-edit commands. Running structure analysis once persists reusable beatgrid, phrase-grid, structure windows, and drop candidates in the music DB; unchanged files should come from SQLite before raw audio decode, and changed size/mtime must invalidate the stored row. Treat the raw analyzer as fallback structure help, not as authority for beat/key decisions.
 
    Then run the real mix planner against the future session, especially after importing a straight playlist:
 

@@ -116,10 +116,57 @@ def init_db(conn: sqlite3.Connection) -> None:
             updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS track_dj_analysis (
+            path TEXT PRIMARY KEY,
+            file_size INTEGER NOT NULL,
+            file_mtime_ns INTEGER NOT NULL,
+            duration_s REAL NOT NULL,
+            sample_rate INTEGER NOT NULL,
+            channels INTEGER NOT NULL,
+            bpm REAL,
+            beat_offset_ms INTEGER,
+            key TEXT,
+            tonic INTEGER,
+            mode TEXT,
+            camelot TEXT,
+            energy REAL NOT NULL,
+            loudness_db REAL NOT NULL,
+            bpm_confidence REAL NOT NULL DEFAULT 0,
+            key_confidence REAL NOT NULL DEFAULT 0,
+            phrase_beats INTEGER NOT NULL DEFAULT 32,
+            phrase_ms INTEGER,
+            analyzer TEXT NOT NULL DEFAULT 'slime_audio_dj',
+            raw_json TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS track_dj_structure (
+            path TEXT NOT NULL REFERENCES track_dj_analysis(path) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            start_ms INTEGER NOT NULL,
+            end_ms INTEGER NOT NULL,
+            confidence REAL NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(path, kind, start_ms, end_ms)
+        );
+
+        CREATE TABLE IF NOT EXISTS track_dj_drop_candidates (
+            path TEXT NOT NULL REFERENCES track_dj_analysis(path) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            start_ms INTEGER NOT NULL,
+            end_ms INTEGER NOT NULL,
+            confidence REAL NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            source_kind TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(path, kind, start_ms, end_ms)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_files_duplicate_key ON files(duplicate_key);
         CREATE INDEX IF NOT EXISTS idx_files_title ON files(normalized_title);
         CREATE INDEX IF NOT EXISTS idx_files_artist ON files(normalized_artist);
         CREATE INDEX IF NOT EXISTS idx_sources_server ON sources(server);
+        CREATE INDEX IF NOT EXISTS idx_track_dj_structure_kind ON track_dj_structure(kind);
+        CREATE INDEX IF NOT EXISTS idx_track_dj_drop_candidates_kind ON track_dj_drop_candidates(kind);
 
         CREATE VIEW duplicate_groups AS
             SELECT

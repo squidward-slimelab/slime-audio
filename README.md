@@ -138,7 +138,7 @@ The headless receiver uses the same SlimeAudio UDP/control protocol as the tray 
 
 ## DJ Analysis And Keymatching
 
-SlimeAudio has a first-pass DJ brain for local files. It caches track metadata in `runtime/dj-analysis-cache.json`, estimates BPM/key/energy, and plans adjacent transitions. The key planner treats relative minor/major as a real rotation of the same pitch set, so A minor to C major is a strong zero-pitch-shift match instead of a dumb "different mode" clash.
+SlimeAudio has a first-pass DJ brain for local files. It persists stable beatgrid, phrase-grid, structure, and drop-candidate metadata in `runtime/slime-music-library.sqlite3`, keeps `runtime/dj-analysis-cache.json` as a compatibility mirror, estimates BPM/key/energy, and plans adjacent transitions. The key planner treats relative minor/major as a real rotation of the same pitch set, so A minor to C major is a strong zero-pitch-shift match instead of a dumb "different mode" clash.
 
 ```bash
 python3 scripts/slime_audio_dj.py analyze ./track-a.wav ./track-b.wav
@@ -157,7 +157,7 @@ Transition plans include:
 - phrase wait target, currently 32 beats
 - notes when a transition needs a longer blend or bridge
 
-Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
+Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. Running it once stores reusable rows in `track_dj_analysis`, `track_dj_structure`, and `track_dj_drop_candidates`; unchanged files are reused from SQLite before raw audio is decoded again, and size/mtime changes force recomputation. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
 
 Tension analysis turns those per-track structure points into absolute mix-session timestamps. `slime_audio_dj.py tension` emits candidate commentary windows with `reason` and `talking_points` fields derived from analysis facts only: track position, detected structure, BPM/key estimates, energy movement, and transition-plan notes. Use that JSON as an input to the commentary planner when a live set should speak around musical pressure instead of generic track starts.
 
@@ -169,7 +169,7 @@ Mashup planning is the target shape for DJ sets. A basic mashup uses one or more
 python3 scripts/slime_audio_session.py mashup-bed runtime/mix-session.json --bed-id break-loop --start 01:16.000 --end 01:48.000 --gain-db -8 --lowpass-hz 1800 --highpass-hz 100
 ```
 
-DJ analysis hydrates BPM/key/Camelot from `runtime/slime-music-library.sqlite3` TuneBat fields before using raw local estimates. Missing DB metadata should be filled with `scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY`; filename tags are ignored. The raw analyzer is useful for structure windows, but TuneBat-backed DB facts are the authority for beat/key planning.
+DJ analysis hydrates BPM/key/Camelot from `runtime/slime-music-library.sqlite3` TuneBat fields before using raw local estimates. Missing DB metadata should be filled with `scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY`; filename tags are ignored. The raw analyzer is useful for structure windows, but TuneBat-backed DB facts are the authority for beat/key planning. Drop/clip export proofs should still render through `slime_audio_session_mixdown.py --verify`, which rejects silent output before anything is shared or played.
 
 The current analyzer is intentionally dependency-light and works through the existing FFmpeg decode path. It is good enough to give Squidward ears for planning. A later Essentia/librosa backend can improve detection accuracy without changing the cache or transition-plan JSON.
 
@@ -295,10 +295,10 @@ python3 scripts/slime_music_library.py import-metadata runtime/music-metadata.js
 
 This is for TuneBat Analyzer output from `https://tunebat.com/Analyzer`, not the public TuneBat song database. The analyzer runs in-browser and is the path to use for odd local files, bootlegs, edits, samples, and other tracks that Spotify would never know about. `scripts/slime_tunebat_analyzer.js` runs the same public browser-capable engine family locally through `essentia.js` and FFmpeg, then `analyze-tunebat-local` caches that output into SQLite. It intentionally does not vendor TuneBat's protected site bundle. `essentia.js` is AGPL-3.0, so keep this as an optional local/internal tool unless the repo licensing is changed deliberately.
 
-Use the service wrapper for routine maintenance. It rescans mounted shares, then backfills a bounded number of missing local TuneBat-style analysis rows so full-library work spreads out over many small runs:
+Use the service wrapper for routine maintenance. It rescans mounted shares, then backfills a bounded number of missing local TuneBat-style rows and missing/stale DJ beatgrid/structure rows so full-library work spreads out over many small runs:
 
 ```bash
-python3 scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200
+python3 scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200 --dj-analysis-backfill-limit 6
 mkdir -p ~/.config/systemd/user
 cp deploy/systemd/slime-music-library.* ~/.config/systemd/user/
 systemctl --user daemon-reload

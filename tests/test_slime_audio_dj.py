@@ -3,6 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -10,11 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from slime_audio_dj import (
     StructureWindow,
     TrackAnalysis,
+    analysis_db_path,
     analyze_with_cache,
     beat_grid,
     cache_key,
     camelot,
     detect_structure_windows,
+    drop_candidates_for_analysis,
     estimate_bpm,
     key_match,
     relative_tonic,
@@ -192,6 +195,60 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertEqual(analysis.confidence["bpm"], 1.0)
         self.assertEqual(cached["bpm"], 126.0)
         self.assertEqual(cached["camelot"], "3B")
+
+    def test_analyze_with_cache_persists_structure_in_music_db_and_reuses_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            track_path = temp / "track.wav"
+            track_path.write_bytes(b"fake audio identity")
+            db_path = temp / "library.sqlite3"
+            cache_path = temp / "dj-cache.json"
+            computed = track(str(track_path), 120, 0, "major", energy=0.4)
+
+            with patch("slime_audio_dj.analyze_track", return_value=computed) as analyze_mock:
+                first = analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, db_path, temp / "missing-analyzer.js")[0]
+                second = analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, db_path, temp / "missing-analyzer.js")[0]
+
+            self.assertEqual(analyze_mock.call_count, 1)
+            self.assertEqual(first.structure, second.structure)
+            conn = connect(db_path)
+            identity_path = analysis_db_path(track_path)
+            analysis_row = conn.execute("SELECT bpm, phrase_beats FROM track_dj_analysis WHERE path = ?", (identity_path,)).fetchone()
+            structure_rows = conn.execute("SELECT kind FROM track_dj_structure WHERE path = ? ORDER BY start_ms", (identity_path,)).fetchall()
+            drop_rows = conn.execute("SELECT kind FROM track_dj_drop_candidates WHERE path = ? ORDER BY start_ms", (identity_path,)).fetchall()
+            conn.close()
+
+        self.assertEqual(analysis_row["bpm"], 120.0)
+        self.assertEqual(analysis_row["phrase_beats"], 32)
+        self.assertIn("drop", [row["kind"] for row in structure_rows])
+        self.assertIn("pre_drop", [row["kind"] for row in drop_rows])
+
+    def test_analyze_with_cache_invalidates_db_analysis_when_file_identity_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            track_path = temp / "track.wav"
+            track_path.write_bytes(b"first identity")
+            db_path = temp / "library.sqlite3"
+            cache_path = temp / "dj-cache.json"
+            first = track(str(track_path), 120, 0, "major", energy=0.4)
+            updated = track(str(track_path), 128, 2, "minor", energy=0.6)
+
+            with patch("slime_audio_dj.analyze_track", return_value=first) as analyze_mock:
+                analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, db_path, temp / "missing-analyzer.js")
+            track_path.write_bytes(b"second identity with different size")
+            with patch("slime_audio_dj.analyze_track", return_value=updated) as analyze_mock:
+                analysis = analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, db_path, temp / "missing-analyzer.js")[0]
+
+            self.assertEqual(analyze_mock.call_count, 1)
+            self.assertEqual(analysis.bpm, 128)
+
+    def test_drop_candidates_are_derived_from_stored_structure(self):
+        analysis = track("/music/a.wav", 124, 9, "minor")
+
+        candidates = drop_candidates_for_analysis(analysis)
+
+        self.assertTrue(any(candidate["kind"] == "drop" and candidate["start_ms"] == 64_000 for candidate in candidates))
+        self.assertTrue(any(candidate["kind"] == "pre_drop" and candidate["end_ms"] == 64_000 for candidate in candidates))
 
 
 if __name__ == "__main__":
