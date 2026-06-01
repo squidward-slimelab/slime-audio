@@ -326,36 +326,31 @@ def effect_target_clips(session: MixSession, effect: EffectEvent) -> list[Clip]:
     return [clip for clip in session.clips if clip.id == effect.target]
 
 
-def reverb_filter_graph(effect: EffectEvent, input_label: str, output_label: str) -> list[str]:
+ZITA_REVERB_LADSPA = "/usr/lib/ladspa/zita-reverbs.so"
+
+
+def zita_reverb_filter(effect: EffectEvent) -> str:
     room = max(0.1, min(1.0, effect.room_size))
     damping = max(0.0, min(1.0, effect.damping))
-    base_delay = max(24, min(68, effect.delay_ms))
-    comb_delays = [int(base_delay * scale) for scale in (0.37, 0.43, 0.51, 0.61, 0.73, 0.89)]
-    comb_delays = [max(17, delay + int(room * 9)) for delay in comb_delays]
-    decay_base = max(0.2, min(0.88, effect.feedback))
-    damp_factor = 1.0 - (damping * 0.35)
-    decays = [decay_base * damp_factor * scale for scale in (0.92, 0.87, 0.82, 0.77, 0.72, 0.67)]
-    damp_lowpass = max(2800.0, min(7600.0, 7600.0 - (damping * 3600.0)))
-    split_labels = [f"{output_label}c{index}in" for index in range(len(comb_delays))]
-    comb_labels = [f"{output_label}c{index}" for index in range(len(comb_delays))]
-    filters = [f"[{input_label}]asplit={len(split_labels)}{''.join(f'[{label}]' for label in split_labels)}"]
-    for split_label, comb_label, delay, decay in zip(split_labels, comb_labels, comb_delays, decays):
-        filters.append(
-            f"[{split_label}]aecho=0.62:0.430:{delay}:{decay:.3f},"
-            f"lowpass=f={damp_lowpass:.3f}[{comb_label}]"
-        )
-    filters.append(
-        f"{''.join(f'[{label}]' for label in comb_labels)}"
-        f"amix=inputs={len(comb_labels)}:duration=longest:normalize=0,"
-        "volume=1.250000,"
-        "allpass=f=420:width_type=h:width=520:mix=0.58,"
-        "allpass=f=930:width_type=h:width=900:mix=0.52,"
-        "allpass=f=1880:width_type=h:width=1500:mix=0.42,"
-        f"lowpass=f={damp_lowpass:.3f},"
-        "stereowiden=delay=18:feedback=0.10:crossfeed=0.26:drymix=0.78"
-        f"[{output_label}]"
+    pre_delay = max(0.02, min(0.1, effect.delay_ms / 1000.0))
+    rt_mid = max(1.0, min(8.0, 1.0 + room * 3.4 + effect.feedback * 2.1))
+    rt_low = max(1.0, min(8.0, rt_mid * (1.02 + room * 0.18)))
+    damping_hz = max(1500.0, min(24000.0, 12000.0 - damping * 8500.0))
+    controls = "|".join(
+        [
+            f"{pre_delay:.3f}",
+            "220",
+            f"{rt_low:.3f}",
+            f"{rt_mid:.3f}",
+            f"{damping_hz:.3f}",
+            "160",
+            "0",
+            "2500",
+            "0",
+            "1",
+        ]
     )
-    return filters
+    return f"ladspa=file={ZITA_REVERB_LADSPA}:plugin=zita-reverb:controls='{controls}'"
 
 
 def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
@@ -376,36 +371,19 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
             f"aecho=0.8:{effect.wet:.3f}:{effect.delay_ms}:{effect.feedback:.3f}"
         )
     elif effect.type == "reverb":
-        pre_label = f"{label}pre"
-        wet_label = f"{label}wet"
-        reverb_gain = 2.4 * max(0.0, effect.wet)
-        reverb_filters = [
-            f"{','.join(filters)}[{pre_label}]",
-            *reverb_filter_graph(effect, pre_label, wet_label),
-            f"[{wet_label}]atrim=duration={seconds(total_duration_ms)}",
-        ]
-        if effect.lowpass_hz is not None:
-            reverb_filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
-        reverb_filters.extend(
-            [
-                f"volume={reverb_gain:.6f}",
-                f"volume={gain_multiplier(effect.gain_db):.6f}",
-                f"adelay={effect.start_ms}:all=1",
-                f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
-            ]
-        )
-        return ";".join([reverb_filters[0], reverb_filters[1], ",".join(reverb_filters[2:])])
+        filters.append(zita_reverb_filter(effect))
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
         filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
     filters.extend(
         [
+            f"volume={effect.wet:.6f}" if effect.type == "reverb" else "",
             f"volume={gain_multiplier(effect.gain_db):.6f}",
             f"adelay={effect.start_ms}:all=1",
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
         ]
     )
-    return ",".join(filters)
+    return ",".join(filter(None, filters))
 
 
 def build_filter_complex(
