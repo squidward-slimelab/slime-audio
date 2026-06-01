@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from slime_audio_session import load_session
 from slime_audio_session_mixdown import (
     build_filter_complex,
+    crossfader_gain,
     ffmpeg_command,
     prepare_lean_in_audio,
     routine_taste_report,
@@ -256,6 +257,57 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("lowpass=enable='between(t,8.000,20.000)':f=1600.000", filters)
         self.assertIn("highpass=enable='between(t,8.000,20.000)':f=120.000", filters)
         self.assertIn("volume=enable='between(t,8.000,20.000)':volume=0.354813", filters)
+
+    def test_crossfader_gain_maps_hard_sides_and_center(self):
+        self.assertEqual(crossfader_gain(-1.0, "A"), 1.0)
+        self.assertEqual(crossfader_gain(-1.0, "B"), 0.0)
+        self.assertEqual(crossfader_gain(0.0, "A"), 1.0)
+        self.assertEqual(crossfader_gain(0.0, "B"), 1.0)
+        self.assertEqual(crossfader_gain(1.0, "A"), 0.0)
+        self.assertEqual(crossfader_gain(1.0, "B"), 1.0)
+
+    def test_mixdown_filter_applies_crossfader_routing_to_deck_gains(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+                        "fader_routing": {
+                            "deck_assignments": {
+                                "deck-1": "A",
+                                "deck-2": "B",
+                                "deck-3": "A",
+                                "deck-4": "B",
+                            }
+                        },
+                        "clips": [
+                            {"id": "left", "deck": "deck-1", "path": "/music/left.flac", "start": 0, "duration": 20_000},
+                            {"id": "right", "deck": "deck-2", "path": "/music/right.flac", "start": 0, "duration": 20_000},
+                        ],
+                        "automations": [
+                            {
+                                "target": "crossfader",
+                                "param": "position",
+                                "points": [
+                                    {"at_ms": 0, "value": -1},
+                                    {"at_ms": 10_000, "value": -1},
+                                    {"at_ms": 10_000, "value": 1},
+                                    {"at_ms": 20_000, "value": 1},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("volume=enable='between(t,0.000,10.000)':volume=1.000000", filters)
+        self.assertIn("volume=enable='between(t,10.000,20.000)':volume=0.000000", filters)
+        self.assertIn("volume=enable='between(t,0.000,10.000)':volume=0.000000", filters)
+        self.assertIn("volume=enable='between(t,10.000,20.000)':volume=1.000000", filters)
 
     def test_session_duration_includes_lean_in_effect_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:

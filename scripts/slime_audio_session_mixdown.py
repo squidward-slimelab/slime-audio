@@ -134,6 +134,7 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         clips=clips,
         mic_lean_ins=mic_lean_ins,
         automations=automations,
+        fader_routing=session.fader_routing,
     )
 
 
@@ -222,6 +223,39 @@ def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list
     return sorted(windows, key=lambda item: item[0])
 
 
+def crossfader_gain(position: float, side: str) -> float:
+    position = max(-1.0, min(1.0, position))
+    side = side.upper()
+    if side == "A":
+        return 1.0 if position <= 0 else max(0.0, 1.0 - position)
+    if side == "B":
+        return 1.0 if position >= 0 else max(0.0, 1.0 + position)
+    return 1.0
+
+
+def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, int, float]]:
+    side = session.fader_routing.get(clip.deck, "THRU").upper()
+    if side == "THRU":
+        return []
+    windows: list[tuple[int, int, float]] = []
+    automations = [
+        automation
+        for automation in session.automations
+        if automation.target == "crossfader" and automation.param == "position" and len(automation.points) >= 2
+    ]
+    for automation in automations:
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        for left, right in zip(points, points[1:]):
+            if right.at_ms <= left.at_ms:
+                continue
+            start_ms = max(0, left.at_ms - clip.start_ms)
+            end_ms = max(0, right.at_ms - clip.start_ms)
+            if end_ms <= start_ms:
+                continue
+            windows.append((start_ms, end_ms, crossfader_gain(float(left.value), side)))
+    return sorted(windows, key=lambda item: item[0])
+
+
 def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     filters: list[str] = []
     for start_ms, end_ms, lowpass_hz in clip_automation_windows(session, clip, "lowpass_hz"):
@@ -231,6 +265,10 @@ def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     for start_ms, end_ms, gain_db in clip_automation_windows(session, clip, "gain_db"):
         filters.append(
             f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={gain_multiplier(gain_db):.6f}"
+        )
+    for start_ms, end_ms, fader_gain in clip_crossfader_windows(session, clip):
+        filters.append(
+            f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={fader_gain:.6f}"
         )
     return ",".join(filters)
 

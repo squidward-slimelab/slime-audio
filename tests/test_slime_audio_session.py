@@ -617,6 +617,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(path)
             double = next(clip for clip in session.clips if clip.id == "current-double")
+            payload = json.loads(path.read_text(encoding="utf-8"))
 
         self.assertEqual(double.deck, "deck-2")
         self.assertEqual(double.path, track)
@@ -624,8 +625,63 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double.tempo_shift_pct, 5)
         self.assertEqual(double.pitch_shift_semitones, 1)
         self.assertEqual(double.gain_db, -3)
-        self.assertEqual(len([automation for automation in session.automations if automation.target == "current-double"]), 32)
-        self.assertEqual(len([automation for automation in session.automations if automation.target == "current"]), 32)
+        self.assertEqual(len([automation for automation in session.automations if automation.target == "crossfader"]), 32)
+        self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-1"], "A")
+        self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-2"], "B")
+
+    def test_cli_sets_fader_routing_and_crossfader_automation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000},
+                            {"id": "b", "deck": "deck-2", "path": "/music/b.flac", "start": 0, "duration": 20_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "fader-routing",
+                        str(path),
+                        "--assign",
+                        "deck-1=A",
+                        "--assign",
+                        "deck-3=A",
+                        "--assign",
+                        "deck-2=B",
+                        "--assign",
+                        "deck-4=B",
+                    ]
+                ),
+                0,
+            )
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "crossfader",
+                        str(path),
+                        "--points-json",
+                        '[{"at_ms": 0, "value": -1}, {"at_ms": 10000, "value": 0}, {"at_ms": 20000, "value": 1}]',
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+
+        self.assertEqual(session.fader_routing["deck-1"], "A")
+        self.assertEqual(session.fader_routing["deck-4"], "B")
+        self.assertEqual(session.automations[-1].target, "crossfader")
+        self.assertEqual(session.automations[-1].param, "position")
 
     def test_cli_instant_double_clones_future_clip_and_rejects_busy_deck(self):
         with tempfile.TemporaryDirectory() as temp_dir:

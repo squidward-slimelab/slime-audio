@@ -136,6 +136,12 @@ def main() -> int:
     automate_parser.add_argument("--param", required=True)
     automate_parser.add_argument("--points-json", required=True)
 
+    fader_routing_parser = sub.add_parser("fader-routing", parents=[common])
+    fader_routing_parser.add_argument("--assign", action="append", required=True)
+
+    crossfader_parser = sub.add_parser("crossfader", parents=[common])
+    crossfader_parser.add_argument("--points-json", required=True)
+
     beat_jump_parser = sub.add_parser("beat-jump", parents=[common])
     beat_jump_parser.add_argument("--id", required=True)
     beat_jump_parser.add_argument("--beats", required=True)
@@ -229,6 +235,26 @@ def main() -> int:
                 payload,
                 target=args.target,
                 param=args.param,
+                points_json=args.points_json,
+                lock_before_ms=lock_ms,
+                force=args.force,
+            ),
+        )
+    elif args.command == "fader-routing":
+        assignments: dict[str, str] = {}
+        for value in args.assign:
+            if "=" not in value:
+                raise ValueError("--assign must be formatted as deck=side")
+            deck, side = value.split("=", 1)
+            assignments[deck.strip()] = side.strip()
+        args.affected_ids = [f"deck:{deck}" for deck in assignments]
+        apply_edit(args, lambda payload, _lock_ms: session.set_fader_routing(payload, assignments))
+    elif args.command == "crossfader":
+        args.affected_ids = ["crossfader"]
+        apply_edit(
+            args,
+            lambda payload, lock_ms: session.add_crossfader_automation(
+                payload,
                 points_json=args.points_json,
                 lock_before_ms=lock_ms,
                 force=args.force,

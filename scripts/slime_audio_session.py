@@ -40,6 +40,14 @@ AUTOMATABLE_PARAMS = {
     "eq_high_db",
     "send_reverb",
     "duck_volume",
+    "position",
+}
+FADER_SIDES = {"A", "B", "THRU"}
+DEFAULT_FADER_ASSIGNMENTS = {
+    "deck-1": "A",
+    "deck-2": "B",
+    "deck-3": "A",
+    "deck-4": "B",
 }
 
 @dataclass(frozen=True)
@@ -100,6 +108,7 @@ class MixSession:
     clips: list[Clip]
     mic_lean_ins: list[MicLeanIn]
     automations: list[Automation]
+    fader_routing: dict[str, str] = field(default_factory=dict)
 
     @property
     def event_ids(self) -> set[str]:
@@ -218,6 +227,18 @@ def parse_mic_lean_in(payload: dict[str, Any]) -> MicLeanIn:
         volume=float(payload.get("volume", 1.0)),
         effects=effects,
     )
+
+
+def parse_fader_routing(payload: dict[str, Any], decks: list[str]) -> dict[str, str]:
+    routing = payload.get("fader_routing", payload.get("faderRouting"))
+    assignments = routing.get("deck_assignments", routing.get("deckAssignments", {})) if isinstance(routing, dict) else {}
+    if not isinstance(assignments, dict):
+        raise ValueError("fader_routing.deck_assignments must be an object")
+    result = {
+        deck: str(assignments.get(deck, DEFAULT_FADER_ASSIGNMENTS.get(deck, "THRU"))).strip().upper()
+        for deck in decks
+    }
+    return result
 
 
 def load_session(path: Path) -> MixSession:
@@ -388,6 +409,7 @@ def parse_session(payload: dict[str, Any]) -> MixSession:
         clips=[parse_clip(item) for item in payload.get("clips", [])],
         mic_lean_ins=[parse_mic_lean_in(item) for item in payload.get("mic_lean_ins", payload.get("micLeanIns", []))],
         automations=[parse_automation(item) for item in payload.get("automations", [])],
+        fader_routing=parse_fader_routing(payload, decks),
     )
     validate_session(session)
     return session
@@ -404,6 +426,11 @@ def validate_session(session: MixSession) -> None:
 
     seen_ids: set[str] = set()
     deck_set = set(session.decks)
+    for deck, side in session.fader_routing.items():
+        if deck not in deck_set:
+            errors.append(f"fader routing uses unknown deck {deck}")
+        if side not in FADER_SIDES:
+            errors.append(f"fader routing for {deck} must be A, B, or THRU")
     for event_id in [clip.id for clip in session.clips] + [lean_in.id for lean_in in session.mic_lean_ins]:
         if event_id in seen_ids:
             errors.append(f"duplicate event id: {event_id}")
@@ -448,7 +475,7 @@ def validate_session(session: MixSession) -> None:
 def validate_automation(automation: Automation, event_ids: set[str], errors: list[str], prefix: str) -> None:
     if automation.param not in AUTOMATABLE_PARAMS:
         errors.append(f"{prefix} automation {automation.target}.{automation.param} is not an automatable param")
-    if automation.target not in event_ids and automation.target not in {"master", "all"} and not automation.target.startswith("deck:"):
+    if automation.target not in event_ids and automation.target not in {"master", "all", "crossfader"} and not automation.target.startswith("deck:"):
         errors.append(f"{prefix} automation target does not exist: {automation.target}")
     previous = -1
     for point in automation.points:
@@ -456,6 +483,14 @@ def validate_automation(automation: Automation, event_ids: set[str], errors: lis
             errors.append(f"{prefix} automation {automation.target}.{automation.param} has negative point time")
         if point.at_ms < previous:
             errors.append(f"{prefix} automation {automation.target}.{automation.param} points must be sorted")
+        if automation.target == "crossfader" and automation.param == "position":
+            try:
+                value = float(point.value)
+            except (TypeError, ValueError):
+                errors.append(f"{prefix} automation crossfader.position must be numeric")
+            else:
+                if value < -1.0 or value > 1.0:
+                    errors.append(f"{prefix} automation crossfader.position must stay between -1 and 1")
         previous = point.at_ms
 
 
@@ -477,6 +512,7 @@ def session_summary(session: MixSession) -> dict[str, Any]:
     return {
         "version": session.version,
         "decks": session.decks,
+        "fader_routing": session.fader_routing,
         "clip_count": len(session.clips),
         "mic_lean_in_count": len(session.mic_lean_ins),
         "automation_count": (
@@ -492,6 +528,9 @@ def template_session() -> dict[str, Any]:
     return {
         "version": 1,
         "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+        "fader_routing": {
+            "deck_assignments": DEFAULT_FADER_ASSIGNMENTS,
+        },
         "clips": [
             {
                 "id": "intro-loop",
@@ -935,6 +974,33 @@ def add_automation(
     return next_payload
 
 
+def set_fader_routing(payload: dict[str, Any], assignments: dict[str, str]) -> dict[str, Any]:
+    next_payload = copy.deepcopy(payload)
+    decks = [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+    current = parse_fader_routing(next_payload, decks)
+    current.update({str(deck): str(side).upper() for deck, side in assignments.items()})
+    next_payload["fader_routing"] = {"deck_assignments": current}
+    parse_session(next_payload)
+    return next_payload
+
+
+def add_crossfader_automation(
+    payload: dict[str, Any],
+    *,
+    points_json: str,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    return add_automation(
+        payload,
+        target="crossfader",
+        param="position",
+        points_json=points_json,
+        lock_before_ms=lock_before_ms,
+        force=force,
+    )
+
+
 def clip_start_end(payload: dict[str, Any], clip_id: str) -> tuple[int, int]:
     found = find_event(payload, clip_id)
     if found is None:
@@ -1053,6 +1119,16 @@ def add_instant_double(
             min_confidence=min_confidence,
             force=force,
         )
+        source_deck = str(source.get("deck") or "")
+        routing = parse_fader_routing(next_payload, [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)])
+        source_side = routing.get(source_deck, DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A"))
+        if source_side == "THRU":
+            source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
+        target_side = "B" if source_side == "A" else "A"
+        on_position = -1.0 if target_side == "A" else 1.0
+        off_position = -1.0 if source_side == "A" else 1.0
+        if cut_source:
+            next_payload = set_fader_routing(next_payload, {source_deck: source_side, target_deck: target_side})
         gate_ms = max(1, int(round(float(parse_beats(gate_beats)) * (60_000 / bpm))))
         automations = next_payload.setdefault("automations", [])
         at_ms = start_ms
@@ -1060,42 +1136,41 @@ def add_instant_double(
         while at_ms < end_ms:
             on_end = min(end_ms, at_ms + gate_ms)
             off_end = min(end_ms, on_end + gate_ms)
-            automations.append(
-                {
-                    "target": double_id,
-                    "param": "gain_db",
-                    "planner_role": "instant-double-gate",
-                    "points": [{"at_ms": at_ms, "value": double_clip["gain_db"]}, {"at_ms": on_end, "value": double_clip["gain_db"]}],
-                }
-            )
             if cut_source:
                 automations.append(
                     {
-                        "target": source_id,
-                        "param": "gain_db",
-                        "planner_role": "instant-double-source-cut",
-                        "points": [{"at_ms": at_ms, "value": -96.0}, {"at_ms": on_end, "value": -96.0}],
+                        "target": "crossfader",
+                        "param": "position",
+                        "planner_role": "instant-double-crossfader-cut",
+                        "points": [{"at_ms": at_ms, "value": on_position}, {"at_ms": on_end, "value": on_position}],
                     }
                 )
-            if off_end > on_end:
+            else:
                 automations.append(
                     {
                         "target": double_id,
                         "param": "gain_db",
                         "planner_role": "instant-double-gate",
-                        "points": [{"at_ms": on_end, "value": -96.0}, {"at_ms": off_end, "value": -96.0}],
+                        "points": [{"at_ms": at_ms, "value": double_clip["gain_db"]}, {"at_ms": on_end, "value": double_clip["gain_db"]}],
                     }
                 )
+            if off_end > on_end:
                 if cut_source:
                     automations.append(
                         {
-                            "target": source_id,
+                            "target": "crossfader",
+                            "param": "position",
+                            "planner_role": "instant-double-crossfader-return",
+                            "points": [{"at_ms": on_end, "value": off_position}, {"at_ms": off_end, "value": off_position}],
+                        }
+                    )
+                else:
+                    automations.append(
+                        {
+                            "target": double_id,
                             "param": "gain_db",
-                            "planner_role": "instant-double-source-cut",
-                            "points": [
-                                {"at_ms": on_end, "value": float(source.get("gain_db", 0.0))},
-                                {"at_ms": off_end, "value": float(source.get("gain_db", 0.0))},
-                            ],
+                            "planner_role": "instant-double-gate",
+                            "points": [{"at_ms": on_end, "value": -96.0}, {"at_ms": off_end, "value": -96.0}],
                         }
                     )
             gate_index += 1
@@ -1183,7 +1258,7 @@ def add_instant_double_routine(
                 clip["cue_label"] = cue_label
             break
     for automation in next_payload.get("automations", []):
-        if automation.get("target") in {double_id, source_id} and str(automation.get("planner_role", "")).startswith("instant-double"):
+        if automation.get("target") in {double_id, source_id, "crossfader"} and str(automation.get("planner_role", "")).startswith("instant-double"):
             automation["routine_id"] = routine_id
             automation["routine_recipe"] = recipe
     parse_session(next_payload)
@@ -1348,6 +1423,20 @@ def main() -> int:
     automate_parser.add_argument("--param", required=True)
     automate_parser.add_argument("--points-json", required=True)
     add_live_edit_args(automate_parser)
+
+    fader_routing_parser = sub.add_parser("fader-routing")
+    fader_routing_parser.add_argument("session", type=Path)
+    fader_routing_parser.add_argument(
+        "--assign",
+        action="append",
+        required=True,
+        help="Deck assignment like deck-1=A, deck-2=B, or deck-4=THRU. Repeat for multiple decks.",
+    )
+
+    crossfader_parser = sub.add_parser("crossfader")
+    crossfader_parser.add_argument("session", type=Path)
+    crossfader_parser.add_argument("--points-json", required=True)
+    add_live_edit_args(crossfader_parser)
 
     mashup_bed_parser = sub.add_parser("mashup-bed")
     mashup_bed_parser.add_argument("session", type=Path)
@@ -1518,6 +1607,31 @@ def main() -> int:
             ),
         )
         print(f"added automation {args.target}.{args.param}")
+        return 0
+
+    if args.command == "fader-routing":
+        assignments: dict[str, str] = {}
+        for value in args.assign:
+            if "=" not in value:
+                raise ValueError("--assign must be formatted as deck=side")
+            deck, side = value.split("=", 1)
+            assignments[deck.strip()] = side.strip()
+        write_payload(args.session, set_fader_routing(load_payload(args.session), assignments))
+        print(f"updated fader routing for {len(assignments)} deck(s)")
+        return 0
+
+    if args.command == "crossfader":
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            add_crossfader_automation(
+                load_payload(args.session),
+                points_json=args.points_json,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
+        )
+        print("added crossfader automation")
         return 0
 
     if args.command == "mashup-bed":

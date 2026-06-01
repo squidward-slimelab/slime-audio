@@ -96,6 +96,46 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(events[0]["title"], "a")
         self.assertEqual(events[-1]["text"], "hello")
 
+    def test_dashboard_shows_crossfader_routing_and_motion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+                        "fader_routing": {
+                            "deck_assignments": {
+                                "deck-1": "A",
+                                "deck-2": "B",
+                                "deck-3": "A",
+                                "deck-4": "B",
+                            }
+                        },
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/A/B/a.flac", "start": 0, "duration": 30_000},
+                            {"id": "b", "deck": "deck-2", "path": "/music/A/B/b.flac", "start": 0, "duration": 30_000},
+                        ],
+                        "automations": [
+                            {
+                                "target": "crossfader",
+                                "param": "position",
+                                "points": [{"at": 0, "value": -1}, {"at": 10_000, "value": 1}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(json.dumps({"playhead_ms": 1_000}), encoding="utf-8")
+            data = web.load_dashboard_state(state_path, session_path)
+
+        fader_lane = next(lane for lane in data["dashboard"]["lanes"] if lane["id"] == "fader")
+        self.assertEqual(data["dashboard"]["session"]["fader_routing"]["deck_assignments"]["deck-1"], "A")
+        self.assertEqual(fader_lane["events"][0]["target"], "crossfader")
+        self.assertEqual(fader_lane["events"][0]["display_meta"], "crossfader motion")
+
     def test_dashboard_labels_instant_double_clips(self):
         event = web.normalize_event(
             web.session_clip_event(

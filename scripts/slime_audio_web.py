@@ -167,6 +167,8 @@ def display_title_for_event(event: dict[str, Any]) -> str:
 
 def display_meta_for_event(event: dict[str, Any]) -> str:
     if event.get("kind") == "automation":
+        if event.get("target") == "crossfader":
+            return "crossfader motion"
         target = event.get("target") or event.get("owner") or "master"
         return f"{target} | {event.get('param') or 'automation'}"
     if event.get("kind") == "vocal":
@@ -183,7 +185,7 @@ def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str,
     start = event_start(event)
     end = event_end(event)
     duration = None if start is None or end is None else max(0, end - start)
-    lane = str(event.get("deck") or event.get("kind") or "timeline")
+    lane = "fader" if event.get("kind") == "automation" and event.get("target") == "crossfader" else str(event.get("deck") or event.get("kind") or "timeline")
     status = classify_status(event, playhead_ms)
     normalized = dict(event)
     normalized.update(
@@ -205,7 +207,7 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered_lanes: list[str] = []
     for lane in DECK_ORDER:
         ordered_lanes.append(lane)
-    for lane in ("voice", "automation"):
+    for lane in ("voice", "fader", "automation"):
         ordered_lanes.append(lane)
     for event in events:
         lane = str(event.get("lane") or "timeline")
@@ -303,6 +305,7 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
             "duration_ms": duration_ms,
             "counts": counts,
             "decks": session_payload.get("decks", []),
+            "fader_routing": session_payload.get("fader_routing", session_payload.get("faderRouting", {})),
         },
         "now": current,
         "lanes": lane_rows(events),
