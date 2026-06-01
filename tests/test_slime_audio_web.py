@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import slime_audio_web as web
+import slime_audio_sets as sets
 
 
 class SlimeAudioWebTests(unittest.TestCase):
@@ -135,6 +136,36 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(data["dashboard"]["session"]["fader_routing"]["deck_assignments"]["deck-1"], "A")
         self.assertEqual(fader_lane["events"][0]["target"], "crossfader")
         self.assertEqual(fader_lane["events"][0]["display_meta"], "crossfader motion")
+
+    def test_dashboard_can_view_archived_set_without_playback_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            sets_dir = temp / "sets"
+            active_set = temp / "active-set.json"
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "archive-a", "deck": "deck-1", "path": "/music/A/B/archive.flac", "start": 0, "duration": 30_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            sets.archive_set(session=session_path, sets_dir=sets_dir, title="Archive A", slug="archive-a")
+            active_set.write_text(json.dumps({"slug": "live", "title": "Live Set"}), encoding="utf-8")
+
+            with patch.object(web, "DEFAULT_SETS_DIR", sets_dir), patch.object(web, "DEFAULT_ACTIVE_SET", active_set):
+                data = web.load_archived_dashboard_state("archive-a")
+
+        self.assertEqual(data["viewed_set"]["title"], "Archive A")
+        self.assertEqual(data["dashboard"]["viewed_set"]["slug"], "archive-a")
+        self.assertEqual(data["dashboard"]["active_set"]["slug"], "live")
+        self.assertEqual(data["dashboard"]["events"][0]["id"], "archive-a")
+        self.assertEqual(data["dashboard"]["events"][0]["status"], "unknown")
 
     def test_dashboard_labels_instant_double_clips(self):
         event = web.normalize_event(

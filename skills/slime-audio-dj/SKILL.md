@@ -121,6 +121,22 @@ Keep this skill generic and portable.
 
 6. Treat `runtime/mix-session.json` and `runtime/mix-session-state.json` as active live pointers, not the long-term identity of a set. Build named sessions under a set/archive path, preserve that named artifact, then activate it through the native runner so the dashboard, playhead, and live edit lock all follow the same state. Do not play a rendered MP3 directly when the operator expects dashboard control.
 
+   Use `scripts/slime_audio_sets.py` for set identity and replay work:
+
+   ```bash
+   python3 scripts/slime_audio_sets.py archive --title "Named set" --slug named-set --session runtime/mix-session.json
+   python3 scripts/slime_audio_sets.py list --json
+   python3 scripts/slime_audio_sets.py new --title "Scratch set"
+   python3 scripts/slime_audio_sets.py activate named-set --reset-state
+   python3 scripts/slime_audio_sets.py replay named-set --target all --reset-state
+   python3 scripts/slime_audio_sets.py save-loaded
+   python3 scripts/slime_audio_sets.py fork named-set --title "Named set revision"
+   python3 scripts/slime_audio_sets.py render --slug named-set --format mp3 --mp3-bitrate 128k --keep 3 --max-total-mb 256
+   python3 scripts/slime_audio_sets.py cleanup-renders --keep 3 --max-age-hours 12 --max-total-mb 256
+   ```
+
+   Read old sets through `slime_audio_sets.py list/show` or the dashboard archive view before loading them. Viewing an archived set must not overwrite the active pointers; `activate`/`replay` are the intentional loading steps. After editing a loaded set through live edit commands, run `save-loaded` to copy the active session back into the archived set identity. Use set-level render cleanup defaults so review artifacts do not fill the disk.
+
    Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
 
    Deck convention: prefer the two middle lanes (`deck-2` and `deck-3`, zero-based indices 1 and 2) for the main alternating A/B track flow. Use `deck-1` and `deck-4` for instant doubles, stabs, shadows, beds, and more elaborate three- or four-layer sections unless the operator asks for a different layout.

@@ -186,7 +186,18 @@ Live mix sessions are the canonical control-plane shape for DJ sets. They are in
 
 `runtime/mix-session.json` and `runtime/mix-session-state.json` are the active live pointers consumed by the runner and dashboard. They should not be treated as the permanent identity of a set. Keep named set artifacts separately, activate one through the native session runner, then use the live-edit commands below against the active session while playback continues. Directly streaming a rendered review file bypasses dashboard state and should only be used for file-only review playback.
 
+Named sets live under `runtime/sets/<slug>/` with a root `runtime/sets/manifest.json` and an active pointer at `runtime/active-set.json`. Use `scripts/slime_audio_sets.py` for set identity operations: archive the current session, start a blank set, load an archived set into the active pointers, replay it with the native runner, save edits back to the loaded archive, fork a set, render a review artifact, and prune old renders. The dashboard can browse archived sets visually without loading them into playback; the archived view intentionally has no live playhead.
+
 ```bash
+python3 scripts/slime_audio_sets.py archive --title "Late night draft" --slug late-night-draft --session runtime/mix-session.json
+python3 scripts/slime_audio_sets.py list --json
+python3 scripts/slime_audio_sets.py new --title "Fresh scratch set"
+python3 scripts/slime_audio_sets.py activate late-night-draft --reset-state
+python3 scripts/slime_audio_sets.py replay late-night-draft --target all --reset-state
+python3 scripts/slime_audio_sets.py save-loaded
+python3 scripts/slime_audio_sets.py fork late-night-draft --title "Late night revision"
+python3 scripts/slime_audio_sets.py render --slug late-night-draft --format mp3 --mp3-bitrate 128k --keep 3 --max-total-mb 256
+python3 scripts/slime_audio_sets.py cleanup-renders --keep 3 --max-age-hours 12 --max-total-mb 256
 python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
 python3 scripts/slime_audio_session.py summary runtime/mix-session.json
@@ -222,7 +233,7 @@ Crossfader routing is the controller-style cut layer. Store deck assignments in 
 
 `scripts/slime_audio_session_runner.py` consumes the native timestamped session directly. It renders short future windows, streams them through Snapcast/multicast, reloads `mix-session.json` before each window, and records `session_window_*` history events. Future adds/moves/removes take effect on the next render window without interrupting audio already under the playhead.
 
-For review and verification, render the planned mix directly to a file with `slime_audio_session_mixdown.py`. Use WAV/FLAC for lossless checks or MP3 for shareable review artifacts; `--verify` probes duration and rejects silent output. `--from` and `--duration` are the quickest way to export a transition proof clip without rendering the whole set. `--routine-id` renders a padded audition window around one planned routine and can write a JSON report with render timing, audio levels, clipping/silence checks, and current taste-rule warnings/errors.
+For review and verification, render the planned mix directly to a file with `slime_audio_session_mixdown.py`, or use `slime_audio_sets.py render` when the artifact belongs to a named archive. Use WAV/FLAC for lossless checks or MP3 for shareable review artifacts; `--verify` probes duration and rejects silent output. `--from` and `--duration` are the quickest way to export a transition proof clip without rendering the whole set. `--routine-id` renders a padded audition window around one planned routine and can write a JSON report with render timing, audio levels, clipping/silence checks, and current taste-rule warnings/errors. Set-render outputs go to `runtime/set-renders/` by default and are pruned by age/count/total size so proof files do not fill the disk.
 
 Lean-ins are scheduled session events, not immediate side streams. A lean-in has an exact mix timeline `start`, spoken text, voice `volume`, and paired `duck_volume`/`lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
 
@@ -230,14 +241,14 @@ Lean-ins are scheduled session events, not immediate side streams. A lean-in has
 
 ## Web Dashboard
 
-The dashboard is local and read-only. It serves current runner state as JSON and renders the browser UI from `web/slime-audio/`.
+The dashboard is local. It serves current runner state as JSON, exposes named set archive controls, and renders the browser UI from `web/slime-audio/`.
 See `docs/slime-audio-dashboard.md` for the dashboard workflow, `/api/state` view-model contract, and frontend verification checklist.
 
 ```bash
 python3 scripts/slime_audio_web.py --state runtime/mix-session-state.json --session runtime/mix-session.json --port 8765
 ```
 
-Open `http://127.0.0.1:8765`. The browser polls `/api/state`, shows the current render window/playhead, and draws the native timestamped mix session: clips, vocal drops, and automation points. The dashboard no longer projects legacy playlist state.
+Open `http://127.0.0.1:8765`. The browser polls `/api/state`, shows the current render window/playhead, and draws the native timestamped mix session: clips, vocal drops, and automation points. It also polls `/api/sets` so old named sets can be viewed visually without loading them, loaded into the active pointers, replayed, saved after edits, or rendered to a pruned review file. The dashboard no longer projects legacy playlist state.
 
 For fixture-backed frontend checks without active room playback:
 

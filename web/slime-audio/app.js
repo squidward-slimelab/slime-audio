@@ -6,6 +6,9 @@ const dashboardState = {
   playheadEl: null,
   follow: false,
   playheadSync: null,
+  sets: [],
+  activeSet: null,
+  selectedSet: null,
 };
 
 const els = {
@@ -24,6 +27,12 @@ const els = {
   healthList: document.querySelector("#health-list"),
   automationList: document.querySelector("#automation-list"),
   sessionSummary: document.querySelector("#session-summary"),
+  archiveTitle: document.querySelector("#archive-title"),
+  archiveStatus: document.querySelector("#archive-status"),
+  archiveList: document.querySelector("#archive-list"),
+  viewActiveSet: document.querySelector("#view-active-set"),
+  newSet: document.querySelector("#new-set"),
+  saveLoadedSet: document.querySelector("#save-loaded-set"),
   timelineTitle: document.querySelector("#timeline-title"),
   timeAxis: document.querySelector("#time-axis"),
   timelineScroll: document.querySelector("#timeline-scroll"),
@@ -118,10 +127,16 @@ function renderTopline() {
   const now = dashboard?.now;
   const transport = dashboard?.transport || {};
   const playhead = livePlayheadMs();
+  const viewedSet = dashboard?.viewed_set;
+  const activeSet = dashboard?.active_set;
 
-  els.nowTitle.textContent = now?.display_title || "nothing active";
-  els.nowMeta.textContent = now ? now.display_meta || shortPath(now.path) : dashboard?.session_path || "waiting for runner state";
-  els.transportStatus.textContent = statusLabel(transport.status);
+  els.nowTitle.textContent = viewedSet?.title || now?.display_title || activeSet?.title || "nothing active";
+  els.nowMeta.textContent = viewedSet
+    ? `archived view | ${viewedSet.slug}`
+    : now
+      ? now.display_meta || shortPath(now.path)
+      : dashboard?.session_path || "waiting for runner state";
+  els.transportStatus.textContent = viewedSet ? "archived" : statusLabel(transport.status);
   els.playheadTime.textContent = fmtMs(playhead);
   els.windowTime.textContent = transport.window?.start_ms !== undefined
     ? `${fmtMs(transport.window.start_ms)} - ${fmtMs(transport.window.end_ms)}`
@@ -179,7 +194,9 @@ function renderSummary() {
   const dashboard = dashboardState.dashboard || {};
   const session = dashboard.session || {};
   const counts = session.counts || {};
+  const setInfo = dashboard.viewed_set || dashboard.active_set || {};
   const rows = [
+    ["set", setInfo.title || setInfo.slug || "unassigned"],
     ["mode", session.timeline_mode || "native"],
     ["duration", fmtMs(session.duration_ms)],
     ["songs", counts.song || 0],
@@ -193,6 +210,42 @@ function renderSummary() {
     row.className = "summary-row";
     row.innerHTML = `<span>${key}</span><strong>${value}</strong>`;
     els.sessionSummary.append(row);
+  }
+}
+
+function renderArchive() {
+  const selected = dashboardState.selectedSet;
+  const activeSlug = dashboardState.activeSet?.slug;
+  els.archiveTitle.textContent = selected ? `viewing ${selected}` : dashboardState.activeSet?.title || "active set";
+  els.archiveStatus.textContent = selected
+    ? "archived session view, playback untouched"
+    : activeSlug
+      ? `loaded ${activeSlug}`
+      : "no active set pointer";
+  els.archiveList.replaceChildren();
+  if (!dashboardState.sets.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "no archived sets yet";
+    els.archiveList.append(empty);
+    return;
+  }
+  for (const set of dashboardState.sets.slice(0, 12)) {
+    const row = document.createElement("div");
+    row.className = `archive-row ${set.slug === activeSlug ? "active" : ""} ${set.slug === selected ? "selected" : ""}`;
+    const info = document.createElement("div");
+    info.className = "archive-info";
+    info.innerHTML = `<strong>${set.title || set.slug}</strong><span>${fmtMs(set.duration_ms || 0)} | ${set.slug}</span>`;
+    const actions = document.createElement("div");
+    actions.className = "archive-row-actions";
+    actions.innerHTML = `
+      <button type="button" data-action="view" data-slug="${set.slug}">view</button>
+      <button type="button" data-action="activate" data-slug="${set.slug}">load</button>
+      <button type="button" data-action="replay" data-slug="${set.slug}">play</button>
+      <button type="button" data-action="render" data-slug="${set.slug}">render</button>
+    `;
+    row.append(info, actions);
+    els.archiveList.append(row);
   }
 }
 
@@ -317,12 +370,33 @@ function render() {
 }
 
 async function refresh() {
-  const response = await fetch("/api/state", { cache: "no-store" });
+  const stateUrl = dashboardState.selectedSet ? `/api/state?set=${encodeURIComponent(dashboardState.selectedSet)}` : "/api/state";
+  const response = await fetch(stateUrl, { cache: "no-store" });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || response.statusText);
   dashboardState.payload = payload;
   dashboardState.dashboard = payload.dashboard;
   render();
+}
+
+async function refreshSets() {
+  const response = await fetch("/api/sets", { cache: "no-store" });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  dashboardState.sets = payload.sets || [];
+  dashboardState.activeSet = payload.active || null;
+  renderArchive();
+}
+
+async function postJson(url, body = {}) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || response.statusText);
+  return payload;
 }
 
 function animatePlayhead() {
@@ -332,6 +406,7 @@ function animatePlayhead() {
 
 async function tick() {
   try {
+    await refreshSets();
     await refresh();
   } catch (error) {
     els.nowTitle.textContent = "dashboard error";
@@ -339,6 +414,57 @@ async function tick() {
     els.transportStatus.textContent = "error";
   }
 }
+
+els.archiveList.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const slug = button.dataset.slug;
+  const action = button.dataset.action;
+  try {
+    els.archiveStatus.textContent = `${action} ${slug}`;
+    if (action === "view") {
+      dashboardState.selectedSet = slug;
+      dashboardState.signature = "";
+    } else if (action === "activate") {
+      await postJson("/api/sets/activate", { slug, reset_state: true });
+      dashboardState.selectedSet = null;
+      dashboardState.signature = "";
+    } else if (action === "replay") {
+      await postJson("/api/sets/replay", { slug, reset_state: true, target: ["all"] });
+      dashboardState.selectedSet = null;
+      dashboardState.signature = "";
+    } else if (action === "render") {
+      await postJson("/api/sets/render", { slug, format: "mp3", mp3_bitrate: "128k", keep: 3, max_total_mb: 256 });
+    }
+    await tick();
+  } catch (error) {
+    els.archiveStatus.textContent = error.message;
+  }
+});
+
+els.viewActiveSet.addEventListener("click", async () => {
+  dashboardState.selectedSet = null;
+  dashboardState.signature = "";
+  await tick();
+});
+
+els.newSet.addEventListener("click", async () => {
+  const title = window.prompt("new set title");
+  if (!title) return;
+  await postJson("/api/sets/new", { title });
+  dashboardState.selectedSet = null;
+  dashboardState.signature = "";
+  await tick();
+});
+
+els.saveLoadedSet.addEventListener("click", async () => {
+  try {
+    await postJson("/api/sets/save-loaded", {});
+    await tick();
+  } catch (error) {
+    els.archiveStatus.textContent = error.message;
+  }
+});
 
 els.followPlayhead.addEventListener("change", (event) => {
   dashboardState.follow = event.currentTarget.checked;

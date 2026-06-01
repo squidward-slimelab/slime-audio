@@ -13,6 +13,18 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from slime_audio_session import load_payload, parse_ms, parse_session, playhead_ms_from_state
+from slime_audio_sets import (
+    DEFAULT_ACTIVE_SET,
+    DEFAULT_SETS_DIR,
+    activate_set,
+    get_set,
+    list_sets,
+    load_json,
+    new_set,
+    render_set,
+    replay_set,
+    save_loaded_set,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
@@ -360,16 +372,14 @@ def now_from_state(state: dict[str, Any], session_payload: dict[str, Any]) -> di
     }
 
 
-def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[str, Any]:
-    state = load_payload(state_path) if state_path.exists() else {}
+def dashboard_payload_from_state(state: dict[str, Any], state_path: Path, session_path: Path, session_payload: dict[str, Any]) -> dict[str, Any]:
     state["_state_path"] = str(state_path)
-    if not session_path or not session_path.exists():
-        raise FileNotFoundError(f"native mix session is required: {session_path or DEFAULT_SESSION}")
-    session_payload = load_payload(session_path)
     session_source = str(session_path)
+    active_set = load_json(DEFAULT_ACTIVE_SET, {})
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "state_path": str(state_path),
+        "active_set": active_set,
         "now": now_from_state(state, session_payload),
         "session": {
             "path": session_source,
@@ -380,6 +390,23 @@ def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[st
         },
     }
     payload["dashboard"] = build_dashboard_view(state, state_path, session_path, session_payload)
+    payload["dashboard"]["active_set"] = active_set
+    return payload
+
+
+def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[str, Any]:
+    state = load_payload(state_path) if state_path.exists() else {}
+    if not session_path or not session_path.exists():
+        raise FileNotFoundError(f"native mix session is required: {session_path or DEFAULT_SESSION}")
+    return dashboard_payload_from_state(state, state_path, session_path, load_payload(session_path))
+
+
+def load_archived_dashboard_state(slug: str) -> dict[str, Any]:
+    metadata = get_set(DEFAULT_SETS_DIR, slug)
+    session_path = Path(str(metadata["session_path"]))
+    payload = dashboard_payload_from_state({}, Path(""), session_path, load_payload(session_path))
+    payload["viewed_set"] = metadata
+    payload["dashboard"]["viewed_set"] = metadata
     return payload
 
 
@@ -438,6 +465,13 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/state":
             params = parse_qs(parsed.query)
+            set_slug = params.get("set", [""])[0]
+            if set_slug:
+                try:
+                    self.send_json(load_archived_dashboard_state(set_slug))
+                except Exception as ex:
+                    self.send_json({"error": str(ex)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
             state_path = Path(params.get("state", [str(self.server.state_path)])[0]).expanduser()
             session_arg = params.get("session", [str(self.server.session_path) if self.server.session_path else ""])[0]
             session_path = Path(session_arg).expanduser() if session_arg else None
@@ -448,7 +482,71 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
                 return
             self.send_json(payload)
             return
+        if parsed.path == "/api/sets":
+            self.send_json({"sets": list_sets(DEFAULT_SETS_DIR), "active": load_json(DEFAULT_ACTIVE_SET, {})})
+            return
         self.serve_static(parsed.path)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            body = self.read_json_body()
+            if parsed.path == "/api/sets/new":
+                self.send_json(new_set(sets_dir=DEFAULT_SETS_DIR, title=str(body["title"]), slug=body.get("slug")))
+                return
+            if parsed.path == "/api/sets/activate":
+                self.send_json(activate_set(sets_dir=DEFAULT_SETS_DIR, slug=str(body["slug"]), reset_state=bool(body.get("reset_state", True))))
+                return
+            if parsed.path == "/api/sets/save-loaded":
+                self.send_json(save_loaded_set(sets_dir=DEFAULT_SETS_DIR))
+                return
+            if parsed.path == "/api/sets/replay":
+                target = body.get("target") or ["all"]
+                if isinstance(target, str):
+                    target = [target]
+                self.send_json(
+                    replay_set(
+                        sets_dir=DEFAULT_SETS_DIR,
+                        slug=str(body["slug"]),
+                        target=[str(item) for item in target],
+                        dry_run=bool(body.get("dry_run", False)),
+                        reset_state=bool(body.get("reset_state", True)),
+                    )
+                )
+                return
+            if parsed.path == "/api/sets/render":
+                self.send_json(
+                    render_set(
+                        sets_dir=DEFAULT_SETS_DIR,
+                        slug=str(body["slug"]) if body.get("slug") else None,
+                        session=None,
+                        output=None,
+                        render_dir=Path(str(body.get("render_dir") or REPO_ROOT / "runtime" / "set-renders")),
+                        output_format=str(body.get("format") or "mp3"),
+                        mp3_bitrate=str(body.get("mp3_bitrate") or "128k"),
+                        from_time=str(body.get("from") or "0"),
+                        duration=str(body["duration"]) if body.get("duration") else None,
+                        skip_tts=bool(body.get("skip_tts", False)),
+                        dry_run=bool(body.get("dry_run", False)),
+                        keep=int(body.get("keep", 3)),
+                        max_age_hours=float(body.get("max_age_hours", 12)),
+                        max_total_mb=float(body.get("max_total_mb", 256)),
+                    )
+                )
+                return
+        except Exception as ex:
+            self.send_json({"error": str(ex)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        self.send_json({"error": f"unknown endpoint: {parsed.path}"}, status=HTTPStatus.NOT_FOUND)
+
+    def read_json_body(self) -> dict[str, Any]:
+        length = int(self.headers.get("content-length", "0") or "0")
+        if length <= 0:
+            return {}
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be a JSON object")
+        return payload
 
     def send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
