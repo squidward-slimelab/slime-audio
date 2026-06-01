@@ -25,7 +25,7 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "hook-tease": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "cue_kind": "hook"},
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
-    "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "effect": "reverb"},
+    "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": True, "effect": "reverb"},
     "brake-drop": {"duration": "00:04.000", "gate_beats": "1", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True, "duck_source_db": -16.0},
 }
 DEFERRED_ROUTINE_RECIPES = {

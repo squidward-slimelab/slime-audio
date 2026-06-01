@@ -1100,6 +1100,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["target"], "routine-reverb-double")
         self.assertEqual(payload["effects"][0]["routine_recipe"], "echo-drop")
         self.assertEqual(payload["effects"][0]["tail_ms"], 3500)
+        self.assertTrue(any(automation["target"] == "crossfader" for automation in payload["automations"]))
+        self.assertFalse(any(automation["target"] == "routine-reverb-double" for automation in payload["automations"]))
 
     def test_cli_slip_records_resume_position_for_manipulated_deck(self):
         with tempfile.TemporaryDirectory() as temp_dir:
