@@ -99,7 +99,9 @@ Keep this skill generic and portable.
    Use `--max-render-pitch-shift-semitones 0` when a routine should preserve original keys and avoid rendered key correction.
    For overlapping transitions, treat key-fit as the default target, not a nice-to-have. Prefer exact same-key blends after conservative rendered pitch correction. When matching major against minor, compare against the relative major/minor pitch set first, then choose the smallest tasteful transpose that lands the overlap in the intended key. Camelot-neighbor compatibility is acceptable for non-overlapped handoffs or naturally resolving musical moves, but it should not be the default excuse for layered vocals, doubles, or long blends.
 
-6. Treat `runtime/mix-session.json` as the canonical live set state. Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
+6. Treat `runtime/mix-session.json` and `runtime/mix-session-state.json` as active live pointers, not the long-term identity of a set. Build named sessions under a set/archive path, preserve that named artifact, then activate it through the native runner so the dashboard, playhead, and live edit lock all follow the same state. Do not play a rendered MP3 directly when the operator expects dashboard control.
+
+   Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
 
 7. If starting from an old ordered playlist, immediately import it into a timestamped session and do future edits against the session:
 
@@ -110,7 +112,7 @@ Keep this skill generic and portable.
      --decks deck-1,deck-2,deck-3,deck-4
    ```
 
-8. Add, move, trim, overlap, or automate clips by timestamp. During playback, include `--state runtime/<active-state>.json` or `--lock-before <mix-time>` so edits before the playhead are rejected unless `--force` is explicit:
+8. Add, move, trim, overlap, or automate clips by timestamp through the live-edit tools. During playback, include `--state runtime/mix-session-state.json` or `--lock-before <mix-time>` so edits before the playhead are rejected unless `--force` is explicit. This is the normal way to change a set while it is playing; editing a copied JSON file and restarting playback should be reserved for setup or recovery.
 
    ```bash
    python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json \
@@ -203,7 +205,7 @@ Keep this skill generic and portable.
    Use `--from` and `--duration` for a short proof clip around a transition. Keep `--verify` on so empty/silent renders fail before upload.
    Use `--routine-id` before sending or playing routine-heavy mixes. Read the JSON report and fix rejected routine errors instead of forcing through risky overlays.
 
-10. Start playback from the native timestamped session runner:
+10. Start playback from the native timestamped session runner so the frontend sees the real set:
 
    ```bash
    python3 scripts/slime_audio_session_runner.py \
@@ -213,12 +215,14 @@ Keep this skill generic and portable.
    ```
 
 Do not use legacy slot queues for DJ sets.
+Do not stream a review render directly as the main set unless the operator explicitly asks for a file-only playback and does not need the dashboard.
 
 ## Live Set Rules
 
 - Treat the mix session, playback history, and commentary plan as live state.
 - Extend the future queue while playback continues whenever possible.
 - Add, remove, trim, move, or automate future timestamped clips; do not disturb audio already under the playhead unless explicitly asked.
+- Keep named set artifacts separate from the active live pointers. The active files are for the runner and dashboard; archived set files are for replay, review, and later editing.
 - When extending, re-rank from the current or next track so the transition still makes sense.
 - Treat complaints or steering from the operator as hard constraints for future selections.
 - Keep a small scratchpad of current vibe, banned artists or genres, energy target, and planned arc in ignored runtime files.

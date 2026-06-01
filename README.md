@@ -177,6 +177,8 @@ The current analyzer is intentionally dependency-light and works through the exi
 
 Live mix sessions are the canonical control-plane shape for DJ sets. They are intentionally planned data, not manual performance gestures: every gain ramp, filter move, pitch/tempo change, TTS lean-in, and ducking move should be encoded as automation before playback reaches it. Clips use absolute mix timestamps like an Ableton arrangement, so tracks do not need to be stacked back-to-back. Use `start`, `trim_start`, and `duration` to pull sections from songs for overlays, hooks, bridges, and loops.
 
+`runtime/mix-session.json` and `runtime/mix-session-state.json` are the active live pointers consumed by the runner and dashboard. They should not be treated as the permanent identity of a set. Keep named set artifacts separately, activate one through the native session runner, then use the live-edit commands below against the active session while playback continues. Directly streaming a rendered review file bypasses dashboard state and should only be used for file-only review playback.
+
 ```bash
 python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
