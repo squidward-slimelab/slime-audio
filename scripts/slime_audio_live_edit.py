@@ -136,6 +136,19 @@ def main() -> int:
     automate_parser.add_argument("--param", required=True)
     automate_parser.add_argument("--points-json", required=True)
 
+    effect_parser = sub.add_parser("add-effect", parents=[common])
+    effect_parser.add_argument("--id", required=True)
+    effect_parser.add_argument("--type", choices=["echo"], default="echo")
+    effect_parser.add_argument("--target", required=True)
+    effect_parser.add_argument("--start", required=True)
+    effect_parser.add_argument("--duration", required=True)
+    effect_parser.add_argument("--tail-ms", type=int, default=2000)
+    effect_parser.add_argument("--wet", type=float, default=0.35)
+    effect_parser.add_argument("--gain-db", type=float, default=-6.0)
+    effect_parser.add_argument("--delay-ms", type=int, default=375)
+    effect_parser.add_argument("--feedback", type=float, default=0.35)
+    effect_parser.add_argument("--lowpass-hz", type=float)
+
     fader_routing_parser = sub.add_parser("fader-routing", parents=[common])
     fader_routing_parser.add_argument("--assign", action="append", required=True)
 
@@ -250,6 +263,27 @@ def main() -> int:
             assignments[deck.strip()] = side.strip()
         args.affected_ids = [f"deck:{deck}" for deck in assignments]
         apply_edit(args, lambda payload, _lock_ms: session.set_fader_routing(payload, assignments))
+    elif args.command == "add-effect":
+        args.affected_ids = [args.id, args.target]
+        apply_edit(
+            args,
+            lambda payload, lock_ms: session.add_effect_event(
+                payload,
+                effect_id=args.id,
+                effect_type=args.type,
+                target=args.target,
+                start=args.start,
+                duration=args.duration,
+                tail_ms=args.tail_ms,
+                wet=args.wet,
+                gain_db=args.gain_db,
+                delay_ms=args.delay_ms,
+                feedback=args.feedback,
+                lowpass_hz=args.lowpass_hz,
+                lock_before_ms=lock_ms,
+                force=args.force,
+            ),
+        )
     elif args.command == "crossfader":
         args.affected_ids = ["crossfader"]
         apply_edit(

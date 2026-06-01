@@ -79,6 +79,7 @@ def session_summary(payload: dict[str, Any]) -> dict[str, Any]:
     counts = {
         "clips": len(payload.get("clips", [])),
         "mic_lean_ins": len(payload.get("mic_lean_ins", payload.get("micLeanIns", []))),
+        "effects": len(payload.get("effects", [])),
         "automations": len(payload.get("automations", [])),
     }
     ends: list[int] = []
@@ -91,6 +92,11 @@ def session_summary(payload: dict[str, Any]) -> dict[str, Any]:
     for lean_in in payload.get("mic_lean_ins", payload.get("micLeanIns", [])):
         starts_at = parse_ms(lean_in.get("start_ms", lean_in.get("start", 0)), "lean-in start")
         ends.append(starts_at + 5000)
+    for effect in payload.get("effects", []):
+        starts_at = parse_ms(effect.get("start_ms", effect.get("start", 0)), "effect start")
+        duration_ms = parse_ms(effect.get("duration_ms", effect.get("duration", 0)), "effect duration")
+        tail_ms = parse_ms(effect.get("tail_ms", effect.get("tail", 0)), "effect tail")
+        ends.append(starts_at + duration_ms + tail_ms)
     return {"duration_ms": max(ends, default=0), "counts": counts}
 
 
@@ -264,7 +270,7 @@ def new_set(
     directory = set_dir(sets_dir, clean_slug)
     if directory.exists() and not overwrite:
         raise FileExistsError(f"set already exists: {clean_slug}")
-    payload = {"version": 1, "decks": ["deck-1", "deck-2", "deck-3", "deck-4"], "clips": [], "mic_lean_ins": [], "automations": []}
+    payload = {"version": 1, "decks": ["deck-1", "deck-2", "deck-3", "deck-4"], "clips": [], "mic_lean_ins": [], "effects": [], "automations": []}
     session_path = directory / "session.json"
     write_payload(session_path, payload)
     metadata = set_metadata(title=title, slug=clean_slug, session_path=session_path, sets_dir=sets_dir)

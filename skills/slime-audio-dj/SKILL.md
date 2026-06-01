@@ -196,6 +196,13 @@ Keep this skill generic and portable.
      --start 01:24.000 \
      --cache runtime/dj-analysis-cache.json
 
+   python3 scripts/slime_audio_live_edit.py instant-double-routine \
+     --source-id lead-hook \
+     --id lead-hook-echo \
+     --recipe echo-stabs \
+     --start 01:24.000 \
+     --cache runtime/dj-analysis-cache.json
+
    python3 scripts/slime_audio_live_edit.py instant-double \
      --source-id lead-hook \
      --id lead-hook-double \
@@ -204,9 +211,22 @@ Keep this skill generic and portable.
      --gate-beats 1/2 \
      --cut-source \
      --cache runtime/dj-analysis-cache.json
+
+   python3 scripts/slime_audio_live_edit.py add-effect \
+     --id lead-hook-echo-tail \
+     --type echo \
+     --target lead-hook \
+     --start 01:31.500 \
+     --duration 00:02.000 \
+     --tail-ms 3000 \
+     --wet 0.4 \
+     --feedback 0.45 \
+     --lowpass-hz 4200
    ```
 
    The `offbeat-swaps` recipe uses the cached beatgrid to hold the original side through the downbeat, then schedules the first fader swap on the half-beat and alternates source/double sides on each following half-beat. For raw custom moves, `--gate-offset-beats 1/2` applies the same first-cut-on-the-AND timing.
+
+   DJ effects live in the session `effects` collection, not in hidden renderer flags. The available rendered primitive is `echo`, with `start`, `duration`, `tail_ms`, `wet`, `gain_db`, `delay_ms`, `feedback`, and optional `lowpass_hz`; it can target a clip or `deck:<name>`. Mixdown renders the wet delayed copy and includes the tail in routine audition windows. The dashboard shows effects on their own lane. Use `echo-stabs` when a named double should carry an echo tail, and use raw `add-effect` for custom planned echo moves. Slip, brake, and reverb-specific recipes should still refuse until their tickets land.
 
    Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
 

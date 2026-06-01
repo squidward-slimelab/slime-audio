@@ -24,6 +24,7 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "one-beat-trades": {"duration": "00:12.000", "gate_beats": "1", "cut_source": True},
     "hook-tease": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "cue_kind": "hook"},
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
+    "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
 }
 DEFERRED_ROUTINE_RECIPES = {
     "brake-drop": "requires slip/flux and vinyl brake primitives (#17/#18)",
@@ -102,17 +103,39 @@ class MicLeanIn:
 
 
 @dataclass(frozen=True)
+class EffectEvent:
+    id: str
+    type: str
+    target: str
+    start_ms: int
+    duration_ms: int
+    tail_ms: int = 0
+    wet: float = 0.35
+    gain_db: float = -6.0
+    delay_ms: int = 375
+    feedback: float = 0.35
+    lowpass_hz: float | None = None
+    routine_id: str | None = None
+    routine_recipe: str | None = None
+
+    @property
+    def end_ms(self) -> int:
+        return self.start_ms + self.duration_ms + self.tail_ms
+
+
+@dataclass(frozen=True)
 class MixSession:
     version: int
     decks: list[str]
     clips: list[Clip]
     mic_lean_ins: list[MicLeanIn]
+    effects: list[EffectEvent]
     automations: list[Automation]
     fader_routing: dict[str, str] = field(default_factory=dict)
 
     @property
     def event_ids(self) -> set[str]:
-        return {clip.id for clip in self.clips} | {lean_in.id for lean_in in self.mic_lean_ins}
+        return {clip.id for clip in self.clips} | {lean_in.id for lean_in in self.mic_lean_ins} | {effect.id for effect in self.effects}
 
 
 def parse_ms(value: Any, field_name: str) -> int:
@@ -226,6 +249,33 @@ def parse_mic_lean_in(payload: dict[str, Any]) -> MicLeanIn:
         rate=str(payload["rate"]) if payload.get("rate") else None,
         volume=float(payload.get("volume", 1.0)),
         effects=effects,
+    )
+
+
+def parse_effect_event(payload: dict[str, Any]) -> EffectEvent:
+    effect_id = str(payload.get("id") or "").strip()
+    effect_type = str(payload.get("type") or payload.get("effect") or "").strip()
+    target = str(payload.get("target") or "").strip()
+    if not effect_id:
+        raise ValueError("effect id is required")
+    if effect_type not in {"echo"}:
+        raise ValueError(f"effect {effect_id} type must be echo")
+    if not target:
+        raise ValueError(f"effect {effect_id} target is required")
+    return EffectEvent(
+        id=effect_id,
+        type=effect_type,
+        target=target,
+        start_ms=parse_ms(payload.get("start_ms", payload.get("start", 0)), f"effect {effect_id} start"),
+        duration_ms=parse_ms(payload.get("duration_ms", payload.get("duration", 0)), f"effect {effect_id} duration"),
+        tail_ms=parse_ms(payload.get("tail_ms", payload.get("tail", 0)), f"effect {effect_id} tail"),
+        wet=max(0.0, min(1.0, float(payload.get("wet", 0.35)))),
+        gain_db=float(payload.get("gain_db", -6.0)),
+        delay_ms=parse_ms(payload.get("delay_ms", 375), f"effect {effect_id} delay"),
+        feedback=max(0.0, min(0.95, float(payload.get("feedback", 0.35)))),
+        lowpass_hz=float(payload["lowpass_hz"]) if payload.get("lowpass_hz") is not None else None,
+        routine_id=str(payload["routine_id"]) if payload.get("routine_id") else None,
+        routine_recipe=str(payload["routine_recipe"]) if payload.get("routine_recipe") else None,
     )
 
 
@@ -408,6 +458,7 @@ def parse_session(payload: dict[str, Any]) -> MixSession:
         decks=decks,
         clips=[parse_clip(item) for item in payload.get("clips", [])],
         mic_lean_ins=[parse_mic_lean_in(item) for item in payload.get("mic_lean_ins", payload.get("micLeanIns", []))],
+        effects=[parse_effect_event(item) for item in payload.get("effects", [])],
         automations=[parse_automation(item) for item in payload.get("automations", [])],
         fader_routing=parse_fader_routing(payload, decks),
     )
@@ -465,6 +516,18 @@ def validate_session(session: MixSession) -> None:
         for effect in lean_in.effects:
             validate_automation(effect, session.event_ids, errors, prefix=f"mic lean-in {lean_in.id}")
 
+    for effect in session.effects:
+        if effect.target not in session.event_ids and not effect.target.startswith("deck:") and effect.target not in {"master", "all"}:
+            errors.append(f"effect {effect.id} target does not exist: {effect.target}")
+        if effect.start_ms < 0:
+            errors.append(f"effect {effect.id} starts before zero")
+        if effect.duration_ms <= 0:
+            errors.append(f"effect {effect.id} duration must be positive")
+        if effect.tail_ms < 0:
+            errors.append(f"effect {effect.id} tail must be non-negative")
+        if effect.delay_ms <= 0:
+            errors.append(f"effect {effect.id} delay must be positive")
+
     for automation in session.automations:
         validate_automation(automation, session.event_ids, errors, prefix="session")
 
@@ -515,6 +578,7 @@ def session_summary(session: MixSession) -> dict[str, Any]:
         "fader_routing": session.fader_routing,
         "clip_count": len(session.clips),
         "mic_lean_in_count": len(session.mic_lean_ins),
+        "effect_count": len(session.effects),
         "automation_count": (
             len(session.automations)
             + sum(len(clip.automations) for clip in session.clips)
@@ -587,6 +651,7 @@ def template_session() -> dict[str, Any]:
                 ],
             }
         ],
+        "effects": [],
     }
 
 
@@ -595,11 +660,11 @@ def base_payload(path: Path, create: bool) -> dict[str, Any]:
         return load_payload(path)
     if not create:
         raise FileNotFoundError(path)
-    return {"version": 1, "decks": [f"deck-{index + 1}" for index in range(MAX_DECKS)], "clips": [], "mic_lean_ins": [], "automations": []}
+    return {"version": 1, "decks": [f"deck-{index + 1}" for index in range(MAX_DECKS)], "clips": [], "mic_lean_ins": [], "effects": [], "automations": []}
 
 
 def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None:
-    for collection in ("clips", "mic_lean_ins"):
+    for collection in ("clips", "mic_lean_ins", "effects"):
         for index, item in enumerate(payload.get(collection, [])):
             if item.get("id") == event_id:
                 return collection, index
@@ -1015,6 +1080,52 @@ def add_crossfader_automation(
     )
 
 
+def add_effect_event(
+    payload: dict[str, Any],
+    *,
+    effect_id: str,
+    effect_type: str,
+    target: str,
+    start: str,
+    duration: str,
+    tail_ms: int,
+    wet: float,
+    gain_db: float,
+    delay_ms: int,
+    feedback: float,
+    lowpass_hz: float | None,
+    routine_id: str | None = None,
+    routine_recipe: str | None = None,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    next_payload = copy.deepcopy(payload)
+    require_unique_event_id(next_payload, effect_id)
+    start_ms = parse_ms(start, f"effect {effect_id} start")
+    guard_live_edit(label=f"effect {effect_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+    effect: dict[str, Any] = {
+        "id": effect_id,
+        "type": effect_type,
+        "target": target,
+        "start_ms": start_ms,
+        "duration_ms": parse_ms(duration, f"effect {effect_id} duration"),
+        "tail_ms": tail_ms,
+        "wet": wet,
+        "gain_db": gain_db,
+        "delay_ms": delay_ms,
+        "feedback": feedback,
+    }
+    if lowpass_hz is not None:
+        effect["lowpass_hz"] = lowpass_hz
+    if routine_id is not None:
+        effect["routine_id"] = routine_id
+    if routine_recipe is not None:
+        effect["routine_recipe"] = routine_recipe
+    next_payload.setdefault("effects", []).append(effect)
+    parse_session(next_payload)
+    return next_payload
+
+
 def clip_start_end(payload: dict[str, Any], clip_id: str) -> tuple[int, int]:
     found = find_event(payload, clip_id)
     if found is None:
@@ -1283,6 +1394,26 @@ def add_instant_double_routine(
             if cue_label:
                 clip["cue_label"] = cue_label
             break
+    if config.get("effect") == "echo":
+        double_clip = next(clip for clip in next_payload.get("clips", []) if clip.get("id") == double_id)
+        next_payload = add_effect_event(
+            next_payload,
+            effect_id=f"{routine_id}-echo",
+            effect_type="echo",
+            target=double_id,
+            start=str(double_clip["start_ms"]),
+            duration=str(double_clip["duration_ms"]),
+            tail_ms=2000,
+            wet=0.42,
+            gain_db=-9.0,
+            delay_ms=375,
+            feedback=0.38,
+            lowpass_hz=4200.0,
+            routine_id=routine_id,
+            routine_recipe=recipe,
+            lock_before_ms=lock_before_ms,
+            force=force,
+        )
     for automation in next_payload.get("automations", []):
         if automation.get("target") in {double_id, source_id, "crossfader"} and str(automation.get("planner_role", "")).startswith("instant-double"):
             automation["routine_id"] = routine_id
@@ -1450,6 +1581,21 @@ def main() -> int:
     automate_parser.add_argument("--param", required=True)
     automate_parser.add_argument("--points-json", required=True)
     add_live_edit_args(automate_parser)
+
+    effect_parser = sub.add_parser("add-effect")
+    effect_parser.add_argument("session", type=Path)
+    effect_parser.add_argument("--id", required=True)
+    effect_parser.add_argument("--type", choices=["echo"], default="echo")
+    effect_parser.add_argument("--target", required=True)
+    effect_parser.add_argument("--start", required=True)
+    effect_parser.add_argument("--duration", required=True)
+    effect_parser.add_argument("--tail-ms", type=int, default=2000)
+    effect_parser.add_argument("--wet", type=float, default=0.35)
+    effect_parser.add_argument("--gain-db", type=float, default=-6.0)
+    effect_parser.add_argument("--delay-ms", type=int, default=375)
+    effect_parser.add_argument("--feedback", type=float, default=0.35)
+    effect_parser.add_argument("--lowpass-hz", type=float)
+    add_live_edit_args(effect_parser)
 
     fader_routing_parser = sub.add_parser("fader-routing")
     fader_routing_parser.add_argument("session", type=Path)
@@ -1635,6 +1781,30 @@ def main() -> int:
             ),
         )
         print(f"added automation {args.target}.{args.param}")
+        return 0
+
+    if args.command == "add-effect":
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            add_effect_event(
+                load_payload(args.session),
+                effect_id=args.id,
+                effect_type=args.type,
+                target=args.target,
+                start=args.start,
+                duration=args.duration,
+                tail_ms=args.tail_ms,
+                wet=args.wet,
+                gain_db=args.gain_db,
+                delay_ms=args.delay_ms,
+                feedback=args.feedback,
+                lowpass_hz=args.lowpass_hz,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
+        )
+        print(f"added effect {args.id}")
         return 0
 
     if args.command == "fader-routing":

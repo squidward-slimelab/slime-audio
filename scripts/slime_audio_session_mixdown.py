@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from slime_audio_session import Automation, AutomationPoint, Clip, MicLeanIn, MixSession, load_payload, load_session, parse_ms
+from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, load_payload, load_session, parse_ms
 
 
 def seconds(ms: int) -> str:
@@ -125,6 +125,16 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         for lean_in in session.mic_lean_ins
         if lean_in.start_ms >= from_ms and (window_end_ms is None or lean_in.start_ms < window_end_ms)
     ]
+    effects = [
+        replace(
+            effect,
+            start_ms=max(0, effect.start_ms - from_ms),
+            duration_ms=min(effect.duration_ms, max(0, (window_end_ms if window_end_ms is not None else effect.start_ms + effect.duration_ms) - max(effect.start_ms, from_ms))),
+        )
+        for effect in session.effects
+        if effect.end_ms > from_ms and (window_end_ms is None or effect.start_ms < window_end_ms)
+    ]
+    effects = [effect for effect in effects if effect.duration_ms > 0]
     automations = [
         shifted for automation in session.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
     ]
@@ -133,6 +143,7 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         decks=session.decks,
         clips=clips,
         mic_lean_ins=mic_lean_ins,
+        effects=effects,
         automations=automations,
         fader_routing=session.fader_routing,
     )
@@ -197,6 +208,7 @@ def collect_master_automation(session: MixSession, param: str) -> list[tuple[int
 def session_duration_ms(session: MixSession, lean_in_default_ms: int = 5000) -> int:
     ends = [clip.end_ms for clip in session.clips if clip.end_ms is not None]
     ends.extend(lean_in.start_ms + lean_in_default_ms for lean_in in session.mic_lean_ins)
+    ends.extend(effect.end_ms for effect in session.effects)
     for param in ("duck_volume", "lowpass_hz"):
         ends.extend(end for _start, end, _value in collect_master_automation(session, param))
     return max(ends, default=1000)
@@ -305,6 +317,39 @@ def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     return ",".join(filters)
 
 
+def effect_target_clip(session: MixSession, effect: EffectEvent) -> Clip | None:
+    if effect.target.startswith("deck:"):
+        deck = effect.target.split(":", 1)[1]
+        return next((clip for clip in session.clips if clip.deck == deck and clip.start_ms <= effect.start_ms < (clip.end_ms or clip.start_ms)), None)
+    return next((clip for clip in session.clips if clip.id == effect.target), None)
+
+
+def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
+    relative_start_ms = max(0, effect.start_ms - clip.start_ms)
+    source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
+    source_duration_ms = max(1, int(round((effect.duration_ms + effect.tail_ms) * tempo_factor(clip))))
+    filters = [
+        f"[{input_index}:a]atrim=start={seconds(source_start_ms)}:duration={seconds(source_duration_ms)}",
+        "asetpts=PTS-STARTPTS",
+    ]
+    retime = time_pitch_filters(clip, sample_rate)
+    filters.extend(retime)
+    if effect.type == "echo":
+        filters.append(
+            f"aecho=0.8:{effect.wet:.3f}:{effect.delay_ms}:{effect.feedback:.3f}"
+        )
+    if effect.lowpass_hz is not None:
+        filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
+    filters.extend(
+        [
+            f"volume={gain_multiplier(effect.gain_db):.6f}",
+            f"adelay={effect.start_ms}:all=1",
+            f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
+        ]
+    )
+    return ",".join(filters)
+
+
 def build_filter_complex(
     session: MixSession,
     lean_in_audio: dict[str, Path],
@@ -345,6 +390,15 @@ def build_filter_complex(
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
             f"[{label}]"
         )
+        music_labels.append(f"[{label}]")
+
+    for index, effect in enumerate(session.effects):
+        clip = effect_target_clip(session, effect)
+        if clip is None:
+            continue
+        input_index = session.clips.index(clip)
+        label = f"effect{index}"
+        filters.append(effect_stream_filter(effect, clip, input_index, label, sample_rate, channels))
         music_labels.append(f"[{label}]")
 
     next_input = len(session.clips)
@@ -537,6 +591,14 @@ def routine_window(payload: dict, routine_id: str, pad_ms: int) -> tuple[int, in
         ]
         starts.extend(point_times[:1])
         ends.extend(point_times[-1:])
+    for effect in payload.get("effects", []):
+        if effect.get("routine_id") != routine_id:
+            continue
+        start_ms = parse_ms(effect.get("start_ms", effect.get("start", 0)), "effect start")
+        duration_ms = parse_ms(effect.get("duration_ms", effect.get("duration", 0)), "effect duration")
+        tail_ms = parse_ms(effect.get("tail_ms", effect.get("tail", 0)), "effect tail")
+        starts.append(start_ms)
+        ends.append(start_ms + duration_ms + tail_ms)
     if not starts or not ends:
         raise ValueError(f"routine id not found or has no timed events: {routine_id}")
     return max(0, min(starts) - pad_ms), max(ends) + pad_ms
@@ -555,6 +617,7 @@ def routine_taste_report(payload: dict, routine_id: str, start_ms: int, end_ms: 
         if clip.get("routine_id") not in {routine_id, None} and clip.get("source_clip_id") not in {item.get("id") for item in routine_clips}
     ]
     routine_recipes = sorted({str(clip.get("routine_recipe")) for clip in routine_clips if clip.get("routine_recipe")})
+    routine_effects = [effect for effect in payload.get("effects", []) if effect.get("routine_id") == routine_id]
     errors: list[str] = []
     warnings: list[str] = []
     if not routine_clips:
@@ -578,7 +641,7 @@ def routine_taste_report(payload: dict, routine_id: str, start_ms: int, end_ms: 
             "bpm_fit": "ok" if not any(abs(float(clip.get("tempo_shift_pct") or 0.0)) > 4.0 for clip in active_clips) else "fail",
             "vocal_on_vocal_risk": "unknown_without_stems",
             "dense_drums_risk": "unknown_without_stems",
-            "effect_tails": "not_detected",
+            "effect_tails": "detected" if any(parse_ms(effect.get("tail_ms", effect.get("tail", 0)), "effect tail") > 0 for effect in routine_effects) else "not_detected",
         },
         "warnings": warnings,
         "errors": errors,

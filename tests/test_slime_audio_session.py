@@ -858,6 +858,99 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double_payload["routine_recipe"], "stabs")
         self.assertTrue(all(automation.get("routine_id") == "routine-a" for automation in payload["automations"]))
 
+    def test_cli_add_effect_writes_echo_event(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "lead", "deck": "deck-1", "path": "/music/lead.flac", "start": 0, "duration": 30_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "add-effect",
+                        str(path),
+                        "--id",
+                        "lead-echo",
+                        "--type",
+                        "echo",
+                        "--target",
+                        "lead",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:02.000",
+                        "--tail-ms",
+                        "3000",
+                        "--wet",
+                        "0.4",
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            session = load_session(path)
+
+        self.assertEqual(len(session.effects), 1)
+        self.assertEqual(payload["effects"][0]["id"], "lead-echo")
+        self.assertEqual(payload["effects"][0]["target"], "lead")
+        self.assertEqual(payload["effects"][0]["tail_ms"], 3000)
+
+    def test_cli_instant_double_routine_can_add_echo_effect(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-echo",
+                        "--recipe",
+                        "echo-stabs",
+                        "--start",
+                        "00:12.000",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["effects"][0]["id"], "routine-echo-echo")
+        self.assertEqual(payload["effects"][0]["target"], "routine-echo-double")
+        self.assertEqual(payload["effects"][0]["routine_recipe"], "echo-stabs")
+        self.assertEqual(payload["effects"][0]["tail_ms"], 2000)
+
     def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

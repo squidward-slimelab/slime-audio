@@ -189,6 +189,34 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(event["planner_role"], "instant-double")
         self.assertEqual(event["display_meta"], "stabs routine of a")
 
+    def test_dashboard_shows_effect_events_on_effects_lane(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1"],
+            "clips": [{"id": "lead", "deck": "deck-1", "path": "/music/A/B/a.flac", "start": 0, "duration": 20_000}],
+            "effects": [
+                {
+                    "id": "lead-echo",
+                    "type": "echo",
+                    "target": "lead",
+                    "start": 8_000,
+                    "duration": 2_000,
+                    "tail_ms": 3_000,
+                    "routine_id": "routine-a",
+                    "routine_recipe": "echo-stabs",
+                }
+            ],
+        }
+
+        events = [web.normalize_event(event, None) for event in web.session_events(payload)]
+        effect = next(event for event in events if event["kind"] == "effect")
+        lanes = web.lane_rows(events)
+
+        self.assertEqual(effect["lane"], "effects")
+        self.assertEqual(effect["display_title"], "echo")
+        self.assertEqual(effect["display_meta"], "lead | echo-stabs")
+        self.assertIn("effects", [lane["id"] for lane in lanes])
+
     def test_dashboard_view_model_separates_stale_missing_and_future_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"

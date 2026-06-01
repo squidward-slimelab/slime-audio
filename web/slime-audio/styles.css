@@ -230,6 +230,10 @@ h2 {
   border-left-color: var(--yellow);
 }
 
+.mini-event.effect {
+  border-left-color: var(--blue);
+}
+
 .mini-event.done {
   opacity: 0.5;
 }
@@ -526,6 +530,14 @@ h2 {
   min-width: 96px;
   border-left-color: var(--violet);
   background: #1d1830;
+}
+
+.timeline-event.effect {
+  top: 18px;
+  height: 42px;
+  min-width: 84px;
+  border-left-color: var(--blue);
+  background: #132331;
 }
 
 .timeline-event.automation {

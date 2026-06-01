@@ -258,6 +258,52 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("highpass=enable='between(t,8.000,20.000)':f=120.000", filters)
         self.assertIn("volume=enable='between(t,8.000,20.000)':volume=0.354813", filters)
 
+    def test_mixdown_filter_renders_echo_effect_with_tail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-1",
+                                "path": "/music/lead.flac",
+                                "start": 5_000,
+                                "trim_start": 12_000,
+                                "duration": 20_000,
+                            }
+                        ],
+                        "effects": [
+                            {
+                                "id": "lead-echo",
+                                "type": "echo",
+                                "target": "lead",
+                                "start": 9_000,
+                                "duration": 2_000,
+                                "tail_ms": 3_000,
+                                "wet": 0.4,
+                                "gain_db": -9,
+                                "delay_ms": 375,
+                                "feedback": 0.45,
+                                "lowpass_hz": 4200,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            filters = build_filter_complex(session, {}, 48_000, 2)
+
+        self.assertIn("atrim=start=16.000:duration=5.000", filters)
+        self.assertIn("aecho=0.8:0.400:375:0.450", filters)
+        self.assertIn("lowpass=f=4200.000", filters)
+        self.assertIn("adelay=9000:all=1", filters)
+        self.assertEqual(session_duration_ms(session), 25_000)
+
     def test_crossfader_gain_maps_hard_sides_and_center(self):
         self.assertEqual(crossfader_gain(-1.0, "A"), 1.0)
         self.assertEqual(crossfader_gain(-1.0, "B"), 0.0)

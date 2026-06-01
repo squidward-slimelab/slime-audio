@@ -112,7 +112,25 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
             events.append(automation_payload(automation, owner=str(lean_in.get("id"))))
     for automation in payload.get("automations", []):
         events.append(automation_payload(automation))
-    kind_order = {"song": 0, "vocal": 1, "automation": 2}
+    for effect in payload.get("effects", []):
+        start_ms = parse_ms(effect.get("start_ms", effect.get("start", 0)), "effect start")
+        duration_ms = parse_ms(effect.get("duration_ms", effect.get("duration", 0)), "effect duration")
+        tail_ms = parse_ms(effect.get("tail_ms", effect.get("tail", 0)), "effect tail")
+        events.append(
+            {
+                "id": effect.get("id"),
+                "kind": "effect",
+                "deck": "effects",
+                "target": effect.get("target"),
+                "effect_type": effect.get("type"),
+                "start_ms": start_ms,
+                "duration_ms": duration_ms + tail_ms,
+                "end_ms": start_ms + duration_ms + tail_ms,
+                "routine_id": effect.get("routine_id"),
+                "routine_recipe": effect.get("routine_recipe"),
+            }
+        )
+    kind_order = {"song": 0, "vocal": 1, "effect": 2, "automation": 3}
     return sorted(
         events,
         key=lambda item: (
@@ -174,6 +192,8 @@ def display_title_for_event(event: dict[str, Any]) -> str:
         return f"{event.get('param') or 'automation'}"
     if event.get("kind") == "vocal":
         return str(event.get("text") or event.get("id") or "vocal")
+    if event.get("kind") == "effect":
+        return str(event.get("effect_type") or event.get("id") or "effect")
     return str(event.get("title") or event.get("id") or "untitled")
 
 
@@ -185,6 +205,10 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         return f"{target} | {event.get('param') or 'automation'}"
     if event.get("kind") == "vocal":
         return "mic lean-in"
+    if event.get("kind") == "effect":
+        target = event.get("target") or "session"
+        recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
+        return f"{target}{recipe}"
     if event.get("routine_recipe"):
         return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":
@@ -219,7 +243,7 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ordered_lanes: list[str] = []
     for lane in DECK_ORDER:
         ordered_lanes.append(lane)
-    for lane in ("voice", "fader", "automation"):
+    for lane in ("voice", "effects", "fader", "automation"):
         ordered_lanes.append(lane)
     for event in events:
         lane = str(event.get("lane") or "timeline")
