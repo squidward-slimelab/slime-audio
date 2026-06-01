@@ -123,6 +123,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "deck": "effects",
                 "target": effect.get("target"),
                 "effect_type": effect.get("type"),
+                "tail_ms": tail_ms,
                 "start_ms": start_ms,
                 "duration_ms": duration_ms + tail_ms,
                 "end_ms": start_ms + duration_ms + tail_ms,
@@ -208,7 +209,9 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
     if event.get("kind") == "effect":
         target = event.get("target") or "session"
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
-        return f"{target}{recipe}"
+        tail_ms = int(event.get("tail_ms") or 0)
+        tail = f" | tail {tail_ms / 1000:.1f}s" if tail_ms else ""
+        return f"{target}{tail}{recipe}"
     if event.get("routine_recipe"):
         return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":

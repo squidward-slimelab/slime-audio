@@ -540,6 +540,11 @@ h2 {
   background: #132331;
 }
 
+.timeline-event.effect-reverb {
+  border-left-color: var(--green);
+  background: #162b26;
+}
+
 .timeline-event.automation {
   top: 58px;
   height: 8px;

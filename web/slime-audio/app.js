@@ -306,7 +306,8 @@ function renderTimeline() {
       const end = Math.max(start + 1000, event.end_ms || start + 1000);
       const el = document.createElement("button");
       el.type = "button";
-      el.className = `timeline-event ${event.kind || "event"} ${event.status || ""}`;
+      const effectClass = event.kind === "effect" && event.effect_type ? `effect-${event.effect_type}` : "";
+      el.className = `timeline-event ${event.kind || "event"} ${effectClass} ${event.status || ""}`;
       el.style.left = `${(start / scale.duration) * scale.stageWidth}px`;
       el.style.width = `${Math.max(18, ((end - start) / scale.duration) * scale.stageWidth)}px`;
       el.title = `${event.display_title}\n${fmtMs(start)} - ${fmtMs(end)}\n${event.display_meta || shortPath(event.path)}`;

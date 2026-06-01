@@ -25,10 +25,10 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "hook-tease": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "cue_kind": "hook"},
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
+    "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "effect": "reverb"},
 }
 DEFERRED_ROUTINE_RECIPES = {
     "brake-drop": "requires slip/flux and vinyl brake primitives (#17/#18)",
-    "echo-drop": "requires reverb/echo tail rendering (#19)",
 }
 AUTOMATABLE_PARAMS = {
     "gain_db",
@@ -114,6 +114,8 @@ class EffectEvent:
     gain_db: float = -6.0
     delay_ms: int = 375
     feedback: float = 0.35
+    room_size: float = 0.6
+    damping: float = 0.45
     lowpass_hz: float | None = None
     routine_id: str | None = None
     routine_recipe: str | None = None
@@ -258,8 +260,8 @@ def parse_effect_event(payload: dict[str, Any]) -> EffectEvent:
     target = str(payload.get("target") or "").strip()
     if not effect_id:
         raise ValueError("effect id is required")
-    if effect_type not in {"echo"}:
-        raise ValueError(f"effect {effect_id} type must be echo")
+    if effect_type not in {"echo", "reverb"}:
+        raise ValueError(f"effect {effect_id} type must be echo or reverb")
     if not target:
         raise ValueError(f"effect {effect_id} target is required")
     return EffectEvent(
@@ -273,6 +275,8 @@ def parse_effect_event(payload: dict[str, Any]) -> EffectEvent:
         gain_db=float(payload.get("gain_db", -6.0)),
         delay_ms=parse_ms(payload.get("delay_ms", 375), f"effect {effect_id} delay"),
         feedback=max(0.0, min(0.95, float(payload.get("feedback", 0.35)))),
+        room_size=max(0.0, min(1.0, float(payload.get("room_size", 0.6)))),
+        damping=max(0.0, min(1.0, float(payload.get("damping", 0.45)))),
         lowpass_hz=float(payload["lowpass_hz"]) if payload.get("lowpass_hz") is not None else None,
         routine_id=str(payload["routine_id"]) if payload.get("routine_id") else None,
         routine_recipe=str(payload["routine_recipe"]) if payload.get("routine_recipe") else None,
@@ -1093,7 +1097,9 @@ def add_effect_event(
     gain_db: float,
     delay_ms: int,
     feedback: float,
-    lowpass_hz: float | None,
+    room_size: float = 0.6,
+    damping: float = 0.45,
+    lowpass_hz: float | None = None,
     routine_id: str | None = None,
     routine_recipe: str | None = None,
     lock_before_ms: int | None = None,
@@ -1114,6 +1120,8 @@ def add_effect_event(
         "gain_db": gain_db,
         "delay_ms": delay_ms,
         "feedback": feedback,
+        "room_size": room_size,
+        "damping": damping,
     }
     if lowpass_hz is not None:
         effect["lowpass_hz"] = lowpass_hz
@@ -1394,21 +1402,24 @@ def add_instant_double_routine(
             if cue_label:
                 clip["cue_label"] = cue_label
             break
-    if config.get("effect") == "echo":
+    if config.get("effect") in {"echo", "reverb"}:
         double_clip = next(clip for clip in next_payload.get("clips", []) if clip.get("id") == double_id)
+        effect_type = str(config["effect"])
         next_payload = add_effect_event(
             next_payload,
-            effect_id=f"{routine_id}-echo",
-            effect_type="echo",
+            effect_id=f"{routine_id}-{effect_type}",
+            effect_type=effect_type,
             target=double_id,
             start=str(double_clip["start_ms"]),
             duration=str(double_clip["duration_ms"]),
-            tail_ms=2000,
-            wet=0.42,
-            gain_db=-9.0,
-            delay_ms=375,
-            feedback=0.38,
-            lowpass_hz=4200.0,
+            tail_ms=3500 if effect_type == "reverb" else 2000,
+            wet=0.38 if effect_type == "reverb" else 0.42,
+            gain_db=-10.0 if effect_type == "reverb" else -9.0,
+            delay_ms=80 if effect_type == "reverb" else 375,
+            feedback=0.46 if effect_type == "reverb" else 0.38,
+            room_size=0.72,
+            damping=0.55,
+            lowpass_hz=5200.0 if effect_type == "reverb" else 4200.0,
             routine_id=routine_id,
             routine_recipe=recipe,
             lock_before_ms=lock_before_ms,
@@ -1585,7 +1596,7 @@ def main() -> int:
     effect_parser = sub.add_parser("add-effect")
     effect_parser.add_argument("session", type=Path)
     effect_parser.add_argument("--id", required=True)
-    effect_parser.add_argument("--type", choices=["echo"], default="echo")
+    effect_parser.add_argument("--type", choices=["echo", "reverb"], default="echo")
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
     effect_parser.add_argument("--duration", required=True)
@@ -1594,6 +1605,8 @@ def main() -> int:
     effect_parser.add_argument("--gain-db", type=float, default=-6.0)
     effect_parser.add_argument("--delay-ms", type=int, default=375)
     effect_parser.add_argument("--feedback", type=float, default=0.35)
+    effect_parser.add_argument("--room-size", type=float, default=0.6)
+    effect_parser.add_argument("--damping", type=float, default=0.45)
     effect_parser.add_argument("--lowpass-hz", type=float)
     add_live_edit_args(effect_parser)
 
@@ -1799,6 +1812,8 @@ def main() -> int:
                 gain_db=args.gain_db,
                 delay_ms=args.delay_ms,
                 feedback=args.feedback,
+                room_size=args.room_size,
+                damping=args.damping,
                 lowpass_hz=args.lowpass_hz,
                 lock_before_ms=lock_before_ms,
                 force=args.force,

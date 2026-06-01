@@ -317,27 +317,50 @@ def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     return ",".join(filters)
 
 
-def effect_target_clip(session: MixSession, effect: EffectEvent) -> Clip | None:
+def effect_target_clips(session: MixSession, effect: EffectEvent) -> list[Clip]:
     if effect.target.startswith("deck:"):
         deck = effect.target.split(":", 1)[1]
-        return next((clip for clip in session.clips if clip.deck == deck and clip.start_ms <= effect.start_ms < (clip.end_ms or clip.start_ms)), None)
-    return next((clip for clip in session.clips if clip.id == effect.target), None)
+        return [clip for clip in session.clips if clip.deck == deck and clip.start_ms < effect.end_ms and effect.start_ms < (clip.end_ms or clip.start_ms)]
+    if effect.target in {"master", "all"}:
+        return [clip for clip in session.clips if clip.start_ms < effect.end_ms and effect.start_ms < (clip.end_ms or clip.start_ms)]
+    return [clip for clip in session.clips if clip.id == effect.target]
+
+
+def reverb_filter(effect: EffectEvent) -> str:
+    base_delay = max(20, effect.delay_ms)
+    room = max(0.1, min(1.0, effect.room_size))
+    damping = max(0.0, min(1.0, effect.damping))
+    delays = [base_delay, int(base_delay * (1.7 + room)), int(base_delay * (2.9 + room)), int(base_delay * (4.7 + room))]
+    decay_base = max(0.05, min(0.95, effect.feedback))
+    damp_factor = 1.0 - (damping * 0.45)
+    decays = [decay_base, decay_base * 0.72 * damp_factor, decay_base * 0.52 * damp_factor, decay_base * 0.36 * damp_factor]
+    return "aecho=0.7:{wet:.3f}:{delays}:{decays}".format(
+        wet=effect.wet,
+        delays="|".join(str(delay) for delay in delays),
+        decays="|".join(f"{decay:.3f}" for decay in decays),
+    )
 
 
 def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
     relative_start_ms = max(0, effect.start_ms - clip.start_ms)
     source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
-    source_duration_ms = max(1, int(round((effect.duration_ms + effect.tail_ms) * tempo_factor(clip))))
+    source_duration_ms = max(1, int(round(effect.duration_ms * tempo_factor(clip))))
+    total_duration_ms = effect.duration_ms + effect.tail_ms
     filters = [
         f"[{input_index}:a]atrim=start={seconds(source_start_ms)}:duration={seconds(source_duration_ms)}",
         "asetpts=PTS-STARTPTS",
     ]
     retime = time_pitch_filters(clip, sample_rate)
     filters.extend(retime)
+    if effect.tail_ms:
+        filters.append(f"apad=pad_dur={seconds(effect.tail_ms)}")
     if effect.type == "echo":
         filters.append(
             f"aecho=0.8:{effect.wet:.3f}:{effect.delay_ms}:{effect.feedback:.3f}"
         )
+    elif effect.type == "reverb":
+        filters.append(reverb_filter(effect))
+    filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
         filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
     filters.extend(
@@ -392,14 +415,14 @@ def build_filter_complex(
         )
         music_labels.append(f"[{label}]")
 
-    for index, effect in enumerate(session.effects):
-        clip = effect_target_clip(session, effect)
-        if clip is None:
-            continue
-        input_index = session.clips.index(clip)
-        label = f"effect{index}"
-        filters.append(effect_stream_filter(effect, clip, input_index, label, sample_rate, channels))
-        music_labels.append(f"[{label}]")
+    effect_index = 0
+    for effect in session.effects:
+        for clip in effect_target_clips(session, effect):
+            input_index = session.clips.index(clip)
+            label = f"effect{effect_index}"
+            effect_index += 1
+            filters.append(effect_stream_filter(effect, clip, input_index, label, sample_rate, channels))
+            music_labels.append(f"[{label}]")
 
     next_input = len(session.clips)
     if music_labels:

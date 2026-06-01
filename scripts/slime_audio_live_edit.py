@@ -138,7 +138,7 @@ def main() -> int:
 
     effect_parser = sub.add_parser("add-effect", parents=[common])
     effect_parser.add_argument("--id", required=True)
-    effect_parser.add_argument("--type", choices=["echo"], default="echo")
+    effect_parser.add_argument("--type", choices=["echo", "reverb"], default="echo")
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
     effect_parser.add_argument("--duration", required=True)
@@ -147,6 +147,8 @@ def main() -> int:
     effect_parser.add_argument("--gain-db", type=float, default=-6.0)
     effect_parser.add_argument("--delay-ms", type=int, default=375)
     effect_parser.add_argument("--feedback", type=float, default=0.35)
+    effect_parser.add_argument("--room-size", type=float, default=0.6)
+    effect_parser.add_argument("--damping", type=float, default=0.45)
     effect_parser.add_argument("--lowpass-hz", type=float)
 
     fader_routing_parser = sub.add_parser("fader-routing", parents=[common])
@@ -279,6 +281,8 @@ def main() -> int:
                 gain_db=args.gain_db,
                 delay_ms=args.delay_ms,
                 feedback=args.feedback,
+                room_size=args.room_size,
+                damping=args.damping,
                 lowpass_hz=args.lowpass_hz,
                 lock_before_ms=lock_ms,
                 force=args.force,

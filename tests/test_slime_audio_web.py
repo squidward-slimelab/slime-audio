@@ -214,7 +214,7 @@ class SlimeAudioWebTests(unittest.TestCase):
 
         self.assertEqual(effect["lane"], "effects")
         self.assertEqual(effect["display_title"], "echo")
-        self.assertEqual(effect["display_meta"], "lead | echo-stabs")
+        self.assertEqual(effect["display_meta"], "lead | tail 3.0s | echo-stabs")
         self.assertIn("effects", [lane["id"] for lane in lanes])
 
     def test_dashboard_view_model_separates_stale_missing_and_future_events(self):

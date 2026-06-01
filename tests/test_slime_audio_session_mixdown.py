@@ -298,11 +298,63 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             session = load_session(session_path)
             filters = build_filter_complex(session, {}, 48_000, 2)
 
-        self.assertIn("atrim=start=16.000:duration=5.000", filters)
+        self.assertIn("atrim=start=16.000:duration=2.000", filters)
+        self.assertIn("apad=pad_dur=3.000", filters)
         self.assertIn("aecho=0.8:0.400:375:0.450", filters)
+        self.assertIn("atrim=duration=5.000", filters)
         self.assertIn("lowpass=f=4200.000", filters)
         self.assertIn("adelay=9000:all=1", filters)
         self.assertEqual(session_duration_ms(session), 25_000)
+
+    def test_mixdown_filter_renders_reverb_effect_with_tail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-1",
+                                "path": "/music/lead.flac",
+                                "start": 5_000,
+                                "trim_start": 12_000,
+                                "duration": 8_000,
+                            }
+                        ],
+                        "effects": [
+                            {
+                                "id": "lead-reverb",
+                                "type": "reverb",
+                                "target": "lead",
+                                "start": 9_000,
+                                "duration": 2_000,
+                                "tail_ms": 4_000,
+                                "wet": 0.38,
+                                "gain_db": -10,
+                                "delay_ms": 80,
+                                "feedback": 0.46,
+                                "room_size": 0.72,
+                                "damping": 0.55,
+                                "lowpass_hz": 5200,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            filters = build_filter_complex(session, {}, 48_000, 2)
+
+        self.assertIn("atrim=start=16.000:duration=2.000", filters)
+        self.assertIn("apad=pad_dur=4.000", filters)
+        self.assertIn("aecho=0.7:0.380:80|193|289|433:0.460|0.249|0.180|0.125", filters)
+        self.assertIn("atrim=duration=6.000", filters)
+        self.assertIn("lowpass=f=5200.000", filters)
+        self.assertIn("adelay=9000:all=1", filters)
+        self.assertEqual(session_duration_ms(session), 15_000)
 
     def test_crossfader_gain_maps_hard_sides_and_center(self):
         self.assertEqual(crossfader_gain(-1.0, "A"), 1.0)
