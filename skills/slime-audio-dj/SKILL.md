@@ -24,6 +24,7 @@ Keep this skill generic and portable.
 - `scripts/slime_audio_mix_planner.py`: rewrite future mix-session clips into phrase-aware blends, drop doubles, and planned transition automation.
 - `scripts/slime_audio_stream.py`: discover receivers and stream local files.
 - `scripts/slime_audio_session.py`: maintain planned mix-session clips, mic lean-ins, and automation.
+- `scripts/slime_audio_live_edit.py`: safely edit the active live session through the existing state-locked edit primitives and record edit history.
 - `scripts/slime_audio_lean_ins.py`: add scheduled lean-ins to a mix session.
 - `scripts/slime_audio_commentary_planner.py`: add tasteful future commentary lean-ins with spacing, context, and logs.
 - `scripts/slime_audio_session_mixdown.py`: render session clips and lean-ins into one Snapcast-ready mix file.
@@ -112,29 +113,27 @@ Keep this skill generic and portable.
      --decks deck-1,deck-2,deck-3,deck-4
    ```
 
-8. Add, move, trim, overlap, or automate clips by timestamp through the live-edit tools. During playback, include `--state runtime/mix-session-state.json` or `--lock-before <mix-time>` so edits before the playhead are rejected unless `--force` is explicit. This is the normal way to change a set while it is playing; editing a copied JSON file and restarting playback should be reserved for setup or recovery.
+8. Add, move, trim, overlap, or automate clips by timestamp through the active live-edit wrapper. It defaults to `runtime/mix-session.json`, reads `runtime/mix-session-state.json` as the playhead lock, and records `live_edit_applied` history events. This is the normal way to change a set while it is playing; editing a copied JSON file and restarting playback should be reserved for setup or recovery.
 
    ```bash
-   python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json \
-     --create \
+   python3 scripts/slime_audio_live_edit.py add-clip \
      --id next-drop \
      --deck deck-2 \
      --path ./track.flac \
      --start 02:16.000 \
      --trim-start 01:04.000 \
      --duration 00:32.000 \
-     --state runtime/saturday-4h-dj-mix-state.json
+     --reason "extend future set"
    ```
 
    For doubles and rhythmic offsets, use cached beatgrid analysis instead of hand-entered millisecond nudges:
 
    ```bash
-   python3 scripts/slime_audio_session.py beat-jump runtime/mix-session.json \
+   python3 scripts/slime_audio_live_edit.py beat-jump \
      --id doubled-hook \
      --beats 1/2 \
      --field start \
-     --cache runtime/dj-analysis-cache.json \
-     --state runtime/mix-session-state.json
+     --cache runtime/dj-analysis-cache.json
    ```
 
    Use `--field start` to delay/advance a clip on the mix timeline and `--field trim-start` to jump the source position while keeping the clip anchored. The command must reject weak BPM grids unless `--force` is explicit.
@@ -142,23 +141,21 @@ Keep this skill generic and portable.
    For true instant doubles, clone the source clip onto a free deck at the same musical position, preserving path, trim position, rendered tempo, rendered pitch, and gain. Use optional beat-gated gain automation for simple transform-style routines:
 
    ```bash
-   python3 scripts/slime_audio_session.py instant-double-routine runtime/mix-session.json \
+   python3 scripts/slime_audio_live_edit.py instant-double-routine \
      --source-id lead-hook \
      --id lead-hook-stabs \
      --recipe stabs \
      --start 01:24.000 \
-     --cache runtime/dj-analysis-cache.json \
-     --state runtime/mix-session-state.json
+     --cache runtime/dj-analysis-cache.json
 
-   python3 scripts/slime_audio_session.py instant-double runtime/mix-session.json \
+   python3 scripts/slime_audio_live_edit.py instant-double \
      --source-id lead-hook \
      --id lead-hook-double \
      --start 01:24.000 \
      --duration 00:08.000 \
      --gate-beats 1/2 \
      --cut-source \
-     --cache runtime/dj-analysis-cache.json \
-     --state runtime/mix-session-state.json
+     --cache runtime/dj-analysis-cache.json
    ```
 
    Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
@@ -166,14 +163,13 @@ Keep this skill generic and portable.
    Plan mashups, not straight playlists. A normal basic move is to keep a rhythmically and harmonically compatible track as a filtered bed under a lead vocal/hook/section:
 
    ```bash
-   python3 scripts/slime_audio_session.py mashup-bed runtime/mix-session.json \
+   python3 scripts/slime_audio_live_edit.py mashup-bed \
      --bed-id bed-loop \
      --start 01:16.000 \
      --end 01:48.000 \
      --gain-db -8 \
      --lowpass-hz 1800 \
-     --highpass-hz 100 \
-     --state runtime/mix-session-state.json
+     --highpass-hz 100
    ```
 
    Use filtered full-track beds for now. Proper vocal/drum/bass/other stem mashups belong to the deferred stem-separation workflow and should not block basic filter-bed routines.
@@ -232,7 +228,7 @@ Do not stream a review render directly as the main set unless the operator expli
 These are part of the normal workflow, not future wishes.
 
 - Database-backed candidate selection: use `slime_audio_candidates.py` against the library DB, recent `runtime/play-history.jsonl`, preferred-file routing, excludes, vibe/direction, and energy target. Candidate output should carry reasons the DJ can explain.
-- Live future editing: use timestamped `mix-session.json` clips, not legacy queue slots. The session runner reloads future render windows, records `session_window_*` history, and future `add-clip`, `move`, `remove`, `add-mic`, and automation edits should use `--state` or `--lock-before` to protect audio under the playhead.
+- Live future editing: use timestamped `mix-session.json` clips, not legacy queue slots. The session runner reloads future render windows and records `session_window_*` history. Future edits should use `slime_audio_live_edit.py` so the active state lock and edit history are applied consistently.
 - Live commentary planning: use `slime_audio_commentary_planner.py` to add future mic lean-ins independently of music selection. It writes normal session lean-ins with ducking/low-pass automation and appends `commentary_planned` logs tying text to timing, track context, and reason.
 - Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
 - Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, and master duck automation only when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.

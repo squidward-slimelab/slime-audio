@@ -184,14 +184,14 @@ python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
 python3 scripts/slime_audio_session.py summary runtime/mix-session.json
 python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json --playlist runtime/set.txt --start 00:00.000 --decks deck-1,deck-2,deck-3,deck-4
-python3 scripts/slime_audio_session.py add-clip runtime/mix-session.json --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000
-python3 scripts/slime_audio_session.py add-mic runtime/mix-session.json --id drop-2 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45
-python3 scripts/slime_audio_session.py automate runtime/mix-session.json --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]'
-python3 scripts/slime_audio_session.py mashup-bed runtime/mix-session.json --bed-id break-loop --start 01:16.000 --end 01:48.000 --gain-db -8 --lowpass-hz 1800 --highpass-hz 100
-python3 scripts/slime_audio_session.py instant-double-routine runtime/mix-session.json --source-id break-loop --id break-loop-stabs --recipe stabs --start 01:24.000 --cache runtime/dj-analysis-cache.json
-python3 scripts/slime_audio_session.py instant-double runtime/mix-session.json --source-id break-loop --id break-loop-double --start 01:24.000 --duration 00:08.000 --gate-beats 1/2 --cut-source --cache runtime/dj-analysis-cache.json
-python3 scripts/slime_audio_session.py move runtime/mix-session.json --id break-loop --start 01:16.000 --state runtime/saturday-4h-dj-mix-state.json
-python3 scripts/slime_audio_session.py beat-jump runtime/mix-session.json --id break-loop --beats 1/2 --field start --cache runtime/dj-analysis-cache.json --state runtime/saturday-4h-dj-mix-state.json
+python3 scripts/slime_audio_live_edit.py add-clip --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000 --reason "add future bed"
+python3 scripts/slime_audio_live_edit.py add-mic --id drop-2 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --reason "scheduled lean-in"
+python3 scripts/slime_audio_live_edit.py automate --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]' --reason "shape bed entrance"
+python3 scripts/slime_audio_live_edit.py mashup-bed --bed-id break-loop --start 01:16.000 --end 01:48.000 --gain-db -8 --lowpass-hz 1800 --highpass-hz 100
+python3 scripts/slime_audio_live_edit.py instant-double-routine --source-id break-loop --id break-loop-stabs --recipe stabs --start 01:24.000 --cache runtime/dj-analysis-cache.json
+python3 scripts/slime_audio_live_edit.py instant-double --source-id break-loop --id break-loop-double --start 01:24.000 --duration 00:08.000 --gate-beats 1/2 --cut-source --cache runtime/dj-analysis-cache.json
+python3 scripts/slime_audio_live_edit.py move --id break-loop --start 01:16.000 --reason "align future phrase"
+python3 scripts/slime_audio_live_edit.py beat-jump --id break-loop --beats 1/2 --field start --cache runtime/dj-analysis-cache.json --reason "tighten double timing"
 python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --create --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --lowpass-hz 1400
 python3 scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json --count 3
 python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --output runtime/mix-session-render.wav
@@ -200,7 +200,9 @@ python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --routin
 python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target all
 ```
 
-`import-playlist` is a migration helper: it probes track durations with `ffprobe`, assigns clips to decks, and writes absolute `start_ms` values. After import, future edits should add/move/remove timestamped clips instead of mutating playlist slots. For live editing, pass `--state runtime/mix-session-state.json` or `--lock-before` to edit commands so normal operations reject anything before the current playhead; use `--force` only for deliberate repair work.
+`import-playlist` is a migration helper: it probes track durations with `ffprobe`, assigns clips to decks, and writes absolute `start_ms` values. After import, future edits should add/move/remove timestamped clips instead of mutating playlist slots.
+
+`scripts/slime_audio_live_edit.py` is the active-session control wrapper. It defaults to `runtime/mix-session.json`, reads `runtime/mix-session-state.json` as the live playhead lock, routes to the existing session edit primitives, and appends `live_edit_applied` events to `runtime/play-history.jsonl`. Use `--force` only for deliberate repair work before the playhead. The lower-level `scripts/slime_audio_session.py` edit commands still exist for setup, tests, and non-active archived sessions.
 
 `beat-jump` is the quantized edit path for doubles and rhythmic offsets. It reads cached BPM/beat-offset analysis, supports +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat moves, and snaps either `--field start` or `--field trim-start` to the track grid. Low-confidence beatgrids are rejected unless `--force` is explicit.
 
