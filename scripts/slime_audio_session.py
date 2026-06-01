@@ -26,7 +26,7 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
     "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": True, "effect": "reverb"},
-    "brake-drop": {"duration": "00:04.000", "gate_beats": "1", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True, "duck_source_db": -8.0},
+    "brake-drop": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True},
 }
 DEFERRED_ROUTINE_RECIPES = {
 }
@@ -1574,7 +1574,7 @@ def add_instant_double_routine(
         gain_db=None,
         fade_in_ms=0,
         fade_out_ms=0,
-        gate_beats=str(config["gate_beats"]),
+        gate_beats=str(config["gate_beats"]) if config.get("gate_beats") else None,
         gate_offset_beats=str(config.get("gate_offset_beats", "0")),
         cut_source=bool(config["cut_source"]),
         cache_path=cache_path,
@@ -1613,17 +1613,28 @@ def add_instant_double_routine(
         effect_type = str(config["effect"])
         if effect_type == "vinyl_brake":
             double_clip["gain_db"] = -96.0
-            duck_db = float(config.get("duck_source_db", -8.0))
-            duck_start = int(double_clip["start_ms"])
-            duck_duration = max(1, int(round(float(Fraction(str(config.get("effect_beats", "1")))) * (60_000 / bpm))))
+            brake_start = int(double_clip["start_ms"])
+            brake_duration = max(1, int(round(float(Fraction(str(config.get("effect_beats", "1")))) * (60_000 / bpm))))
+            source_deck = str(source.get("deck") or "")
+            target_deck = str(double_clip.get("deck") or "")
+            routing = parse_fader_routing(
+                next_payload,
+                [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)],
+            )
+            source_side = routing.get(source_deck, DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A"))
+            if source_side == "THRU":
+                source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
+            target_side = "B" if source_side == "A" else "A"
+            on_position = -1.0 if target_side == "A" else 1.0
+            next_payload = set_fader_routing(next_payload, {source_deck: source_side, target_deck: target_side})
             next_payload.setdefault("automations", []).append(
                 {
-                    "target": source_id,
-                    "param": "gain_db",
-                    "planner_role": "vinyl-brake-source-duck",
+                    "target": "crossfader",
+                    "param": "position",
+                    "planner_role": "vinyl-brake-crossfader-cut",
                     "points": [
-                        {"at_ms": duck_start, "value": duck_db},
-                        {"at_ms": duck_start + duck_duration, "value": duck_db},
+                        {"at_ms": brake_start, "value": on_position},
+                        {"at_ms": brake_start + brake_duration, "value": on_position},
                     ],
                     "routine_id": routine_id,
                     "routine_recipe": recipe,
