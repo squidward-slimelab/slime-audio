@@ -347,7 +347,7 @@ def reverb_filter_graph(effect: EffectEvent, input_label: str, output_label: str
     filters.append(
         f"{''.join(f'[{label}]' for label in comb_labels)}"
         f"amix=inputs={len(comb_labels)}:duration=longest:normalize=0,"
-        "volume=0.260000,"
+        "volume=1.250000,"
         "allpass=f=420:width_type=h:width=520:mix=0.58,"
         "allpass=f=930:width_type=h:width=900:mix=0.52,"
         "allpass=f=1880:width_type=h:width=1500:mix=0.42,"
@@ -378,7 +378,7 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
     elif effect.type == "reverb":
         pre_label = f"{label}pre"
         wet_label = f"{label}wet"
-        reverb_gain = max(0.0, effect.wet)
+        reverb_gain = 2.4 * max(0.0, effect.wet)
         reverb_filters = [
             f"{','.join(filters)}[{pre_label}]",
             *reverb_filter_graph(effect, pre_label, wet_label),
