@@ -4,13 +4,14 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import subprocess
 import tempfile
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from slime_audio_session import Automation, AutomationPoint, Clip, MicLeanIn, MixSession, load_session, parse_ms
+from slime_audio_session import Automation, AutomationPoint, Clip, MicLeanIn, MixSession, load_payload, load_session, parse_ms
 
 
 def seconds(ms: int) -> str:
@@ -378,6 +379,14 @@ def output_codec_args(output: Path, output_format: str, sample_rate: int, channe
 
 
 def verify_rendered_audio(output: Path) -> None:
+    report = rendered_audio_report(output)
+    if report["duration_seconds"] <= 0:
+        raise ValueError(f"rendered mix has no positive duration: {output}")
+    if report["silent"]:
+        raise ValueError(f"rendered mix is silent: {output}")
+
+
+def rendered_audio_report(output: Path) -> dict[str, float | int | bool | None]:
     probe = subprocess.run(
         [
             "ffprobe",
@@ -385,18 +394,18 @@ def verify_rendered_audio(output: Path) -> None:
             "-loglevel",
             "error",
             "-show_entries",
-            "format=duration",
+            "format=duration,bit_rate",
             "-of",
-            "default=nw=1:nk=1",
+            "json",
             str(output),
         ],
         check=True,
         capture_output=True,
         text=True,
     )
-    duration = float(probe.stdout.strip() or "0")
-    if duration <= 0:
-        raise ValueError(f"rendered mix has no positive duration: {output}")
+    format_payload = json.loads(probe.stdout or "{}").get("format", {})
+    duration = float(format_payload.get("duration") or 0)
+    bit_rate = int(float(format_payload.get("bit_rate") or 0)) if format_payload.get("bit_rate") else None
     volume = subprocess.run(
         [
             "ffmpeg",
@@ -414,8 +423,95 @@ def verify_rendered_audio(output: Path) -> None:
         text=True,
     )
     text = f"{volume.stdout}\n{volume.stderr}"
-    if "mean_volume: -inf dB" in text or "max_volume: -inf dB" in text:
-        raise ValueError(f"rendered mix is silent: {output}")
+    mean_match = re.search(r"mean_volume:\s+(-?inf|-?\d+(?:\.\d+)?) dB", text)
+    max_match = re.search(r"max_volume:\s+(-?inf|-?\d+(?:\.\d+)?) dB", text)
+    mean_volume = None if mean_match is None or mean_match.group(1) == "-inf" else float(mean_match.group(1))
+    max_volume = None if max_match is None or max_match.group(1) == "-inf" else float(max_match.group(1))
+    return {
+        "duration_seconds": duration,
+        "bit_rate": bit_rate,
+        "mean_volume_db": mean_volume,
+        "max_volume_db": max_volume,
+        "silent": mean_volume is None or max_volume is None,
+        "clipping_risk": max_volume is not None and max_volume >= -0.1,
+    }
+
+
+def clip_start_end_payload(clip: dict) -> tuple[int, int | None]:
+    start_ms = parse_ms(clip.get("start_ms", clip.get("start", 0)), "clip start")
+    duration = clip.get("duration_ms", clip.get("duration"))
+    duration_ms = parse_ms(duration, "clip duration") if duration is not None else None
+    return start_ms, start_ms + duration_ms if duration_ms is not None else None
+
+
+def routine_window(payload: dict, routine_id: str, pad_ms: int) -> tuple[int, int]:
+    starts: list[int] = []
+    ends: list[int] = []
+    for clip in payload.get("clips", []):
+        if clip.get("routine_id") != routine_id:
+            continue
+        start_ms, end_ms = clip_start_end_payload(clip)
+        starts.append(start_ms)
+        if end_ms is not None:
+            ends.append(end_ms)
+    for automation in payload.get("automations", []):
+        if automation.get("routine_id") != routine_id:
+            continue
+        points = automation.get("points") or []
+        point_times = [
+            parse_ms(point.get("at_ms", point.get("at", 0)), "automation point")
+            for point in points
+            if isinstance(point, dict)
+        ]
+        starts.extend(point_times[:1])
+        ends.extend(point_times[-1:])
+    if not starts or not ends:
+        raise ValueError(f"routine id not found or has no timed events: {routine_id}")
+    return max(0, min(starts) - pad_ms), max(ends) + pad_ms
+
+
+def routine_taste_report(payload: dict, routine_id: str, start_ms: int, end_ms: int) -> dict:
+    routine_clips = [clip for clip in payload.get("clips", []) if clip.get("routine_id") == routine_id]
+    active_clips = []
+    for clip in payload.get("clips", []):
+        clip_start, clip_end = clip_start_end_payload(clip)
+        if clip_end is not None and clip_start < end_ms and start_ms < clip_end:
+            active_clips.append(clip)
+    unrelated = [
+        clip
+        for clip in active_clips
+        if clip.get("routine_id") not in {routine_id, None} and clip.get("source_clip_id") not in {item.get("id") for item in routine_clips}
+    ]
+    routine_recipes = sorted({str(clip.get("routine_recipe")) for clip in routine_clips if clip.get("routine_recipe")})
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not routine_clips:
+        errors.append("routine has no clips")
+    if len(active_clips) > 3:
+        warnings.append("more than three clips are active during the routine window")
+    if unrelated:
+        errors.append("unrelated routine clips overlap the audition window")
+    if any(clip.get("pitch_shift_semitones") not in {None, 0} for clip in active_clips):
+        warnings.append("audition includes rendered pitch correction; verify key fit by ear")
+    if any(abs(float(clip.get("tempo_shift_pct") or 0.0)) > 4.0 for clip in active_clips):
+        errors.append("tempo shift exceeds conservative routine audition limit")
+    return {
+        "routine_id": routine_id,
+        "routine_recipes": routine_recipes,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "active_clip_ids": [clip.get("id") for clip in active_clips],
+        "checks": {
+            "key_fit": "unknown_without_analysis_metadata",
+            "bpm_fit": "ok" if not any(abs(float(clip.get("tempo_shift_pct") or 0.0)) > 4.0 for clip in active_clips) else "fail",
+            "vocal_on_vocal_risk": "unknown_without_stems",
+            "dense_drums_risk": "unknown_without_stems",
+            "effect_tails": "not_detected",
+        },
+        "warnings": warnings,
+        "errors": errors,
+        "accepted": not errors,
+    }
 
 
 def prepare_lean_in_audio(
@@ -475,13 +571,30 @@ def main() -> int:
         help="Render a live-edit window starting at this mix timestamp/playhead.",
     )
     parser.add_argument("--duration", help="Render only this much timeline after --from.")
+    parser.add_argument("--routine-id", help="Render an audition window around a planned routine id.")
+    parser.add_argument("--routine-pad-ms", type=int, default=5_000)
+    parser.add_argument("--report-output", type=Path, help="Write a machine-readable audition/render verification report.")
+    parser.add_argument("--force-routine-risk", action="store_true", help="Render even if routine taste checks report errors.")
     parser.add_argument("--skip-tts", action="store_true", help="Use tiny silent lean-in placeholders; useful for command validation.")
     parser.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True, help="Probe rendered duration and reject silent output.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    duration_ms = parse_ms(args.duration, "render duration") if args.duration else None
-    session = shift_session_window(load_session(args.session), parse_ms(args.from_time, "render start"), duration_ms)
+    payload = load_payload(args.session)
+    routine_report = None
+    if args.routine_id:
+        routine_start_ms, routine_end_ms = routine_window(payload, args.routine_id, args.routine_pad_ms)
+        args.from_time = str(routine_start_ms)
+        duration_ms = routine_end_ms - routine_start_ms
+        routine_report = routine_taste_report(payload, args.routine_id, routine_start_ms, routine_end_ms)
+        if not routine_report["accepted"] and not args.force_routine_risk:
+            if args.report_output:
+                args.report_output.write_text(json.dumps({"routine": routine_report}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            raise ValueError(f"routine audition rejected: {', '.join(routine_report['errors'])}")
+    else:
+        duration_ms = parse_ms(args.duration, "render duration") if args.duration else None
+    render_start_ms = parse_ms(args.from_time, "render start")
+    session = shift_session_window(load_session(args.session), render_start_ms, duration_ms)
     with tempfile.TemporaryDirectory(prefix="slime-session-mixdown-") as temp:
         lean_audio = prepare_lean_in_audio(
             session,
@@ -504,11 +617,37 @@ def main() -> int:
             args.mp3_bitrate,
         )
         if args.dry_run:
-            print(json.dumps({"command": command, "filter_complex": command[command.index("-filter_complex") + 1]}, indent=2))
+            report = {
+                "command": command,
+                "filter_complex": command[command.index("-filter_complex") + 1],
+                "render": {"from_ms": render_start_ms, "duration_ms": duration_ms},
+            }
+            if routine_report is not None:
+                report["routine"] = routine_report
+            if args.report_output:
+                args.report_output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps(report, indent=2))
             return 0
         subprocess.run(command, check=True)
+        audio_report = None
         if args.verify:
             verify_rendered_audio(args.output)
+            audio_report = rendered_audio_report(args.output)
+        if args.report_output:
+            args.report_output.write_text(
+                json.dumps(
+                    {
+                        "output": str(args.output),
+                        "render": {"from_ms": render_start_ms, "duration_ms": duration_ms},
+                        "routine": routine_report,
+                        "audio": audio_report,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
     print(f"rendered {args.output}")
     return 0
 

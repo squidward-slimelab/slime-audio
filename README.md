@@ -194,6 +194,7 @@ python3 scripts/slime_audio_lean_ins.py --session runtime/mix-session.json --cre
 python3 scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json --count 3
 python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --output runtime/mix-session-render.wav
 python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 01:10.000 --duration 00:45.000 --output runtime/mix-review.mp3 --format mp3 --verify
+python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --routine-id break-loop-stabs --output runtime/routine-proof.mp3 --format mp3 --report-output runtime/routine-proof.json --verify
 python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target all
 ```
 
@@ -205,7 +206,7 @@ python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json
 
 `scripts/slime_audio_session_runner.py` consumes the native timestamped session directly. It renders short future windows, streams them through Snapcast/multicast, reloads `mix-session.json` before each window, and records `session_window_*` history events. Future adds/moves/removes take effect on the next render window without interrupting audio already under the playhead.
 
-For review and verification, render the planned mix directly to a file with `slime_audio_session_mixdown.py`. Use WAV/FLAC for lossless checks or MP3 for shareable review artifacts; `--verify` probes duration and rejects silent output. `--from` and `--duration` are the quickest way to export a transition proof clip without rendering the whole set.
+For review and verification, render the planned mix directly to a file with `slime_audio_session_mixdown.py`. Use WAV/FLAC for lossless checks or MP3 for shareable review artifacts; `--verify` probes duration and rejects silent output. `--from` and `--duration` are the quickest way to export a transition proof clip without rendering the whole set. `--routine-id` renders a padded audition window around one planned routine and can write a JSON report with render timing, audio levels, clipping/silence checks, and current taste-rule warnings/errors.
 
 Lean-ins are scheduled session events, not immediate side streams. A lean-in has an exact mix timeline `start`, spoken text, voice `volume`, and paired `duck_volume`/`lowpass_hz` automation. `scripts/slime_audio_session_mixdown.py` renders those events into one Snapcast-ready audio file so voice, ducking, and low-pass filtering happen in the shared mix instead of relying on the old receiver packet path.
 

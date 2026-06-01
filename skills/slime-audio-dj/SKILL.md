@@ -191,9 +191,17 @@ Keep this skill generic and portable.
      --format mp3 \
      --mp3-bitrate 192k \
      --verify
+
+   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json \
+     --routine-id lead-hook-stabs \
+     --output runtime/routine-proof.mp3 \
+     --format mp3 \
+     --report-output runtime/routine-proof.json \
+     --verify
    ```
 
    Use `--from` and `--duration` for a short proof clip around a transition. Keep `--verify` on so empty/silent renders fail before upload.
+   Use `--routine-id` before sending or playing routine-heavy mixes. Read the JSON report and fix rejected routine errors instead of forcing through risky overlays.
 
 10. Start playback from the native timestamped session runner:
 
@@ -231,6 +239,7 @@ These are part of the normal workflow, not future wishes.
 - Quantized beat jumps: use `slime_audio_session.py beat-jump` for +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat offsets from cached BPM/beat-offset analysis. Prefer it over manual millisecond edits whenever planning instant doubles, half-beat delays, phrase jumps, or off-beat cuts. Do not use `--force` for normal DJ planning; forced low-confidence grids are only for debugging failed analysis.
 - Metadata authority: BPM/key/Camelot must come from the music DB TuneBat fields. Ignore filename tags. If metadata is missing, use the local TuneBat analyzer to populate the DB before planning overlays, beat jumps, or doubles.
 - Review file export: use `slime_audio_session_mixdown.py --output runtime/mix-review.mp3 --format mp3 --verify` to render the actual planned mix to a shareable file before or after playback. For transition QA, render a shorter window with `--from` and `--duration`, then upload or link that artifact for operator review.
+- Routine auditions: use `slime_audio_session_mixdown.py --routine-id ... --report-output ... --verify` for a 20-40 second proof around planned routines. The report records render timing, audio duration/level, clipping/silence checks, and current taste-rule warnings/errors. Do not send a full routine-heavy mix until the audition report is accepted or the risk is explicitly forced for debugging.
 - Live set constraints: use `slime_audio_candidates.py set-constraints` for persistent operator steering. Future candidate generation must respect the scratchpad after restarts.
 
 ## Receiver Health

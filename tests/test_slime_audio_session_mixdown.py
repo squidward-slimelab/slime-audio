@@ -8,7 +8,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_session import load_session
-from slime_audio_session_mixdown import build_filter_complex, ffmpeg_command, session_duration_ms, shift_session_window
+from slime_audio_session_mixdown import (
+    build_filter_complex,
+    ffmpeg_command,
+    routine_taste_report,
+    routine_window,
+    session_duration_ms,
+    shift_session_window,
+)
 
 
 class SlimeAudioSessionMixdownTests(unittest.TestCase):
@@ -354,6 +361,74 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertEqual(shifted.clips[0].trim_start_ms, 6_000)
         self.assertEqual(shifted.clips[0].duration_ms, 8_000)
         self.assertIn("atrim=duration=8.000,alimiter", filters)
+
+    def test_routine_window_and_taste_report_accept_named_routine(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1", "deck-2"],
+            "clips": [
+                {"id": "source", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 30_000},
+                {
+                    "id": "routine-double",
+                    "deck": "deck-2",
+                    "path": "/music/a.flac",
+                    "start": 10_000,
+                    "duration": 8_000,
+                    "routine_id": "routine-a",
+                    "routine_recipe": "stabs",
+                    "source_clip_id": "source",
+                },
+            ],
+            "automations": [
+                {
+                    "target": "routine-double",
+                    "param": "gain_db",
+                    "routine_id": "routine-a",
+                    "points": [{"at_ms": 10_000, "value": -3}, {"at_ms": 18_000, "value": -96}],
+                }
+            ],
+        }
+
+        start_ms, end_ms = routine_window(payload, "routine-a", 5_000)
+        report = routine_taste_report(payload, "routine-a", start_ms, end_ms)
+
+        self.assertEqual((start_ms, end_ms), (5_000, 23_000))
+        self.assertTrue(report["accepted"])
+        self.assertEqual(report["routine_recipes"], ["stabs"])
+        self.assertEqual(report["active_clip_ids"], ["source", "routine-double"])
+
+    def test_routine_taste_report_rejects_unrelated_routine_overlap(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1", "deck-2", "deck-3"],
+            "clips": [
+                {"id": "source", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 30_000},
+                {
+                    "id": "routine-double",
+                    "deck": "deck-2",
+                    "path": "/music/a.flac",
+                    "start": 10_000,
+                    "duration": 8_000,
+                    "routine_id": "routine-a",
+                    "routine_recipe": "stabs",
+                    "source_clip_id": "source",
+                },
+                {
+                    "id": "other-routine",
+                    "deck": "deck-3",
+                    "path": "/music/b.flac",
+                    "start": 12_000,
+                    "duration": 8_000,
+                    "routine_id": "routine-b",
+                    "routine_recipe": "stabs",
+                },
+            ],
+        }
+
+        report = routine_taste_report(payload, "routine-a", 5_000, 23_000)
+
+        self.assertFalse(report["accepted"])
+        self.assertIn("unrelated routine clips overlap the audition window", report["errors"])
 
 
 if __name__ == "__main__":
