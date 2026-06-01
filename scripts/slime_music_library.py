@@ -161,12 +161,27 @@ def init_db(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(path, kind, start_ms, end_ms)
         );
 
+        CREATE TABLE IF NOT EXISTS track_dj_cues (
+            path TEXT NOT NULL REFERENCES track_dj_analysis(path) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            at_ms INTEGER NOT NULL,
+            end_ms INTEGER,
+            confidence REAL NOT NULL,
+            source TEXT NOT NULL DEFAULT 'detected_structure',
+            quantized INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(path, kind, at_ms, label)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_files_duplicate_key ON files(duplicate_key);
         CREATE INDEX IF NOT EXISTS idx_files_title ON files(normalized_title);
         CREATE INDEX IF NOT EXISTS idx_files_artist ON files(normalized_artist);
         CREATE INDEX IF NOT EXISTS idx_sources_server ON sources(server);
         CREATE INDEX IF NOT EXISTS idx_track_dj_structure_kind ON track_dj_structure(kind);
         CREATE INDEX IF NOT EXISTS idx_track_dj_drop_candidates_kind ON track_dj_drop_candidates(kind);
+        CREATE INDEX IF NOT EXISTS idx_track_dj_cues_kind ON track_dj_cues(kind);
 
         CREATE VIEW duplicate_groups AS
             SELECT

@@ -162,6 +162,8 @@ def main() -> int:
     routine_parser.add_argument("--id", required=True)
     routine_parser.add_argument("--recipe", required=True)
     routine_parser.add_argument("--start")
+    routine_parser.add_argument("--cue-kind")
+    routine_parser.add_argument("--cue-db", type=Path, default=session.DEFAULT_LIBRARY_DB)
     routine_parser.add_argument("--cache", type=Path, default=session.DEFAULT_DJ_CACHE)
     routine_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
 
@@ -279,6 +281,8 @@ def main() -> int:
                 routine_id=args.id,
                 recipe=args.recipe,
                 start=args.start,
+                cue_kind=args.cue_kind,
+                cue_db=args.cue_db,
                 cache_path=args.cache,
                 min_confidence=args.min_confidence,
                 lock_before_ms=lock_ms,

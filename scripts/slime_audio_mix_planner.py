@@ -16,6 +16,7 @@ from slime_audio_dj import (
     analyze_with_cache,
     coerce_analysis,
     coerce_structure,
+    select_cue,
     transition_plan,
 )
 from slime_audio_session import load_payload, parse_session, playhead_ms_from_state, write_payload
@@ -212,9 +213,11 @@ def plan_future_mix(
         planned.append(PlannedMove("blend", str(clip.get("id")), start_ms, reason, str(previous.get("id")) if previous else None))
 
         if previous is not None and overlap and plan is not None and index % max(1, double_every) == 0:
-            drop = first_structure(analysis, {"drop", "build"})
-            if drop is not None:
-                double_duration = min(DEFAULT_DOUBLE_DURATION_MS, duration_ms - int(drop.start_ms))
+            cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=150_000, after_ms=8_000)
+            drop = first_structure(analysis, {"drop", "build"}) if cue is None else None
+            cue_ms = int(cue.at_ms if cue is not None else drop.start_ms) if cue is not None or drop is not None else None
+            if cue_ms is not None:
+                double_duration = min(DEFAULT_DOUBLE_DURATION_MS, duration_ms - cue_ms)
                 double_start = max(lock_before_ms, start_ms - double_duration)
                 double_duration = start_ms - double_start
                 if double_duration >= 4_000:
@@ -225,7 +228,7 @@ def plan_future_mix(
                         "deck": double_deck,
                         "path": clip.get("path"),
                         "start_ms": double_start,
-                        "trim_start_ms": int(drop.start_ms),
+                        "trim_start_ms": cue_ms,
                         "duration_ms": double_duration,
                         "gain_db": -6.0,
                         "fade_in_ms": min(1500, double_duration // 3),
@@ -233,9 +236,10 @@ def plan_future_mix(
                         "kind": "planner-double",
                         "planner_role": "drop-double",
                         "source_clip_id": clip.get("id"),
+                        "cue_kind": cue.kind if cue is not None else drop.kind,
                     }
                     rebuilt.append(double_clip)
-                    planned.append(PlannedMove("double", str(double_clip["id"]), double_start, f"{drop.kind} tease from {clip.get('id')}", str(clip.get("id"))))
+                    planned.append(PlannedMove("double", str(double_clip["id"]), double_start, f"{double_clip['cue_kind']} tease from {clip.get('id')}", str(clip.get("id"))))
 
         previous = clip
         previous_analysis = analysis

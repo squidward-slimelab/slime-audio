@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from slime_audio_session import load_session, parse_ms, playhead_ms_from_state, session_summary
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
+from slime_music_library import connect
 
 
 def run_cli(argv: list[str]) -> int:
@@ -54,6 +55,32 @@ def write_analysis_cache(path: Path, track: str, *, bpm: float, beat_offset_ms: 
         ),
         encoding="utf-8",
     )
+
+
+def write_cue_db(db_path: Path, track: Path, *, kind: str, at_ms: int, confidence: float = 0.9) -> None:
+    conn = connect(db_path)
+    stat = track.stat()
+    identity_path = str(track.resolve())
+    conn.execute(
+        """
+        INSERT INTO track_dj_analysis(
+            path, file_size, file_mtime_ns, duration_s, sample_rate, channels,
+            bpm, beat_offset_ms, energy, loudness_db, bpm_confidence, key_confidence,
+            phrase_beats, phrase_ms, updated_at
+        )
+        VALUES (?, ?, ?, 120.0, 44100, 2, 120.0, 0, 0.5, -12.0, 0.9, 0.0, 32, 16000, 1)
+        """,
+        (identity_path, stat.st_size, stat.st_mtime_ns),
+    )
+    conn.execute(
+        """
+        INSERT INTO track_dj_cues(path, kind, label, at_ms, end_ms, confidence, source, quantized, reason, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'test', 1, 'test cue', 1)
+        """,
+        (identity_path, kind, kind, at_ms, at_ms + 8000, confidence),
+    )
+    conn.commit()
+    conn.close()
 
 
 class SlimeAudioSessionTests(unittest.TestCase):
@@ -715,6 +742,57 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double_payload["planner_role"], "instant-double")
         self.assertEqual(double_payload["routine_recipe"], "stabs")
         self.assertTrue(all(automation.get("routine_id") == "routine-a" for automation in payload["automations"]))
+
+    def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            db = temp / "library.sqlite3"
+            track = temp / "routine.flac"
+            track.write_bytes(b"fake audio")
+            write_analysis_cache(cache, str(track), bpm=120)
+            write_cue_db(db, track, kind="hook", at_ms=24_000)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": str(track), "start": 60_000, "trim_start": 8_000, "duration": 40_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-hook",
+                        "--recipe",
+                        "hook-tease",
+                        "--cue-db",
+                        str(db),
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            double_payload = next(clip for clip in payload["clips"] if clip["id"] == "routine-hook-double")
+
+        self.assertEqual(double_payload["start_ms"], 76_000)
+        self.assertEqual(double_payload["trim_start_ms"], 24_000)
+        self.assertEqual(double_payload["cue_kind"], "hook")
+        self.assertEqual(double_payload["routine_recipe"], "hook-tease")
 
     def test_cli_instant_double_routine_refuses_missing_prerequisite_recipe(self):
         with tempfile.TemporaryDirectory() as temp_dir:

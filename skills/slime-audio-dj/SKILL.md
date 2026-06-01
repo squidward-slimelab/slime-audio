@@ -78,6 +78,7 @@ Keep this skill generic and portable.
 
    ```bash
    python3 scripts/slime_audio_dj.py structure ./track.flac
+   python3 scripts/slime_audio_dj.py cues ./track.flac --kind drop --kind hook
    python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
    python3 scripts/slime_audio_dj.py plan --playlist runtime/current-playlist.txt
    python3 scripts/slime_audio_dj.py rank ./current-track.flac --playlist runtime/candidates.txt --limit 12
@@ -89,7 +90,18 @@ Keep this skill generic and portable.
    python3 scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY
    ```
 
-   `slime_audio_dj.py` and `slime_audio_mix_planner.py` hydrate from `runtime/slime-music-library.sqlite3` and mirror results into `runtime/dj-analysis-cache.json` for older live-edit commands. Running structure analysis once persists reusable beatgrid, phrase-grid, structure windows, and drop candidates in the music DB; unchanged files should come from SQLite before raw audio decode, and changed size/mtime must invalidate the stored row. Treat the raw analyzer as fallback structure help, not as authority for beat/key decisions.
+   `slime_audio_dj.py` and `slime_audio_mix_planner.py` hydrate from `runtime/slime-music-library.sqlite3` and mirror results into `runtime/dj-analysis-cache.json` for older live-edit commands. Running structure analysis once persists reusable beatgrid, phrase-grid, structure windows, drop candidates, and named cues in the music DB; unchanged files should come from SQLite before raw audio decode, and changed size/mtime must invalidate the stored row. Treat the raw analyzer as fallback structure help, not as authority for beat/key decisions.
+
+   Use cue kinds for routines instead of hand-entered milliseconds when possible. Cues include `clean_intro`, `build`, `drop`, `hook`, `stabs`, `vocal`, `clean_outro`, `safe_loop`, and `pre_drop`, quantized to phrase or beat boundaries when confidence is high enough:
+
+   ```bash
+   python3 scripts/slime_audio_live_edit.py instant-double-routine \
+     --source-id lead-hook \
+     --id lead-hook-tease \
+     --recipe hook-tease \
+     --cue-kind hook \
+     --cache runtime/dj-analysis-cache.json
+   ```
 
    Then run the real mix planner against the future session, especially after importing a straight playlist:
 
@@ -256,6 +268,7 @@ These are part of the normal workflow, not future wishes.
 - Key-fit policy: when more than one track plays at once, aim for exact key fit whenever the rendered correction is tasteful. For major/minor combinations, use the relative major/minor relationship to decide the correct transpose steps. Prefer keeping a compatible key lane for a run of tracks; only change key deliberately when the source song naturally modulates, the transition is short/non-overlapped, or the move is musically justified and documented.
 - Mashup-first planning: DJ sets should be planned as mashups rather than playlists. Prefer one or more compatible rhythm/EDM clips as filtered beds under another lead track or section. Use `slime_audio_session.py mashup-bed` for gain plus low-pass/high-pass bed shaping, and render review files to verify the bed supports the lead instead of fighting it.
 - True instant doubles: use `slime_audio_session.py instant-double-routine` for named recipes, or raw `instant-double` when hand-building. These commands preserve source path, derived musical position, tempo/pitch settings, gain, and label the dashboard event as an instant double/routine. Optional `--gate-beats` adds quantized on/off gain automation for simple routines; pair it with `--cut-source` when the double should trade against the original instead of phasing on top of it.
+- Persisted cues: use `slime_audio_dj.py cues` and routine `--cue-kind` starts so hooks, drops, builds, stabs, clean intros/outros, vocal pockets, and safe loops come from DB-backed phrase/beat quantized facts instead of raw timestamps.
 - Quantized beat jumps: use `slime_audio_session.py beat-jump` for +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat offsets from cached BPM/beat-offset analysis. Prefer it over manual millisecond edits whenever planning instant doubles, half-beat delays, phrase jumps, or off-beat cuts. Do not use `--force` for normal DJ planning; forced low-confidence grids are only for debugging failed analysis.
 - Metadata authority: BPM/key/Camelot must come from the music DB TuneBat fields. Ignore filename tags. If metadata is missing, use the local TuneBat analyzer to populate the DB before planning overlays, beat jumps, or doubles.
 - Review file export: use `slime_audio_session_mixdown.py --output runtime/mix-review.mp3 --format mp3 --verify` to render the actual planned mix to a shareable file before or after playback. For transition QA, render a shorter window with `--from` and `--duration`, then upload or link that artifact for operator review.

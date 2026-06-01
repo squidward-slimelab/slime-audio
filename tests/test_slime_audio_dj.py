@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_dj import (
+    CuePoint,
     StructureWindow,
     TrackAnalysis,
     analysis_db_path,
@@ -16,11 +17,13 @@ from slime_audio_dj import (
     beat_grid,
     cache_key,
     camelot,
+    cue_points_for_analysis,
     detect_structure_windows,
     drop_candidates_for_analysis,
     estimate_bpm,
     key_match,
     relative_tonic,
+    select_cue,
     semitone_distance,
     session_tension_windows,
     suggested_lean_in_windows,
@@ -216,12 +219,15 @@ class SlimeAudioDjTests(unittest.TestCase):
             analysis_row = conn.execute("SELECT bpm, phrase_beats FROM track_dj_analysis WHERE path = ?", (identity_path,)).fetchone()
             structure_rows = conn.execute("SELECT kind FROM track_dj_structure WHERE path = ? ORDER BY start_ms", (identity_path,)).fetchall()
             drop_rows = conn.execute("SELECT kind FROM track_dj_drop_candidates WHERE path = ? ORDER BY start_ms", (identity_path,)).fetchall()
+            cue_rows = conn.execute("SELECT kind, quantized FROM track_dj_cues WHERE path = ? ORDER BY at_ms", (identity_path,)).fetchall()
             conn.close()
 
         self.assertEqual(analysis_row["bpm"], 120.0)
         self.assertEqual(analysis_row["phrase_beats"], 32)
         self.assertIn("drop", [row["kind"] for row in structure_rows])
         self.assertIn("pre_drop", [row["kind"] for row in drop_rows])
+        self.assertIn("hook", [row["kind"] for row in cue_rows])
+        self.assertTrue(any(row["kind"] == "drop" and row["quantized"] == 1 for row in cue_rows))
 
     def test_analyze_with_cache_invalidates_db_analysis_when_file_identity_changes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -249,6 +255,33 @@ class SlimeAudioDjTests(unittest.TestCase):
 
         self.assertTrue(any(candidate["kind"] == "drop" and candidate["start_ms"] == 64_000 for candidate in candidates))
         self.assertTrue(any(candidate["kind"] == "pre_drop" and candidate["end_ms"] == 64_000 for candidate in candidates))
+
+    def test_cue_points_are_quantized_and_selectable_by_kind(self):
+        analysis = TrackAnalysis(
+            path="/music/a.wav",
+            duration_s=180.0,
+            sample_rate=44100,
+            channels=2,
+            bpm=120.0,
+            beat_offset_ms=0,
+            key=None,
+            tonic=None,
+            mode=None,
+            camelot=None,
+            energy=0.5,
+            loudness_db=-12.0,
+            confidence={"bpm": 0.9, "key": 0.0},
+            beatgrid=beat_grid(120.0, 0),
+            structure=[StructureWindow("drop", 63_700, 80_000, 0.91, "release")],
+        )
+
+        cues = cue_points_for_analysis(analysis)
+        selected = select_cue(analysis, {"hook", "drop"})
+
+        self.assertIn(CuePoint("drop", "drop", 64_000, 80_000, 0.91, "detected_structure", True, "release"), cues)
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.kind, "drop")
+        self.assertEqual(selected.at_ms, 64_000)
 
 
 if __name__ == "__main__":

@@ -52,6 +52,18 @@ class BeatGrid:
 
 
 @dataclass(frozen=True)
+class CuePoint:
+    kind: str
+    label: str
+    at_ms: int
+    end_ms: int | None
+    confidence: float
+    source: str
+    quantized: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class TrackAnalysis:
     path: str
     duration_s: float
@@ -68,6 +80,7 @@ class TrackAnalysis:
     confidence: dict[str, float]
     beatgrid: BeatGrid | None = None
     structure: list[StructureWindow] | None = None
+    cues: list[CuePoint] | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +259,14 @@ def align_to_phrase(ms: int, grid: BeatGrid) -> int:
     return max(0, grid.beat_offset_ms + (phrases * grid.phrase_ms))
 
 
+def align_to_beat(ms: int, grid: BeatGrid) -> int:
+    if grid.beat_offset_ms is None or not grid.bpm:
+        return max(0, ms)
+    beat_ms = 60_000 / grid.bpm
+    beats = round((ms - grid.beat_offset_ms) / beat_ms)
+    return max(0, int(round(grid.beat_offset_ms + (beats * beat_ms))))
+
+
 def detect_structure_windows(
     envelope: list[float],
     bpm: float | None,
@@ -355,6 +376,16 @@ def coerce_structure(values: list[StructureWindow] | list[dict] | None) -> list[
     return result
 
 
+def coerce_cues(values: list[CuePoint] | list[dict] | None) -> list[CuePoint]:
+    result = []
+    for value in values or []:
+        if isinstance(value, CuePoint):
+            result.append(value)
+        elif isinstance(value, dict):
+            result.append(CuePoint(**value))
+    return result
+
+
 def coerce_analysis(value: TrackAnalysis | dict) -> TrackAnalysis:
     if isinstance(value, TrackAnalysis):
         return value
@@ -362,6 +393,7 @@ def coerce_analysis(value: TrackAnalysis | dict) -> TrackAnalysis:
     if isinstance(payload.get("beatgrid"), dict):
         payload["beatgrid"] = BeatGrid(**payload["beatgrid"])
     payload["structure"] = coerce_structure(payload.get("structure"))
+    payload["cues"] = coerce_cues(payload.get("cues"))
     return TrackAnalysis(**payload)
 
 
@@ -411,6 +443,78 @@ def drop_candidates_for_analysis(analysis: TrackAnalysis) -> list[dict[str, obje
     return candidates[:24]
 
 
+def quantize_cue_ms(ms: int, grid: BeatGrid | None, confidence: float) -> tuple[int, bool]:
+    if grid is None or confidence < 0.45:
+        return max(0, ms), False
+    if confidence >= 0.70 and grid.phrase_ms:
+        return align_to_phrase(ms, grid), True
+    return align_to_beat(ms, grid), True
+
+
+def cue_points_for_analysis(analysis: TrackAnalysis) -> list[CuePoint]:
+    if analysis.cues:
+        return coerce_cues(analysis.cues)
+    grid = analysis.beatgrid or beat_grid(analysis.bpm, analysis.beat_offset_ms)
+    cues: list[CuePoint] = []
+
+    def add(kind: str, label: str, at_ms: int, end_ms: int | None, confidence: float, reason: str, source: str = "detected_structure") -> None:
+        cue_ms, quantized = quantize_cue_ms(at_ms, grid, confidence)
+        cues.append(
+            CuePoint(
+                kind=kind,
+                label=label,
+                at_ms=cue_ms,
+                end_ms=end_ms,
+                confidence=round(max(0.0, min(1.0, confidence)), 3),
+                source=source,
+                quantized=quantized,
+                reason=reason,
+            )
+        )
+
+    for window in coerce_structure(analysis.structure):
+        if window.kind == "intro":
+            add("clean_intro", "clean intro", window.start_ms, window.end_ms, window.confidence, window.reason)
+            if window.end_ms - window.start_ms >= 8_000:
+                add("safe_loop", "intro loop", window.start_ms, window.end_ms, window.confidence, "loopable intro phrase")
+        elif window.kind == "outro":
+            add("clean_outro", "clean outro", window.start_ms, window.end_ms, window.confidence, window.reason)
+            if window.end_ms - window.start_ms >= 8_000:
+                add("safe_loop", "outro loop", window.start_ms, window.end_ms, window.confidence, "loopable outro phrase")
+        elif window.kind == "build":
+            add("build", "build", window.start_ms, window.end_ms, window.confidence, window.reason)
+        elif window.kind == "breakdown":
+            add("vocal", "breakdown/vocal pocket", window.start_ms, window.end_ms, window.confidence, window.reason)
+        elif window.kind == "drop":
+            add("drop", "drop", window.start_ms, window.end_ms, window.confidence, window.reason)
+            add("hook", "hook/drop entry", window.start_ms, window.end_ms, window.confidence, "drop entry usable as hook cue")
+            add("stabs", "stab point", window.start_ms, min(window.end_ms, window.start_ms + 4_000), window.confidence, "drop entry usable for stab routine")
+            add("pre_drop", "pre-drop", max(0, window.start_ms - 1500), window.start_ms, window.confidence, "lead-in point before detected drop")
+
+    deduped: list[CuePoint] = []
+    seen: set[tuple[str, int, str]] = set()
+    for cue in sorted(cues, key=lambda item: (item.at_ms, item.kind, -item.confidence)):
+        key = (cue.kind, cue.at_ms, cue.label)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cue)
+    return deduped[:48]
+
+
+def select_cue(analysis: TrackAnalysis | None, kinds: set[str], *, before_ms: int = 180_000, after_ms: int = 0) -> CuePoint | None:
+    if analysis is None:
+        return None
+    kind_priority = {kind: index for index, kind in enumerate(["drop", "hook", "stabs", "build", "vocal", "clean_intro", "safe_loop", "clean_outro", "pre_drop"])}
+    cues = [
+        cue
+        for cue in cue_points_for_analysis(analysis)
+        if cue.kind in kinds and after_ms <= cue.at_ms < before_ms
+    ]
+    cues.sort(key=lambda item: (kind_priority.get(item.kind, 99), -item.confidence, item.at_ms))
+    return cues[0] if cues else None
+
+
 def load_analysis_from_db(db_path: Path, path: Path) -> TrackAnalysis | None:
     if not db_path.exists():
         return None
@@ -437,6 +541,15 @@ def load_analysis_from_db(db_path: Path, path: Path) -> TrackAnalysis | None:
         FROM track_dj_structure
         WHERE path = ?
         ORDER BY start_ms, kind, confidence DESC
+        """,
+        (identity_path,),
+    ).fetchall()
+    cue_rows = conn.execute(
+        """
+        SELECT kind, label, at_ms, end_ms, confidence, source, quantized, reason
+        FROM track_dj_cues
+        WHERE path = ?
+        ORDER BY at_ms, kind, confidence DESC
         """,
         (identity_path,),
     ).fetchall()
@@ -468,6 +581,19 @@ def load_analysis_from_db(db_path: Path, path: Path) -> TrackAnalysis | None:
                 reason=str(item["reason"] or ""),
             )
             for item in structure_rows
+        ],
+        cues=[
+            CuePoint(
+                kind=str(item["kind"]),
+                label=str(item["label"] or ""),
+                at_ms=int(item["at_ms"]),
+                end_ms=int(item["end_ms"]) if item["end_ms"] is not None else None,
+                confidence=float(item["confidence"]),
+                source=str(item["source"] or ""),
+                quantized=bool(item["quantized"]),
+                reason=str(item["reason"] or ""),
+            )
+            for item in cue_rows
         ],
     )
 
@@ -533,6 +659,7 @@ def store_analysis_in_db(db_path: Path, path: Path, analysis: TrackAnalysis) -> 
     )
     conn.execute("DELETE FROM track_dj_structure WHERE path = ?", (identity_path,))
     conn.execute("DELETE FROM track_dj_drop_candidates WHERE path = ?", (identity_path,))
+    conn.execute("DELETE FROM track_dj_cues WHERE path = ?", (identity_path,))
     conn.executemany(
         """
         INSERT INTO track_dj_structure(path, kind, start_ms, end_ms, confidence, reason)
@@ -559,6 +686,27 @@ def store_analysis_in_db(db_path: Path, path: Path, analysis: TrackAnalysis) -> 
                 str(candidate["source_kind"]),
             )
             for candidate in drop_candidates_for_analysis(analysis)
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO track_dj_cues(path, kind, label, at_ms, end_ms, confidence, source, quantized, reason, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                identity_path,
+                cue.kind,
+                cue.label,
+                cue.at_ms,
+                cue.end_ms,
+                cue.confidence,
+                cue.source,
+                1 if cue.quantized else 0,
+                cue.reason,
+                now,
+            )
+            for cue in cue_points_for_analysis(analysis)
         ],
     )
     conn.commit()
@@ -967,6 +1115,7 @@ def analyze_with_cache(
         if stored is not None:
             row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
             analysis = with_library_tunebat(stored, row)
+            analysis = replace(analysis, cues=cue_points_for_analysis(analysis))
             cache[key] = asdict(analysis)
             changed = True
             analyses.append(analysis)
@@ -975,6 +1124,7 @@ def analyze_with_cache(
             analysis = coerce_analysis(cache[key])
             row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
             analysis = with_library_tunebat(analysis, row)
+            analysis = replace(analysis, cues=cue_points_for_analysis(analysis))
             cache[key] = asdict(analysis)
             store_analysis_in_db(db_path, path, analysis)
             changed = True
@@ -983,6 +1133,7 @@ def analyze_with_cache(
         analysis = analyze_track(path, backend=backend, sample_rate=sample_rate)
         row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
         analysis = with_library_tunebat(analysis, row)
+        analysis = replace(analysis, cues=cue_points_for_analysis(analysis))
         cache[key] = asdict(analysis)
         store_analysis_in_db(db_path, path, analysis)
         analyses.append(analysis)
@@ -1063,6 +1214,15 @@ def main() -> int:
     structure_parser.add_argument("--sample-rate", type=int, default=44_100)
     add_analysis_source_args(structure_parser)
 
+    cues_parser = sub.add_parser("cues")
+    cues_parser.add_argument("tracks", nargs="*")
+    cues_parser.add_argument("--playlist", type=Path)
+    cues_parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
+    cues_parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="auto")
+    cues_parser.add_argument("--sample-rate", type=int, default=44_100)
+    cues_parser.add_argument("--kind", action="append", help="Filter to one or more cue kinds, e.g. --kind drop --kind hook")
+    add_analysis_source_args(cues_parser)
+
     tension_parser = sub.add_parser("tension")
     tension_parser.add_argument("tracks", nargs="*")
     tension_parser.add_argument("--playlist", type=Path)
@@ -1115,7 +1275,28 @@ def main() -> int:
                         "beat_offset_ms": analysis.beat_offset_ms,
                         "beatgrid": beatgrid_asdict(analysis.beatgrid),
                         "structure": [asdict(window) for window in coerce_structure(analysis.structure)],
+                        "cues": [asdict(cue) for cue in cue_points_for_analysis(analysis)],
                         "lean_in_suggestions": suggested_lean_in_windows(coerce_structure(analysis.structure)),
+                    }
+                    for analysis in analyses
+                ],
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "cues":
+        kinds = {str(kind) for kind in args.kind or []}
+        print(
+            json.dumps(
+                [
+                    {
+                        "path": analysis.path,
+                        "cues": [
+                            asdict(cue)
+                            for cue in cue_points_for_analysis(analysis)
+                            if not kinds or cue.kind in kinds
+                        ],
                     }
                     for analysis in analyses
                 ],

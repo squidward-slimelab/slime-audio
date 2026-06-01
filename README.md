@@ -143,6 +143,7 @@ SlimeAudio has a first-pass DJ brain for local files. It persists stable beatgri
 ```bash
 python3 scripts/slime_audio_dj.py analyze ./track-a.wav ./track-b.wav
 python3 scripts/slime_audio_dj.py structure ./track-a.wav
+python3 scripts/slime_audio_dj.py cues ./track-a.wav --kind drop --kind hook
 python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
 python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
 python3 scripts/slime_audio_dj.py rank ./now-playing.wav --playlist runtime/candidates.txt --limit 8
@@ -157,7 +158,13 @@ Transition plans include:
 - phrase wait target, currently 32 beats
 - notes when a transition needs a longer blend or bridge
 
-Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. Running it once stores reusable rows in `track_dj_analysis`, `track_dj_structure`, and `track_dj_drop_candidates`; unchanged files are reused from SQLite before raw audio is decoded again, and size/mtime changes force recomputation. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
+Structure analysis adds a rough beat grid and phrase-aware windows such as intro, breakdown, build, drop, and outro. Running it once stores reusable rows in `track_dj_analysis`, `track_dj_structure`, `track_dj_drop_candidates`, and `track_dj_cues`; unchanged files are reused from SQLite before raw audio is decoded again, and size/mtime changes force recomputation. It also emits lean-in suggestions, especially pre-drop points where commentary can land before getting out of the way. This is heuristic raw-audio analysis, not full Rekordbox-grade beatgrid editing yet, but it gives the agent concrete windows to plan trims, overlays, and vocal drops against.
+
+Cue analysis turns structure windows into named musical start points such as `clean_intro`, `build`, `drop`, `hook`, `stabs`, `vocal`, `clean_outro`, `safe_loop`, and `pre_drop`. High-confidence cues are quantized to phrase boundaries, lower-confidence usable cues are quantized to beats, and routine commands can reference cue kinds instead of raw timestamps:
+
+```bash
+python3 scripts/slime_audio_session.py instant-double-routine runtime/mix-session.json --source-id lead --id lead-hook --recipe hook-tease --cue-kind hook
+```
 
 Tension analysis turns those per-track structure points into absolute mix-session timestamps. `slime_audio_dj.py tension` emits candidate commentary windows with `reason` and `talking_points` fields derived from analysis facts only: track position, detected structure, BPM/key estimates, energy movement, and transition-plan notes. Use that JSON as an input to the commentary planner when a live set should speak around musical pressure instead of generic track starts.
 
@@ -206,7 +213,7 @@ python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json
 
 `beat-jump` is the quantized edit path for doubles and rhythmic offsets. It reads cached BPM/beat-offset analysis, supports +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat moves, and snaps either `--field start` or `--field trim-start` to the track grid. Low-confidence beatgrids are rejected unless `--force` is explicit.
 
-`instant-double-routine` is the named recipe layer for same-track duplicate moves. It starts with recipes that only require existing primitives and refuses recipes whose prerequisites still need slip, brake, reverb, off-beat crossfader gates, or persisted cue points. Raw `instant-double` remains available for hand-built moves; it clones an active or future source clip onto a free deck at the same musical position, preserving path, trim position, rendered tempo/pitch, and gain. Use `--gate-beats` for simple quantized on/off routines and `--cut-source` when the duplicate should trade against the original instead of stacking on top of it; the dashboard labels the duplicate as an instant double instead of a normal song transition.
+`instant-double-routine` is the named recipe layer for same-track duplicate moves. It starts with recipes that only require existing primitives or persisted cue kinds, and refuses recipes whose prerequisites still need slip, brake, reverb, or off-beat crossfader gates. Raw `instant-double` remains available for hand-built moves; it clones an active or future source clip onto a free deck at the same musical position, preserving path, trim position, rendered tempo/pitch, and gain. Use `--cue-kind` on routines when the move should start from a stored hook/drop/build cue rather than a hand-entered timestamp. Use `--gate-beats` for simple quantized on/off routines and `--cut-source` when the duplicate should trade against the original instead of stacking on top of it; the dashboard labels the duplicate as an instant double instead of a normal song transition.
 
 `scripts/slime_audio_session_runner.py` consumes the native timestamped session directly. It renders short future windows, streams them through Snapcast/multicast, reloads `mix-session.json` before each window, and records `session_window_*` history events. Future adds/moves/removes take effect on the next render window without interrupting audio already under the playhead.
 

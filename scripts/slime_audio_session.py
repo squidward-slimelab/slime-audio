@@ -5,6 +5,7 @@ import argparse
 import copy
 import json
 import re
+import sqlite3
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -16,13 +17,14 @@ from typing import Any
 MAX_DECKS = 4
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DJ_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
+DEFAULT_LIBRARY_DB = REPO_ROOT / "runtime" / "slime-music-library.sqlite3"
 DEFAULT_MIN_BEATGRID_CONFIDENCE = 0.45
 SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True},
     "one-beat-trades": {"duration": "00:12.000", "gate_beats": "1", "cut_source": True},
+    "hook-tease": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "cue_kind": "hook"},
 }
 DEFERRED_ROUTINE_RECIPES = {
-    "hook-tease": "requires persisted cue/section jumps (#25)",
     "brake-drop": "requires slip/flux and vinyl brake primitives (#17/#18)",
     "echo-drop": "requires reverb/echo tail rendering (#19)",
     "offbeat-swaps": "requires off-beat crossfader/channel-gate automation (#20)",
@@ -632,6 +634,45 @@ def cached_beatgrid(
     return float(bpm), parse_ms(beat_offset_ms, "beat offset"), confidence
 
 
+def cached_cue(
+    db_path: Path,
+    clip_path: str,
+    kind: str,
+    *,
+    min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
+    force: bool = False,
+) -> tuple[int, float, str]:
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as error:
+        raise ValueError(f"could not open music library db: {db_path}") from error
+    normalized = str(Path(clip_path).resolve())
+    try:
+        rows = conn.execute(
+            """
+            SELECT at_ms, confidence, label
+            FROM track_dj_cues
+            WHERE path = ? AND kind = ?
+            ORDER BY confidence DESC, at_ms ASC
+            """,
+            (normalized, kind),
+        ).fetchall()
+    except sqlite3.Error as error:
+        conn.close()
+        raise ValueError(f"could not read persisted cues from music library db: {db_path}") from error
+    conn.close()
+    if not rows:
+        raise ValueError(f"no persisted {kind} cue for {clip_path}; run slime_audio_dj.py cues/structure first")
+    row = rows[0]
+    confidence = float(row["confidence"] or 0.0)
+    if confidence < min_confidence and not force:
+        raise ValueError(
+            f"persisted cue confidence too low for {clip_path} {kind}: {confidence:.3f} < {min_confidence:.3f}; use --force to override"
+        )
+    return int(row["at_ms"]), confidence, str(row["label"] or kind)
+
+
 def beat_quantum_ms(bpm: float, beats: Fraction) -> float:
     return (60_000 / bpm) / beats.denominator
 
@@ -1071,6 +1112,8 @@ def add_instant_double_routine(
     routine_id: str,
     recipe: str,
     start: str | None,
+    cue_kind: str | None = None,
+    cue_db: Path = DEFAULT_LIBRARY_DB,
     cache_path: Path = DEFAULT_DJ_CACHE,
     min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
     lock_before_ms: int | None = None,
@@ -1089,6 +1132,22 @@ def add_instant_double_routine(
     if collection != "clips":
         raise ValueError(f"instant-double routine source must be a clip: {source_id}")
     source = payload[collection][index]
+    resolved_cue_kind = cue_kind or str(config.get("cue_kind") or "")
+    if start is not None and cue_kind is not None:
+        raise ValueError("--start and --cue-kind cannot both be used")
+    cue_label = None
+    if start is None and resolved_cue_kind:
+        cue_ms, _cue_confidence, cue_label = cached_cue(
+            cue_db,
+            str(source.get("path") or ""),
+            resolved_cue_kind,
+            min_confidence=min_confidence,
+            force=force,
+        )
+        source_start_ms = event_start_ms(source)
+        source_trim_ms = parse_ms(source.get("trim_start_ms", source.get("trim_start", 0)), f"clip {source_id} trim_start")
+        start_ms = source_start_ms + int(round((cue_ms - source_trim_ms) / clip_tempo_factor(source)))
+        start = str(start_ms)
     cached_beatgrid(
         cache_path,
         str(source.get("path") or ""),
@@ -1118,6 +1177,10 @@ def add_instant_double_routine(
             clip["routine_id"] = routine_id
             clip["routine_recipe"] = recipe
             clip["source_technique"] = "instant-doubles"
+            if resolved_cue_kind:
+                clip["cue_kind"] = resolved_cue_kind
+            if cue_label:
+                clip["cue_label"] = cue_label
             break
     for automation in next_payload.get("automations", []):
         if automation.get("target") in {double_id, source_id} and str(automation.get("planner_role", "")).startswith("instant-double"):
@@ -1273,6 +1336,8 @@ def main() -> int:
     instant_double_routine_parser.add_argument("--id", required=True)
     instant_double_routine_parser.add_argument("--recipe", required=True)
     instant_double_routine_parser.add_argument("--start")
+    instant_double_routine_parser.add_argument("--cue-kind")
+    instant_double_routine_parser.add_argument("--cue-db", type=Path, default=DEFAULT_LIBRARY_DB)
     instant_double_routine_parser.add_argument("--cache", type=Path, default=DEFAULT_DJ_CACHE)
     instant_double_routine_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
     add_live_edit_args(instant_double_routine_parser)
@@ -1428,6 +1493,8 @@ def main() -> int:
                 routine_id=args.id,
                 recipe=args.recipe,
                 start=args.start,
+                cue_kind=args.cue_kind,
+                cue_db=args.cue_db,
                 cache_path=args.cache,
                 min_confidence=args.min_confidence,
                 lock_before_ms=lock_before_ms,
