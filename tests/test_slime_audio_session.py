@@ -1101,6 +1101,105 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["routine_recipe"], "echo-drop")
         self.assertEqual(payload["effects"][0]["tail_ms"], 3500)
 
+    def test_cli_slip_records_resume_position_for_manipulated_deck(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "trim_start": 10_000, "duration": 30_000},
+                            {"id": "scratch", "deck": "deck-2", "path": "/music/a.flac", "start": 8_000, "trim_start": 18_000, "duration": 2_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "slip",
+                        str(path),
+                        "--id",
+                        "scratch-slip",
+                        "--source-id",
+                        "source",
+                        "--target-id",
+                        "scratch",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:02.000",
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(session.slip_events), 1)
+        self.assertEqual(session.slip_events[0].source_start_ms, 18_000)
+        self.assertEqual(session.slip_events[0].source_resume_ms, 20_000)
+        self.assertEqual(payload["slip_events"][0]["target_clip_id"], "scratch")
+
+    def test_cli_brake_drop_routine_adds_slip_and_one_beat_vinyl_brake(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-brake",
+                        "--recipe",
+                        "brake-drop",
+                        "--start",
+                        "00:12.000",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            session = load_session(path)
+            double = next(clip for clip in payload["clips"] if clip["id"] == "routine-brake-double")
+
+        self.assertEqual(payload["effects"][0]["type"], "vinyl_brake")
+        self.assertEqual(payload["effects"][0]["duration_ms"], 500)
+        self.assertEqual(payload["effects"][0]["target"], "routine-brake-double")
+        self.assertEqual(double["gain_db"], -96.0)
+        self.assertEqual(payload["slip_events"][0]["source_clip_id"], "source")
+        self.assertEqual(payload["slip_events"][0]["target_clip_id"], "routine-brake-double")
+        self.assertEqual(payload["slip_events"][0]["source_start_ms"], 20_000)
+        self.assertEqual(payload["slip_events"][0]["source_resume_ms"], 20_500)
+        self.assertEqual(session.effects[0].type, "vinyl_brake")
+
     def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -1152,7 +1251,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double_payload["cue_kind"], "hook")
         self.assertEqual(double_payload["routine_recipe"], "hook-tease")
 
-    def test_cli_instant_double_routine_refuses_missing_prerequisite_recipe(self):
+    def test_cli_instant_double_routine_refuses_unknown_recipe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             path = temp / "session.json"
@@ -1172,7 +1271,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(ValueError, "not available yet"):
+            with self.assertRaisesRegex(ValueError, "unknown instant-double recipe"):
                 run_cli(
                     [
                         "slime_audio_session.py",
@@ -1183,7 +1282,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
                         "--id",
                         "routine-b",
                         "--recipe",
-                        "brake-drop",
+                        "not-a-real-routine",
                         "--cache",
                         str(cache),
                     ]

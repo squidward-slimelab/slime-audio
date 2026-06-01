@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, load_payload, load_session, parse_ms
+from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, SlipEvent, load_payload, load_session, parse_ms
 
 
 def seconds(ms: int) -> str:
@@ -135,6 +135,14 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         if effect.end_ms > from_ms and (window_end_ms is None or effect.start_ms < window_end_ms)
     ]
     effects = [effect for effect in effects if effect.duration_ms > 0]
+    slip_events = [
+        replace(
+            event,
+            start_ms=event.start_ms - from_ms,
+        )
+        for event in session.slip_events
+        if event.end_ms > from_ms and (window_end_ms is None or event.start_ms < window_end_ms)
+    ]
     automations = [
         shifted for automation in session.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
     ]
@@ -145,6 +153,7 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         mic_lean_ins=mic_lean_ins,
         effects=effects,
         automations=automations,
+        slip_events=slip_events,
         fader_routing=session.fader_routing,
     )
 
@@ -209,6 +218,7 @@ def session_duration_ms(session: MixSession, lean_in_default_ms: int = 5000) -> 
     ends = [clip.end_ms for clip in session.clips if clip.end_ms is not None]
     ends.extend(lean_in.start_ms + lean_in_default_ms for lean_in in session.mic_lean_ins)
     ends.extend(effect.end_ms for effect in session.effects)
+    ends.extend(event.end_ms for event in session.slip_events)
     for param in ("duck_volume", "lowpass_hz"):
         ends.extend(end for _start, end, _value in collect_master_automation(session, param))
     return max(ends, default=1000)
@@ -354,7 +364,48 @@ def zita_reverb_filter(effect: EffectEvent) -> str:
     return f"ladspa=file={ZITA_REVERB_LADSPA}:plugin=zita-reverb:controls='{controls}'"
 
 
+def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
+    relative_start_ms = max(0, effect.start_ms - clip.start_ms)
+    source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
+    total_ms = max(1, effect.duration_ms)
+    slices = max(6, min(16, total_ms // 90))
+    slice_ms = total_ms / slices
+    source_cursor_ms = float(source_start_ms)
+    parts: list[str] = []
+    labels: list[str] = []
+    for index in range(slices):
+        progress = index / max(1, slices - 1)
+        speed = max(0.08, (1.0 - progress) ** 1.65)
+        out_ms = slice_ms if index < slices - 1 else total_ms - (slice_ms * (slices - 1))
+        source_ms = max(2.0, out_ms * speed * tempo_factor(clip))
+        part_label = f"{label}part{index}"
+        volume = max(0.0, 1.0 - (progress ** 1.35))
+        parts.append(
+            f"[{input_index}:a]"
+            f"atrim=start={seconds(int(round(source_cursor_ms)))}:duration={source_ms / 1000:.3f},"
+            "asetpts=PTS-STARTPTS,"
+            f"asetrate={max(1, int(round(sample_rate * speed)))},"
+            f"aresample={sample_rate},"
+            f"atrim=duration={out_ms / 1000:.3f},"
+            f"volume={volume:.6f},"
+            f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
+            f"[{part_label}]"
+        )
+        labels.append(f"[{part_label}]")
+        source_cursor_ms += source_ms
+    parts.append(
+        f"{''.join(labels)}concat=n={slices}:v=0:a=1,"
+        f"volume={effect.wet:.6f},"
+        f"volume={gain_multiplier(effect.gain_db):.6f},"
+        f"adelay={effect.start_ms}:all=1,"
+        f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]"
+    )
+    return ";".join(parts)
+
+
 def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
+    if effect.type == "vinyl_brake":
+        return vinyl_brake_stream_filter(effect, clip, input_index, label, sample_rate, channels)
     relative_start_ms = max(0, effect.start_ms - clip.start_ms)
     source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
     source_duration_ms = max(1, int(round(effect.duration_ms * tempo_factor(clip))))

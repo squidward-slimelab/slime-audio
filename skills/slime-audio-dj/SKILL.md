@@ -203,6 +203,13 @@ Keep this skill generic and portable.
      --start 01:24.000 \
      --cache runtime/dj-analysis-cache.json
 
+   python3 scripts/slime_audio_live_edit.py instant-double-routine \
+     --source-id lead-hook \
+     --id lead-hook-brake \
+     --recipe brake-drop \
+     --start 01:24.000 \
+     --cache runtime/dj-analysis-cache.json
+
    python3 scripts/slime_audio_live_edit.py instant-double \
      --source-id lead-hook \
      --id lead-hook-double \
@@ -230,11 +237,20 @@ Keep this skill generic and portable.
      --target lead-hook \
      --start 01:31.500 \
      --duration 00:02.000
+
+   python3 scripts/slime_audio_live_edit.py add-effect \
+     --id lead-hook-brake \
+     --type vinyl_brake \
+     --target lead-hook \
+     --start 01:31.500 \
+     --duration 00:00.500
    ```
 
    The `offbeat-swaps` recipe uses the cached beatgrid to hold the original side through the downbeat, then schedules the first fader swap on the half-beat and alternates source/double sides on each following half-beat. For raw custom moves, `--gate-offset-beats 1/2` applies the same first-cut-on-the-AND timing.
 
-   DJ effects live in the session `effects` collection, not in hidden renderer flags. The available rendered primitives are `echo` and `reverb`, with `start`, `duration`, `tail_ms`, `wet`, `gain_db`, `delay_ms`, `feedback`, and optional `lowpass_hz`; reverb also accepts `room_size` and `damping`. Reverb command defaults are mapped from Audacity's Reverb defaults: room size 75%, pre-delay 10 ms, reverberance/damping 50%, wet/dry gain -1 dB, and full stereo width. Use `--preset` for Audacity factory starting points: `defaults`, `acoustic`, `ambience`, `artificial`, `clean`, `modern`, `vocal-i`, `vocal-ii`, `dance-vocal`, `modern-vocal`, `voice-tail`, `bathroom`, `small-room-bright`, `small-room-dark`, `medium-room`, `large-room`, `church-hall`, `cathedral`, and `big-cave`. Presets are not taste decisions: pick one as a starting color, then override `--wet`, `--tail-ms`, `--gain-db`, `--room-size`, `--feedback`, or `--damping` for the moment. Effects can target a clip, `deck:<name>`, `master`, or `all`; prefer clip/deck sends unless the whole master really needs space. Mixdown renders only the wet copy, pads the configured tail, and renders reverb with the LADSPA `zita-reverb` plugin from the tiny `rev-plugins` package. The dashboard shows effects on their own lane. Use `echo-stabs` when a named double should carry an echo tail, `echo-drop` when it should carry a reverb tail, and raw `add-effect` for custom planned moves. Slip and brake-specific recipes should still refuse until their tickets land.
+   Slip/flux gestures live in `slip_events`, not hidden timeline edits. A slip event marks a temporary manipulated target clip while the source clip continues underneath, and stores `source_start_ms` plus `source_resume_ms` so the deck can return to the source position it would have reached naturally. Use `brake-drop` for the normal one-beat brake routine on an instant double; use raw `slip` only when hand-building a custom manipulated clip.
+
+   DJ effects live in the session `effects` collection, not in hidden renderer flags. The available rendered primitives are `echo`, `reverb`, and `vinyl_brake`, with `start`, `duration`, `tail_ms`, `wet`, `gain_db`, `delay_ms`, `feedback`, and optional `lowpass_hz`; reverb also accepts `room_size` and `damping`. Reverb command defaults are mapped from Audacity's Reverb defaults: room size 75%, pre-delay 10 ms, reverberance/damping 50%, wet/dry gain -1 dB, and full stereo width. Use `--preset` for Audacity factory starting points: `defaults`, `acoustic`, `ambience`, `artificial`, `clean`, `modern`, `vocal-i`, `vocal-ii`, `dance-vocal`, `modern-vocal`, `voice-tail`, `bathroom`, `small-room-bright`, `small-room-dark`, `medium-room`, `large-room`, `church-hall`, `cathedral`, and `big-cave`. Presets are not taste decisions: pick one as a starting color, then override `--wet`, `--tail-ms`, `--gain-db`, `--room-size`, `--feedback`, or `--damping` for the moment. Effects can target a clip, `deck:<name>`, `master`, or `all`; prefer clip/deck sends unless the whole master really needs space. Mixdown renders only the wet copy, pads the configured tail, and renders reverb with the LADSPA `zita-reverb` plugin from the tiny `rev-plugins` package. Vinyl brake renders a deterministic speed/pitch slowdown to silence; keep it short and beat-derived, and prefer applying it to a slip-backed duplicate rather than a main source. The dashboard shows effects and slip gestures on their own lane. Use `echo-stabs` when a named double should carry an echo tail, `echo-drop` when it should carry a reverb tail, `brake-drop` when a duplicate should brake while the source keeps moving, and raw `add-effect` for custom planned moves.
 
    Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
 

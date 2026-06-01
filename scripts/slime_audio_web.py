@@ -131,7 +131,26 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "routine_recipe": effect.get("routine_recipe"),
             }
         )
-    kind_order = {"song": 0, "vocal": 1, "effect": 2, "automation": 3}
+    for slip in payload.get("slip_events", payload.get("slipEvents", [])):
+        start_ms = parse_ms(slip.get("start_ms", slip.get("start", 0)), "slip start")
+        duration_ms = parse_ms(slip.get("duration_ms", slip.get("duration", 0)), "slip duration")
+        events.append(
+            {
+                "id": slip.get("id"),
+                "kind": "slip",
+                "deck": "effects",
+                "source_clip_id": slip.get("source_clip_id"),
+                "target_clip_id": slip.get("target_clip_id"),
+                "source_start_ms": slip.get("source_start_ms"),
+                "source_resume_ms": slip.get("source_resume_ms"),
+                "start_ms": start_ms,
+                "duration_ms": duration_ms,
+                "end_ms": start_ms + duration_ms,
+                "routine_id": slip.get("routine_id"),
+                "routine_recipe": slip.get("routine_recipe"),
+            }
+        )
+    kind_order = {"song": 0, "vocal": 1, "effect": 2, "slip": 3, "automation": 4}
     return sorted(
         events,
         key=lambda item: (
@@ -195,6 +214,8 @@ def display_title_for_event(event: dict[str, Any]) -> str:
         return str(event.get("text") or event.get("id") or "vocal")
     if event.get("kind") == "effect":
         return str(event.get("effect_type") or event.get("id") or "effect")
+    if event.get("kind") == "slip":
+        return "slip/flux"
     return str(event.get("title") or event.get("id") or "untitled")
 
 
@@ -212,6 +233,9 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         tail_ms = int(event.get("tail_ms") or 0)
         tail = f" | tail {tail_ms / 1000:.1f}s" if tail_ms else ""
         return f"{target}{tail}{recipe}"
+    if event.get("kind") == "slip":
+        recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
+        return f"{event.get('target_clip_id')} over {event.get('source_clip_id')}{recipe}"
     if event.get("routine_recipe"):
         return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":

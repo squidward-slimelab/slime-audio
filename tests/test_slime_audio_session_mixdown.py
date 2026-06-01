@@ -360,6 +360,47 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("adelay=9000:all=1", filters)
         self.assertEqual(session_duration_ms(session), 15_000)
 
+    def test_mixdown_filter_renders_vinyl_brake_effect(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-1",
+                                "path": "/music/lead.flac",
+                                "start": 5_000,
+                                "trim_start": 12_000,
+                                "duration": 8_000,
+                            }
+                        ],
+                        "effects": [
+                            {
+                                "id": "lead-brake",
+                                "type": "vinyl_brake",
+                                "target": "lead",
+                                "start": 9_000,
+                                "duration": 1_000,
+                                "wet": 1.0,
+                                "gain_db": 0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            filters = build_filter_complex(session, {}, 48_000, 2)
+
+        self.assertIn("asetrate=48000", filters)
+        self.assertIn("asetrate=3840", filters)
+        self.assertIn("concat=n=11:v=0:a=1", filters)
+        self.assertIn("adelay=9000:all=1", filters)
+
     def test_crossfader_gain_maps_hard_sides_and_center(self):
         self.assertEqual(crossfader_gain(-1.0, "A"), 1.0)
         self.assertEqual(crossfader_gain(-1.0, "B"), 0.0)

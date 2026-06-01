@@ -138,7 +138,7 @@ def main() -> int:
 
     effect_parser = sub.add_parser("add-effect", parents=[common])
     effect_parser.add_argument("--id", required=True)
-    effect_parser.add_argument("--type", choices=["echo", "reverb"], default="echo")
+    effect_parser.add_argument("--type", choices=["echo", "reverb", "vinyl_brake"], default="echo")
     effect_parser.add_argument("--preset", choices=sorted(session.AUDACITY_REVERB_PRESETS))
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
@@ -151,6 +151,13 @@ def main() -> int:
     effect_parser.add_argument("--room-size", type=float)
     effect_parser.add_argument("--damping", type=float)
     effect_parser.add_argument("--lowpass-hz", type=float)
+
+    slip_parser = sub.add_parser("slip", parents=[common])
+    slip_parser.add_argument("--id", required=True)
+    slip_parser.add_argument("--source-id", required=True)
+    slip_parser.add_argument("--target-id", required=True)
+    slip_parser.add_argument("--start", required=True)
+    slip_parser.add_argument("--duration", required=True)
 
     fader_routing_parser = sub.add_parser("fader-routing", parents=[common])
     fader_routing_parser.add_argument("--assign", action="append", required=True)
@@ -287,6 +294,21 @@ def main() -> int:
                 damping=effect_args["damping"],
                 lowpass_hz=effect_args["lowpass_hz"],
                 preset=effect_args["preset"],
+                lock_before_ms=lock_ms,
+                force=args.force,
+            ),
+        )
+    elif args.command == "slip":
+        args.affected_ids = [args.id, args.source_id, args.target_id]
+        apply_edit(
+            args,
+            lambda payload, lock_ms: session.add_slip_event(
+                payload,
+                slip_id=args.id,
+                source_id=args.source_id,
+                target_id=args.target_id,
+                start=args.start,
+                duration=args.duration,
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),

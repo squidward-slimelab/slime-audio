@@ -217,6 +217,35 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(effect["display_meta"], "lead | tail 3.0s | echo-stabs")
         self.assertIn("effects", [lane["id"] for lane in lanes])
 
+    def test_dashboard_shows_slip_events_on_effects_lane(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1", "deck-2"],
+            "clips": [
+                {"id": "lead", "deck": "deck-1", "path": "/music/A/B/a.flac", "start": 0, "duration": 20_000},
+                {"id": "lead-brake", "deck": "deck-2", "path": "/music/A/B/a.flac", "start": 8_000, "duration": 500},
+            ],
+            "slip_events": [
+                {
+                    "id": "lead-slip",
+                    "source_clip_id": "lead",
+                    "target_clip_id": "lead-brake",
+                    "start": 8_000,
+                    "duration": 500,
+                    "source_start_ms": 8_000,
+                    "source_resume_ms": 8_500,
+                    "routine_recipe": "brake-drop",
+                }
+            ],
+        }
+
+        events = [web.normalize_event(event, None) for event in web.session_events(payload)]
+        slip = next(event for event in events if event["kind"] == "slip")
+
+        self.assertEqual(slip["lane"], "effects")
+        self.assertEqual(slip["display_title"], "slip/flux")
+        self.assertEqual(slip["display_meta"], "lead-brake over lead | brake-drop")
+
     def test_dashboard_view_model_separates_stale_missing_and_future_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"

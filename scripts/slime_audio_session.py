@@ -26,9 +26,9 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
     "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "effect": "reverb"},
+    "brake-drop": {"duration": "00:04.000", "gate_beats": "1", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True},
 }
 DEFERRED_ROUTINE_RECIPES = {
-    "brake-drop": "requires slip/flux and vinyl brake primitives (#17/#18)",
 }
 AUTOMATABLE_PARAMS = {
     "gain_db",
@@ -126,6 +126,23 @@ class EffectEvent:
         return self.start_ms + self.duration_ms + self.tail_ms
 
 
+@dataclass(frozen=True)
+class SlipEvent:
+    id: str
+    source_clip_id: str
+    target_clip_id: str
+    start_ms: int
+    duration_ms: int
+    source_start_ms: int
+    source_resume_ms: int
+    routine_id: str | None = None
+    routine_recipe: str | None = None
+
+    @property
+    def end_ms(self) -> int:
+        return self.start_ms + self.duration_ms
+
+
 AUDACITY_REVERB_PRESETS: dict[str, dict[str, Any]] = {
     # Audacity 3.7 factory presets. Source order is:
     # room size, pre-delay, reverberance, hf damping, tone low, tone high,
@@ -162,6 +179,15 @@ EFFECT_DEFAULTS: dict[str, dict[str, Any]] = {
         "damping": 0.45,
     },
     "reverb": AUDACITY_REVERB_PRESETS["defaults"],
+    "vinyl_brake": {
+        "tail_ms": 0,
+        "wet": 1.0,
+        "gain_db": 0.0,
+        "delay_ms": 1,
+        "feedback": 0.0,
+        "room_size": 0.6,
+        "damping": 0.45,
+    },
 }
 
 
@@ -195,11 +221,17 @@ class MixSession:
     mic_lean_ins: list[MicLeanIn]
     effects: list[EffectEvent]
     automations: list[Automation]
+    slip_events: list[SlipEvent] = field(default_factory=list)
     fader_routing: dict[str, str] = field(default_factory=dict)
 
     @property
     def event_ids(self) -> set[str]:
-        return {clip.id for clip in self.clips} | {lean_in.id for lean_in in self.mic_lean_ins} | {effect.id for effect in self.effects}
+        return (
+            {clip.id for clip in self.clips}
+            | {lean_in.id for lean_in in self.mic_lean_ins}
+            | {effect.id for effect in self.effects}
+            | {event.id for event in self.slip_events}
+        )
 
 
 def parse_ms(value: Any, field_name: str) -> int:
@@ -322,8 +354,8 @@ def parse_effect_event(payload: dict[str, Any]) -> EffectEvent:
     target = str(payload.get("target") or "").strip()
     if not effect_id:
         raise ValueError("effect id is required")
-    if effect_type not in {"echo", "reverb"}:
-        raise ValueError(f"effect {effect_id} type must be echo or reverb")
+    if effect_type not in {"echo", "reverb", "vinyl_brake"}:
+        raise ValueError(f"effect {effect_id} type must be echo, reverb, or vinyl_brake")
     if not target:
         raise ValueError(f"effect {effect_id} target is required")
     return EffectEvent(
@@ -341,6 +373,31 @@ def parse_effect_event(payload: dict[str, Any]) -> EffectEvent:
         damping=max(0.0, min(1.0, float(payload.get("damping", 0.45)))),
         lowpass_hz=float(payload["lowpass_hz"]) if payload.get("lowpass_hz") is not None else None,
         preset=str(payload["preset"]) if payload.get("preset") else None,
+        routine_id=str(payload["routine_id"]) if payload.get("routine_id") else None,
+        routine_recipe=str(payload["routine_recipe"]) if payload.get("routine_recipe") else None,
+    )
+
+
+def parse_slip_event(payload: dict[str, Any]) -> SlipEvent:
+    event_id = str(payload.get("id") or "").strip()
+    source_clip_id = str(payload.get("source_clip_id") or payload.get("source") or "").strip()
+    target_clip_id = str(payload.get("target_clip_id") or payload.get("target") or "").strip()
+    if not event_id:
+        raise ValueError("slip event id is required")
+    if not source_clip_id:
+        raise ValueError(f"slip event {event_id} source_clip_id is required")
+    if not target_clip_id:
+        raise ValueError(f"slip event {event_id} target_clip_id is required")
+    start_ms = parse_ms(payload.get("start_ms", payload.get("start", 0)), f"slip event {event_id} start")
+    duration_ms = parse_ms(payload.get("duration_ms", payload.get("duration", 0)), f"slip event {event_id} duration")
+    return SlipEvent(
+        id=event_id,
+        source_clip_id=source_clip_id,
+        target_clip_id=target_clip_id,
+        start_ms=start_ms,
+        duration_ms=duration_ms,
+        source_start_ms=parse_ms(payload.get("source_start_ms", 0), f"slip event {event_id} source start"),
+        source_resume_ms=parse_ms(payload.get("source_resume_ms", 0), f"slip event {event_id} source resume"),
         routine_id=str(payload["routine_id"]) if payload.get("routine_id") else None,
         routine_recipe=str(payload["routine_recipe"]) if payload.get("routine_recipe") else None,
     )
@@ -527,6 +584,7 @@ def parse_session(payload: dict[str, Any]) -> MixSession:
         mic_lean_ins=[parse_mic_lean_in(item) for item in payload.get("mic_lean_ins", payload.get("micLeanIns", []))],
         effects=[parse_effect_event(item) for item in payload.get("effects", [])],
         automations=[parse_automation(item) for item in payload.get("automations", [])],
+        slip_events=[parse_slip_event(item) for item in payload.get("slip_events", payload.get("slipEvents", []))],
         fader_routing=parse_fader_routing(payload, decks),
     )
     validate_session(session)
@@ -549,7 +607,7 @@ def validate_session(session: MixSession) -> None:
             errors.append(f"fader routing uses unknown deck {deck}")
         if side not in FADER_SIDES:
             errors.append(f"fader routing for {deck} must be A, B, or THRU")
-    for event_id in [clip.id for clip in session.clips] + [lean_in.id for lean_in in session.mic_lean_ins]:
+    for event_id in [clip.id for clip in session.clips] + [lean_in.id for lean_in in session.mic_lean_ins] + [effect.id for effect in session.effects] + [event.id for event in session.slip_events]:
         if event_id in seen_ids:
             errors.append(f"duplicate event id: {event_id}")
         seen_ids.add(event_id)
@@ -594,6 +652,19 @@ def validate_session(session: MixSession) -> None:
             errors.append(f"effect {effect.id} tail must be non-negative")
         if effect.delay_ms <= 0:
             errors.append(f"effect {effect.id} delay must be positive")
+
+    clip_ids = {clip.id for clip in session.clips}
+    for event in session.slip_events:
+        if event.source_clip_id not in clip_ids:
+            errors.append(f"slip event {event.id} source clip does not exist: {event.source_clip_id}")
+        if event.target_clip_id not in clip_ids:
+            errors.append(f"slip event {event.id} target clip does not exist: {event.target_clip_id}")
+        if event.start_ms < 0:
+            errors.append(f"slip event {event.id} starts before zero")
+        if event.duration_ms <= 0:
+            errors.append(f"slip event {event.id} duration must be positive")
+        if event.source_resume_ms < event.source_start_ms:
+            errors.append(f"slip event {event.id} resume must be after source start")
 
     for automation in session.automations:
         validate_automation(automation, session.event_ids, errors, prefix="session")
@@ -646,6 +717,7 @@ def session_summary(session: MixSession) -> dict[str, Any]:
         "clip_count": len(session.clips),
         "mic_lean_in_count": len(session.mic_lean_ins),
         "effect_count": len(session.effects),
+        "slip_event_count": len(session.slip_events),
         "automation_count": (
             len(session.automations)
             + sum(len(clip.automations) for clip in session.clips)
@@ -719,6 +791,7 @@ def template_session() -> dict[str, Any]:
             }
         ],
         "effects": [],
+        "slip_events": [],
     }
 
 
@@ -727,11 +800,11 @@ def base_payload(path: Path, create: bool) -> dict[str, Any]:
         return load_payload(path)
     if not create:
         raise FileNotFoundError(path)
-    return {"version": 1, "decks": [f"deck-{index + 1}" for index in range(MAX_DECKS)], "clips": [], "mic_lean_ins": [], "effects": [], "automations": []}
+    return {"version": 1, "decks": [f"deck-{index + 1}" for index in range(MAX_DECKS)], "clips": [], "mic_lean_ins": [], "effects": [], "slip_events": [], "automations": []}
 
 
 def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None:
-    for collection in ("clips", "mic_lean_ins", "effects"):
+    for collection in ("clips", "mic_lean_ins", "effects", "slip_events"):
         for index, item in enumerate(payload.get(collection, [])):
             if item.get("id") == event_id:
                 return collection, index
@@ -1200,6 +1273,57 @@ def add_effect_event(
     return next_payload
 
 
+def add_slip_event(
+    payload: dict[str, Any],
+    *,
+    slip_id: str,
+    source_id: str,
+    target_id: str,
+    start: str,
+    duration: str,
+    routine_id: str | None = None,
+    routine_recipe: str | None = None,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    next_payload = copy.deepcopy(payload)
+    require_unique_event_id(next_payload, slip_id)
+    source_found = find_event(next_payload, source_id)
+    target_found = find_event(next_payload, target_id)
+    if source_found is None:
+        raise ValueError(f"source clip does not exist: {source_id}")
+    if target_found is None:
+        raise ValueError(f"target clip does not exist: {target_id}")
+    if source_found[0] != "clips" or target_found[0] != "clips":
+        raise ValueError("slip source and target must both be clips")
+    source = next_payload[source_found[0]][source_found[1]]
+    start_ms = parse_ms(start, f"slip event {slip_id} start")
+    duration_ms = parse_ms(duration, f"slip event {slip_id} duration")
+    guard_live_edit(label=f"slip event {slip_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+    source_start_ms, source_end_ms = clip_start_end(next_payload, source_id)
+    if start_ms < source_start_ms or start_ms + duration_ms > source_end_ms:
+        raise ValueError(f"slip event {slip_id} must stay inside source clip {source_id}")
+    trim_start_ms = parse_ms(source.get("trim_start_ms", source.get("trim_start", 0)), f"clip {source_id} trim_start")
+    source_start = trim_start_ms + int(round((start_ms - source_start_ms) * clip_tempo_factor(source)))
+    source_resume = source_start + int(round(duration_ms * clip_tempo_factor(source)))
+    slip_event: dict[str, Any] = {
+        "id": slip_id,
+        "source_clip_id": source_id,
+        "target_clip_id": target_id,
+        "start_ms": start_ms,
+        "duration_ms": duration_ms,
+        "source_start_ms": source_start,
+        "source_resume_ms": source_resume,
+    }
+    if routine_id is not None:
+        slip_event["routine_id"] = routine_id
+    if routine_recipe is not None:
+        slip_event["routine_recipe"] = routine_recipe
+    next_payload.setdefault("slip_events", []).append(slip_event)
+    parse_session(next_payload)
+    return next_payload
+
+
 def clip_start_end(payload: dict[str, Any], clip_id: str) -> tuple[int, int]:
     found = find_event(payload, clip_id)
     if found is None:
@@ -1433,7 +1557,7 @@ def add_instant_double_routine(
         source_trim_ms = parse_ms(source.get("trim_start_ms", source.get("trim_start", 0)), f"clip {source_id} trim_start")
         start_ms = source_start_ms + int(round((cue_ms - source_trim_ms) / clip_tempo_factor(source)))
         start = str(start_ms)
-    cached_beatgrid(
+    bpm, _beat_offset_ms, _confidence = cached_beatgrid(
         cache_path,
         str(source.get("path") or ""),
         min_confidence=min_confidence,
@@ -1468,24 +1592,46 @@ def add_instant_double_routine(
             if cue_label:
                 clip["cue_label"] = cue_label
             break
-    if config.get("effect") in {"echo", "reverb"}:
+    if config.get("slip"):
+        double_clip = next(clip for clip in next_payload.get("clips", []) if clip.get("id") == double_id)
+        effect_beats = str(config.get("effect_beats", "1"))
+        slip_duration_ms = max(1, int(round(float(Fraction(effect_beats)) * (60_000 / bpm))))
+        next_payload = add_slip_event(
+            next_payload,
+            slip_id=f"{routine_id}-slip",
+            source_id=source_id,
+            target_id=double_id,
+            start=str(double_clip["start_ms"]),
+            duration=str(slip_duration_ms),
+            routine_id=routine_id,
+            routine_recipe=recipe,
+            lock_before_ms=lock_before_ms,
+            force=force,
+        )
+    if config.get("effect") in {"echo", "reverb", "vinyl_brake"}:
         double_clip = next(clip for clip in next_payload.get("clips", []) if clip.get("id") == double_id)
         effect_type = str(config["effect"])
+        if effect_type == "vinyl_brake":
+            double_clip["gain_db"] = -96.0
+        effect_duration = str(double_clip["duration_ms"])
+        if effect_type == "vinyl_brake":
+            effect_beats = str(config.get("effect_beats", "1"))
+            effect_duration = str(max(1, int(round(float(Fraction(effect_beats)) * (60_000 / bpm)))))
         next_payload = add_effect_event(
             next_payload,
             effect_id=f"{routine_id}-{effect_type}",
             effect_type=effect_type,
             target=double_id,
             start=str(double_clip["start_ms"]),
-            duration=str(double_clip["duration_ms"]),
-            tail_ms=3500 if effect_type == "reverb" else 2000,
-            wet=0.82 if effect_type == "reverb" else 0.42,
-            gain_db=-2.0 if effect_type == "reverb" else -9.0,
-            delay_ms=10 if effect_type == "reverb" else 375,
-            feedback=0.5 if effect_type == "reverb" else 0.38,
+            duration=effect_duration,
+            tail_ms=3500 if effect_type == "reverb" else 0 if effect_type == "vinyl_brake" else 2000,
+            wet=1.0 if effect_type == "vinyl_brake" else 0.82 if effect_type == "reverb" else 0.42,
+            gain_db=0.0 if effect_type == "vinyl_brake" else -2.0 if effect_type == "reverb" else -9.0,
+            delay_ms=1 if effect_type == "vinyl_brake" else 10 if effect_type == "reverb" else 375,
+            feedback=0.0 if effect_type == "vinyl_brake" else 0.5 if effect_type == "reverb" else 0.38,
             room_size=0.75,
             damping=0.5,
-            lowpass_hz=None if effect_type == "reverb" else 4200.0,
+            lowpass_hz=None if effect_type in {"reverb", "vinyl_brake"} else 4200.0,
             routine_id=routine_id,
             routine_recipe=recipe,
             lock_before_ms=lock_before_ms,
@@ -1662,7 +1808,7 @@ def main() -> int:
     effect_parser = sub.add_parser("add-effect")
     effect_parser.add_argument("session", type=Path)
     effect_parser.add_argument("--id", required=True)
-    effect_parser.add_argument("--type", choices=["echo", "reverb"], default="echo")
+    effect_parser.add_argument("--type", choices=["echo", "reverb", "vinyl_brake"], default="echo")
     effect_parser.add_argument("--preset", choices=sorted(AUDACITY_REVERB_PRESETS))
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
@@ -1676,6 +1822,15 @@ def main() -> int:
     effect_parser.add_argument("--damping", type=float)
     effect_parser.add_argument("--lowpass-hz", type=float)
     add_live_edit_args(effect_parser)
+
+    slip_parser = sub.add_parser("slip")
+    slip_parser.add_argument("session", type=Path)
+    slip_parser.add_argument("--id", required=True)
+    slip_parser.add_argument("--source-id", required=True)
+    slip_parser.add_argument("--target-id", required=True)
+    slip_parser.add_argument("--start", required=True)
+    slip_parser.add_argument("--duration", required=True)
+    add_live_edit_args(slip_parser)
 
     fader_routing_parser = sub.add_parser("fader-routing")
     fader_routing_parser.add_argument("session", type=Path)
@@ -1889,6 +2044,24 @@ def main() -> int:
             ),
         )
         print(f"added effect {args.id}")
+        return 0
+
+    if args.command == "slip":
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            add_slip_event(
+                load_payload(args.session),
+                slip_id=args.id,
+                source_id=args.source_id,
+                target_id=args.target_id,
+                start=args.start,
+                duration=args.duration,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
+        )
+        print(f"added slip event {args.id}")
         return 0
 
     if args.command == "fader-routing":
