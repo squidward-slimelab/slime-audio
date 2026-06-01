@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import load_session, parse_ms, playhead_ms_from_state, session_summary
+from slime_audio_session import AUDACITY_REVERB_PRESETS, load_session, parse_ms, playhead_ms_from_state, session_summary
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
@@ -954,6 +954,57 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["feedback"], 0.5)
         self.assertEqual(payload["effects"][0]["room_size"], 0.75)
         self.assertEqual(payload["effects"][0]["damping"], 0.5)
+
+    def test_cli_add_effect_can_start_from_audacity_reverb_preset(self):
+        self.assertIn("church-hall", AUDACITY_REVERB_PRESETS)
+        self.assertIn("big-cave", AUDACITY_REVERB_PRESETS)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "lead", "deck": "deck-1", "path": "/music/lead.flac", "start": 0, "duration": 30_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "add-effect",
+                        str(path),
+                        "--id",
+                        "lead-hall",
+                        "--type",
+                        "reverb",
+                        "--preset",
+                        "church-hall",
+                        "--target",
+                        "lead",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:02.000",
+                        "--wet",
+                        "0.62",
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["effects"][0]["preset"], "church-hall")
+        self.assertEqual(payload["effects"][0]["tail_ms"], 7500)
+        self.assertEqual(payload["effects"][0]["delay_ms"], 32)
+        self.assertEqual(payload["effects"][0]["feedback"], 0.6)
+        self.assertEqual(payload["effects"][0]["room_size"], 0.9)
+        self.assertEqual(payload["effects"][0]["damping"], 0.5)
+        self.assertEqual(payload["effects"][0]["wet"], 0.62)
 
     def test_cli_instant_double_routine_can_add_echo_effect(self):
         with tempfile.TemporaryDirectory() as temp_dir:

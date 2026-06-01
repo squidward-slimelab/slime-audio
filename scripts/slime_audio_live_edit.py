@@ -139,6 +139,7 @@ def main() -> int:
     effect_parser = sub.add_parser("add-effect", parents=[common])
     effect_parser.add_argument("--id", required=True)
     effect_parser.add_argument("--type", choices=["echo", "reverb"], default="echo")
+    effect_parser.add_argument("--preset", choices=sorted(session.AUDACITY_REVERB_PRESETS))
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
     effect_parser.add_argument("--duration", required=True)
@@ -285,6 +286,7 @@ def main() -> int:
                 room_size=effect_args["room_size"],
                 damping=effect_args["damping"],
                 lowpass_hz=effect_args["lowpass_hz"],
+                preset=effect_args["preset"],
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),

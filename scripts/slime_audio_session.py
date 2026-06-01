@@ -117,6 +117,7 @@ class EffectEvent:
     room_size: float = 0.6
     damping: float = 0.45
     lowpass_hz: float | None = None
+    preset: str | None = None
     routine_id: str | None = None
     routine_recipe: str | None = None
 
@@ -124,6 +125,31 @@ class EffectEvent:
     def end_ms(self) -> int:
         return self.start_ms + self.duration_ms + self.tail_ms
 
+
+AUDACITY_REVERB_PRESETS: dict[str, dict[str, Any]] = {
+    # Audacity 3.7 factory presets. Source order is:
+    # room size, pre-delay, reverberance, hf damping, tone low, tone high,
+    # wet gain, dry gain, stereo width, wet only.
+    "defaults": {"room_size": 0.75, "delay_ms": 10, "feedback": 0.5, "damping": 0.5, "wet": 0.89, "gain_db": -1.0, "tail_ms": 6000},
+    "acoustic": {"room_size": 0.50, "delay_ms": 10, "feedback": 0.75, "damping": 1.0, "wet": 1.0, "gain_db": -14.0, "tail_ms": 4500},
+    "ambience": {"room_size": 1.0, "delay_ms": 55, "feedback": 1.0, "damping": 0.5, "wet": 1.0, "gain_db": 0.0, "tail_ms": 8000},
+    "artificial": {"room_size": 0.81, "delay_ms": 99, "feedback": 0.23, "damping": 0.62, "wet": 1.0, "gain_db": -4.0, "tail_ms": 5000},
+    "clean": {"room_size": 0.50, "delay_ms": 10, "feedback": 0.75, "damping": 1.0, "wet": 1.0, "gain_db": -18.0, "tail_ms": 4500},
+    "modern": {"room_size": 0.50, "delay_ms": 10, "feedback": 0.75, "damping": 1.0, "wet": 1.0, "gain_db": -15.0, "tail_ms": 4500},
+    "vocal-i": {"room_size": 0.70, "delay_ms": 20, "feedback": 0.40, "damping": 0.99, "wet": 1.0, "gain_db": -12.0, "tail_ms": 5000},
+    "vocal-ii": {"room_size": 0.50, "delay_ms": 0, "feedback": 0.50, "damping": 0.99, "wet": 1.0, "gain_db": -1.0, "tail_ms": 5000},
+    "dance-vocal": {"room_size": 0.90, "delay_ms": 2, "feedback": 0.60, "damping": 0.77, "wet": 1.0, "gain_db": -10.0, "tail_ms": 6500},
+    "modern-vocal": {"room_size": 0.66, "delay_ms": 27, "feedback": 0.77, "damping": 0.08, "wet": 1.0, "gain_db": -10.0, "tail_ms": 6000},
+    "voice-tail": {"room_size": 0.66, "delay_ms": 27, "feedback": 1.0, "damping": 0.08, "wet": 1.0, "gain_db": -6.0, "tail_ms": 7000},
+    "bathroom": {"room_size": 0.16, "delay_ms": 8, "feedback": 0.80, "damping": 0.0, "wet": 1.0, "gain_db": -6.0, "tail_ms": 3000},
+    "small-room-bright": {"room_size": 0.30, "delay_ms": 10, "feedback": 0.50, "damping": 0.50, "wet": 1.0, "gain_db": -1.0, "tail_ms": 3500},
+    "small-room-dark": {"room_size": 0.30, "delay_ms": 10, "feedback": 0.50, "damping": 0.50, "wet": 1.0, "gain_db": -1.0, "tail_ms": 3500},
+    "medium-room": {"room_size": 0.75, "delay_ms": 10, "feedback": 0.40, "damping": 0.50, "wet": 1.0, "gain_db": -1.0, "tail_ms": 5000},
+    "large-room": {"room_size": 0.85, "delay_ms": 10, "feedback": 0.40, "damping": 0.50, "wet": 1.0, "gain_db": 0.0, "tail_ms": 6000},
+    "church-hall": {"room_size": 0.90, "delay_ms": 32, "feedback": 0.60, "damping": 0.50, "wet": 1.0, "gain_db": 0.0, "tail_ms": 7500},
+    "cathedral": {"room_size": 0.90, "delay_ms": 16, "feedback": 0.90, "damping": 0.50, "wet": 1.0, "gain_db": 0.0, "tail_ms": 8000},
+    "big-cave": {"room_size": 1.0, "delay_ms": 55, "feedback": 1.0, "damping": 0.50, "wet": 1.0, "gain_db": 5.0, "tail_ms": 9000},
+}
 
 EFFECT_DEFAULTS: dict[str, dict[str, Any]] = {
     "echo": {
@@ -135,17 +161,7 @@ EFFECT_DEFAULTS: dict[str, dict[str, Any]] = {
         "room_size": 0.6,
         "damping": 0.45,
     },
-    # Audacity Reverb defaults: Room Size 75%, Pre-delay 10ms,
-    # Reverberance/Damping 50%, Wet/Dry Gain -1dB, Stereo Width 100%.
-    "reverb": {
-        "tail_ms": 6000,
-        "wet": 0.89,
-        "gain_db": -1.0,
-        "delay_ms": 10,
-        "feedback": 0.5,
-        "room_size": 0.75,
-        "damping": 0.5,
-    },
+    "reverb": AUDACITY_REVERB_PRESETS["defaults"],
 }
 
 
@@ -154,14 +170,19 @@ def effect_default(effect_type: str, field: str) -> Any:
 
 
 def resolved_effect_args(args: argparse.Namespace) -> dict[str, Any]:
+    preset = getattr(args, "preset", None)
+    if preset and args.type != "reverb":
+        raise ValueError("--preset is only supported for reverb effects")
+    defaults = AUDACITY_REVERB_PRESETS[preset] if preset else EFFECT_DEFAULTS.get(args.type, EFFECT_DEFAULTS["echo"])
     return {
-        "tail_ms": args.tail_ms if args.tail_ms is not None else effect_default(args.type, "tail_ms"),
-        "wet": args.wet if args.wet is not None else effect_default(args.type, "wet"),
-        "gain_db": args.gain_db if args.gain_db is not None else effect_default(args.type, "gain_db"),
-        "delay_ms": args.delay_ms if args.delay_ms is not None else effect_default(args.type, "delay_ms"),
-        "feedback": args.feedback if args.feedback is not None else effect_default(args.type, "feedback"),
-        "room_size": args.room_size if args.room_size is not None else effect_default(args.type, "room_size"),
-        "damping": args.damping if args.damping is not None else effect_default(args.type, "damping"),
+        "preset": preset,
+        "tail_ms": args.tail_ms if args.tail_ms is not None else defaults["tail_ms"],
+        "wet": args.wet if args.wet is not None else defaults["wet"],
+        "gain_db": args.gain_db if args.gain_db is not None else defaults["gain_db"],
+        "delay_ms": args.delay_ms if args.delay_ms is not None else defaults["delay_ms"],
+        "feedback": args.feedback if args.feedback is not None else defaults["feedback"],
+        "room_size": args.room_size if args.room_size is not None else defaults["room_size"],
+        "damping": args.damping if args.damping is not None else defaults["damping"],
         "lowpass_hz": args.lowpass_hz,
     }
 
@@ -319,6 +340,7 @@ def parse_effect_event(payload: dict[str, Any]) -> EffectEvent:
         room_size=max(0.0, min(1.0, float(payload.get("room_size", 0.6)))),
         damping=max(0.0, min(1.0, float(payload.get("damping", 0.45)))),
         lowpass_hz=float(payload["lowpass_hz"]) if payload.get("lowpass_hz") is not None else None,
+        preset=str(payload["preset"]) if payload.get("preset") else None,
         routine_id=str(payload["routine_id"]) if payload.get("routine_id") else None,
         routine_recipe=str(payload["routine_recipe"]) if payload.get("routine_recipe") else None,
     )
@@ -1141,6 +1163,7 @@ def add_effect_event(
     room_size: float = 0.6,
     damping: float = 0.45,
     lowpass_hz: float | None = None,
+    preset: str | None = None,
     routine_id: str | None = None,
     routine_recipe: str | None = None,
     lock_before_ms: int | None = None,
@@ -1166,6 +1189,8 @@ def add_effect_event(
     }
     if lowpass_hz is not None:
         effect["lowpass_hz"] = lowpass_hz
+    if preset is not None:
+        effect["preset"] = preset
     if routine_id is not None:
         effect["routine_id"] = routine_id
     if routine_recipe is not None:
@@ -1638,6 +1663,7 @@ def main() -> int:
     effect_parser.add_argument("session", type=Path)
     effect_parser.add_argument("--id", required=True)
     effect_parser.add_argument("--type", choices=["echo", "reverb"], default="echo")
+    effect_parser.add_argument("--preset", choices=sorted(AUDACITY_REVERB_PRESETS))
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
     effect_parser.add_argument("--duration", required=True)
@@ -1857,6 +1883,7 @@ def main() -> int:
                 room_size=effect_args["room_size"],
                 damping=effect_args["damping"],
                 lowpass_hz=effect_args["lowpass_hz"],
+                preset=effect_args["preset"],
                 lock_before_ms=lock_before_ms,
                 force=args.force,
             ),
