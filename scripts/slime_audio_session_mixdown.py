@@ -370,6 +370,10 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
         )
     elif effect.type == "reverb":
         filters.append(reverb_filter(effect))
+    if effect.tail_ms:
+        fade_ms = min(effect.tail_ms, max(250, min(2000, effect.tail_ms // 3)))
+        fade_start_ms = max(0, total_duration_ms - fade_ms)
+        filters.append(f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(fade_ms)}")
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
         filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
