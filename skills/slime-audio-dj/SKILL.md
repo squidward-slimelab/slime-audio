@@ -228,20 +228,12 @@ Keep this skill generic and portable.
      --type reverb \
      --target lead-hook \
      --start 01:31.500 \
-     --duration 00:02.000 \
-     --tail-ms 3500 \
-     --wet 0.38 \
-     --gain-db -10 \
-     --delay-ms 80 \
-     --feedback 0.46 \
-     --room-size 0.72 \
-     --damping 0.55 \
-     --lowpass-hz 5200
+     --duration 00:02.000
    ```
 
    The `offbeat-swaps` recipe uses the cached beatgrid to hold the original side through the downbeat, then schedules the first fader swap on the half-beat and alternates source/double sides on each following half-beat. For raw custom moves, `--gate-offset-beats 1/2` applies the same first-cut-on-the-AND timing.
 
-   DJ effects live in the session `effects` collection, not in hidden renderer flags. The available rendered primitives are `echo` and `reverb`, with `start`, `duration`, `tail_ms`, `wet`, `gain_db`, `delay_ms`, `feedback`, and optional `lowpass_hz`; reverb also accepts `room_size` and `damping`. Effects can target a clip, `deck:<name>`, `master`, or `all`, but prefer clip/deck sends with negative `gain_db` so reverb does not wash out the master. Mixdown renders only the wet copy, pads the configured tail, and renders reverb with the LADSPA `zita-reverb` plugin from the tiny `rev-plugins` package. The dashboard shows effects on their own lane. Use `echo-stabs` when a named double should carry an echo tail, `echo-drop` when it should carry a reverb tail, and raw `add-effect` for custom planned moves. Slip and brake-specific recipes should still refuse until their tickets land.
+   DJ effects live in the session `effects` collection, not in hidden renderer flags. The available rendered primitives are `echo` and `reverb`, with `start`, `duration`, `tail_ms`, `wet`, `gain_db`, `delay_ms`, `feedback`, and optional `lowpass_hz`; reverb also accepts `room_size` and `damping`. Reverb command defaults are mapped from Audacity's Reverb defaults: room size 75%, pre-delay 10 ms, reverberance/damping 50%, wet/dry gain -1 dB, and full stereo width. Effects can target a clip, `deck:<name>`, `master`, or `all`; prefer clip/deck sends unless the whole master really needs space. Mixdown renders only the wet copy, pads the configured tail, and renders reverb with the LADSPA `zita-reverb` plugin from the tiny `rev-plugins` package. The dashboard shows effects on their own lane. Use `echo-stabs` when a named double should carry an echo tail, `echo-drop` when it should carry a reverb tail, and raw `add-effect` for custom planned moves. Slip and brake-specific recipes should still refuse until their tickets land.
 
    Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
 

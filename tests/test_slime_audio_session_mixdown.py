@@ -352,7 +352,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("atrim=start=16.000:duration=2.000", filters)
         self.assertIn("apad=pad_dur=4.000", filters)
         self.assertIn("ladspa=file=/usr/lib/ladspa/zita-reverbs.so:plugin=zita-reverb", filters)
-        self.assertIn("controls='0.080|220|5.074|4.414|7325.000|160|0|2500|0|1'", filters)
+        self.assertIn("controls='0.080|220|3.351|2.949|5223.303|160|0|2500|0|1'", filters)
         self.assertIn("volume=0.380000", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=4.000", filters)
         self.assertIn("atrim=duration=6.000", filters)

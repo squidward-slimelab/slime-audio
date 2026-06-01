@@ -911,6 +911,50 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["room_size"], 0.72)
         self.assertEqual(payload["effects"][0]["damping"], 0.55)
 
+    def test_cli_add_effect_uses_audacity_like_reverb_defaults(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "lead", "deck": "deck-1", "path": "/music/lead.flac", "start": 0, "duration": 30_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "add-effect",
+                        str(path),
+                        "--id",
+                        "lead-reverb",
+                        "--type",
+                        "reverb",
+                        "--target",
+                        "lead",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:02.000",
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["effects"][0]["tail_ms"], 6000)
+        self.assertEqual(payload["effects"][0]["wet"], 0.89)
+        self.assertEqual(payload["effects"][0]["gain_db"], -1.0)
+        self.assertEqual(payload["effects"][0]["delay_ms"], 10)
+        self.assertEqual(payload["effects"][0]["feedback"], 0.5)
+        self.assertEqual(payload["effects"][0]["room_size"], 0.75)
+        self.assertEqual(payload["effects"][0]["damping"], 0.5)
+
     def test_cli_instant_double_routine_can_add_echo_effect(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

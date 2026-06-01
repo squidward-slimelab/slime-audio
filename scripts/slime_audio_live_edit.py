@@ -142,13 +142,13 @@ def main() -> int:
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
     effect_parser.add_argument("--duration", required=True)
-    effect_parser.add_argument("--tail-ms", type=int, default=2000)
-    effect_parser.add_argument("--wet", type=float, default=0.35)
-    effect_parser.add_argument("--gain-db", type=float, default=-6.0)
-    effect_parser.add_argument("--delay-ms", type=int, default=375)
-    effect_parser.add_argument("--feedback", type=float, default=0.35)
-    effect_parser.add_argument("--room-size", type=float, default=0.6)
-    effect_parser.add_argument("--damping", type=float, default=0.45)
+    effect_parser.add_argument("--tail-ms", type=int)
+    effect_parser.add_argument("--wet", type=float)
+    effect_parser.add_argument("--gain-db", type=float)
+    effect_parser.add_argument("--delay-ms", type=int)
+    effect_parser.add_argument("--feedback", type=float)
+    effect_parser.add_argument("--room-size", type=float)
+    effect_parser.add_argument("--damping", type=float)
     effect_parser.add_argument("--lowpass-hz", type=float)
 
     fader_routing_parser = sub.add_parser("fader-routing", parents=[common])
@@ -267,6 +267,7 @@ def main() -> int:
         apply_edit(args, lambda payload, _lock_ms: session.set_fader_routing(payload, assignments))
     elif args.command == "add-effect":
         args.affected_ids = [args.id, args.target]
+        effect_args = session.resolved_effect_args(args)
         apply_edit(
             args,
             lambda payload, lock_ms: session.add_effect_event(
@@ -276,14 +277,14 @@ def main() -> int:
                 target=args.target,
                 start=args.start,
                 duration=args.duration,
-                tail_ms=args.tail_ms,
-                wet=args.wet,
-                gain_db=args.gain_db,
-                delay_ms=args.delay_ms,
-                feedback=args.feedback,
-                room_size=args.room_size,
-                damping=args.damping,
-                lowpass_hz=args.lowpass_hz,
+                tail_ms=effect_args["tail_ms"],
+                wet=effect_args["wet"],
+                gain_db=effect_args["gain_db"],
+                delay_ms=effect_args["delay_ms"],
+                feedback=effect_args["feedback"],
+                room_size=effect_args["room_size"],
+                damping=effect_args["damping"],
+                lowpass_hz=effect_args["lowpass_hz"],
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),

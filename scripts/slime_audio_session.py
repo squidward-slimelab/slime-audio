@@ -125,6 +125,47 @@ class EffectEvent:
         return self.start_ms + self.duration_ms + self.tail_ms
 
 
+EFFECT_DEFAULTS: dict[str, dict[str, Any]] = {
+    "echo": {
+        "tail_ms": 2000,
+        "wet": 0.35,
+        "gain_db": -6.0,
+        "delay_ms": 375,
+        "feedback": 0.35,
+        "room_size": 0.6,
+        "damping": 0.45,
+    },
+    # Audacity Reverb defaults: Room Size 75%, Pre-delay 10ms,
+    # Reverberance/Damping 50%, Wet/Dry Gain -1dB, Stereo Width 100%.
+    "reverb": {
+        "tail_ms": 6000,
+        "wet": 0.89,
+        "gain_db": -1.0,
+        "delay_ms": 10,
+        "feedback": 0.5,
+        "room_size": 0.75,
+        "damping": 0.5,
+    },
+}
+
+
+def effect_default(effect_type: str, field: str) -> Any:
+    return EFFECT_DEFAULTS.get(effect_type, EFFECT_DEFAULTS["echo"])[field]
+
+
+def resolved_effect_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "tail_ms": args.tail_ms if args.tail_ms is not None else effect_default(args.type, "tail_ms"),
+        "wet": args.wet if args.wet is not None else effect_default(args.type, "wet"),
+        "gain_db": args.gain_db if args.gain_db is not None else effect_default(args.type, "gain_db"),
+        "delay_ms": args.delay_ms if args.delay_ms is not None else effect_default(args.type, "delay_ms"),
+        "feedback": args.feedback if args.feedback is not None else effect_default(args.type, "feedback"),
+        "room_size": args.room_size if args.room_size is not None else effect_default(args.type, "room_size"),
+        "damping": args.damping if args.damping is not None else effect_default(args.type, "damping"),
+        "lowpass_hz": args.lowpass_hz,
+    }
+
+
 @dataclass(frozen=True)
 class MixSession:
     version: int
@@ -1413,13 +1454,13 @@ def add_instant_double_routine(
             start=str(double_clip["start_ms"]),
             duration=str(double_clip["duration_ms"]),
             tail_ms=3500 if effect_type == "reverb" else 2000,
-            wet=0.38 if effect_type == "reverb" else 0.42,
-            gain_db=-10.0 if effect_type == "reverb" else -9.0,
-            delay_ms=80 if effect_type == "reverb" else 375,
-            feedback=0.46 if effect_type == "reverb" else 0.38,
-            room_size=0.72,
-            damping=0.55,
-            lowpass_hz=5200.0 if effect_type == "reverb" else 4200.0,
+            wet=0.82 if effect_type == "reverb" else 0.42,
+            gain_db=-2.0 if effect_type == "reverb" else -9.0,
+            delay_ms=10 if effect_type == "reverb" else 375,
+            feedback=0.5 if effect_type == "reverb" else 0.38,
+            room_size=0.75,
+            damping=0.5,
+            lowpass_hz=None if effect_type == "reverb" else 4200.0,
             routine_id=routine_id,
             routine_recipe=recipe,
             lock_before_ms=lock_before_ms,
@@ -1600,13 +1641,13 @@ def main() -> int:
     effect_parser.add_argument("--target", required=True)
     effect_parser.add_argument("--start", required=True)
     effect_parser.add_argument("--duration", required=True)
-    effect_parser.add_argument("--tail-ms", type=int, default=2000)
-    effect_parser.add_argument("--wet", type=float, default=0.35)
-    effect_parser.add_argument("--gain-db", type=float, default=-6.0)
-    effect_parser.add_argument("--delay-ms", type=int, default=375)
-    effect_parser.add_argument("--feedback", type=float, default=0.35)
-    effect_parser.add_argument("--room-size", type=float, default=0.6)
-    effect_parser.add_argument("--damping", type=float, default=0.45)
+    effect_parser.add_argument("--tail-ms", type=int)
+    effect_parser.add_argument("--wet", type=float)
+    effect_parser.add_argument("--gain-db", type=float)
+    effect_parser.add_argument("--delay-ms", type=int)
+    effect_parser.add_argument("--feedback", type=float)
+    effect_parser.add_argument("--room-size", type=float)
+    effect_parser.add_argument("--damping", type=float)
     effect_parser.add_argument("--lowpass-hz", type=float)
     add_live_edit_args(effect_parser)
 
@@ -1798,6 +1839,7 @@ def main() -> int:
 
     if args.command == "add-effect":
         lock_before_ms = live_edit_lock(args)
+        effect_args = resolved_effect_args(args)
         write_payload(
             args.session,
             add_effect_event(
@@ -1807,14 +1849,14 @@ def main() -> int:
                 target=args.target,
                 start=args.start,
                 duration=args.duration,
-                tail_ms=args.tail_ms,
-                wet=args.wet,
-                gain_db=args.gain_db,
-                delay_ms=args.delay_ms,
-                feedback=args.feedback,
-                room_size=args.room_size,
-                damping=args.damping,
-                lowpass_hz=args.lowpass_hz,
+                tail_ms=effect_args["tail_ms"],
+                wet=effect_args["wet"],
+                gain_db=effect_args["gain_db"],
+                delay_ms=effect_args["delay_ms"],
+                feedback=effect_args["feedback"],
+                room_size=effect_args["room_size"],
+                damping=effect_args["damping"],
+                lowpass_hz=effect_args["lowpass_hz"],
                 lock_before_ms=lock_before_ms,
                 force=args.force,
             ),

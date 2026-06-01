@@ -333,9 +333,10 @@ def zita_reverb_filter(effect: EffectEvent) -> str:
     room = max(0.1, min(1.0, effect.room_size))
     damping = max(0.0, min(1.0, effect.damping))
     pre_delay = max(0.02, min(0.1, effect.delay_ms / 1000.0))
-    rt_mid = max(1.0, min(8.0, 1.0 + room * 3.4 + effect.feedback * 2.1))
-    rt_low = max(1.0, min(8.0, rt_mid * (1.02 + room * 0.18)))
-    damping_hz = max(1500.0, min(24000.0, 12000.0 - damping * 8500.0))
+    reverberance = max(0.0, min(1.0, effect.feedback))
+    rt_mid = max(1.0, min(8.0, 1.35 + room * 1.55 + reverberance * 1.05))
+    rt_low = max(1.0, min(8.0, rt_mid * (1.05 + room * 0.12)))
+    damping_hz = max(1500.0, min(24000.0, 24000.0 * ((1500.0 / 24000.0) ** damping)))
     controls = "|".join(
         [
             f"{pre_delay:.3f}",
