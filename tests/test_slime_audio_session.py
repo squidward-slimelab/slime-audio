@@ -535,6 +535,136 @@ class SlimeAudioSessionTests(unittest.TestCase):
                     ]
                 )
 
+    def test_cli_instant_double_clones_current_clip_position_to_free_deck(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/current.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3"],
+                        "clips": [
+                            {
+                                "id": "current",
+                                "deck": "deck-1",
+                                "path": track,
+                                "start": 0,
+                                "trim_start": 2_000,
+                                "duration": 60_000,
+                                "tempo_shift_pct": 5,
+                                "pitch_shift_semitones": 1,
+                                "gain_db": -3,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double",
+                        str(path),
+                        "--source-id",
+                        "current",
+                        "--id",
+                        "current-double",
+                        "--start",
+                        "00:10.000",
+                        "--duration",
+                        "00:08.000",
+                        "--gate-beats",
+                        "1/2",
+                        "--cut-source",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+            double = next(clip for clip in session.clips if clip.id == "current-double")
+
+        self.assertEqual(double.deck, "deck-2")
+        self.assertEqual(double.path, track)
+        self.assertEqual(double.trim_start_ms, 12_500)
+        self.assertEqual(double.tempo_shift_pct, 5)
+        self.assertEqual(double.pitch_shift_semitones, 1)
+        self.assertEqual(double.gain_db, -3)
+        self.assertEqual(len([automation for automation in session.automations if automation.target == "current-double"]), 32)
+        self.assertEqual(len([automation for automation in session.automations if automation.target == "current"]), 32)
+
+    def test_cli_instant_double_clones_future_clip_and_rejects_busy_deck(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "future",
+                                "deck": "deck-1",
+                                "path": "/music/future.flac",
+                                "start": "01:00.000",
+                                "trim_start": "00:20.000",
+                                "duration": "00:40.000",
+                            },
+                            {"id": "busy", "deck": "deck-2", "path": "/music/busy.flac", "start": "01:10.000", "duration": "00:12.000"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not free"):
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double",
+                        str(path),
+                        "--source-id",
+                        "future",
+                        "--id",
+                        "future-double-busy",
+                        "--start",
+                        "01:12.000",
+                        "--deck",
+                        "deck-2",
+                    ]
+                )
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double",
+                        str(path),
+                        "--source-id",
+                        "future",
+                        "--id",
+                        "future-double",
+                        "--start",
+                        "01:24.000",
+                        "--duration",
+                        "00:08.000",
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+            double = next(clip for clip in session.clips if clip.id == "future-double")
+
+        self.assertEqual(double.deck, "deck-2")
+        self.assertEqual(double.trim_start_ms, 44_000)
+        self.assertEqual(double.duration_ms, 8_000)
+
     def test_cli_mashup_bed_adds_filter_and_gain_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"

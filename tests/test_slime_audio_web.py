@@ -96,6 +96,25 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(events[0]["title"], "a")
         self.assertEqual(events[-1]["text"], "hello")
 
+    def test_dashboard_labels_instant_double_clips(self):
+        event = web.normalize_event(
+            web.session_clip_event(
+                {
+                    "id": "double-a",
+                    "deck": "deck-2",
+                    "path": "/music/Artist/Album/a.flac",
+                    "start": "00:08.000",
+                    "duration": "00:08.000",
+                    "planner_role": "instant-double",
+                    "source_clip_id": "a",
+                }
+            ),
+            None,
+        )
+
+        self.assertEqual(event["planner_role"], "instant-double")
+        self.assertEqual(event["display_meta"], "instant double of a")
+
     def test_dashboard_view_model_separates_stale_missing_and_future_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"

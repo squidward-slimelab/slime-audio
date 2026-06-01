@@ -899,6 +899,161 @@ def clip_start_end(payload: dict[str, Any], clip_id: str) -> tuple[int, int]:
     return start_ms, start_ms + parse_ms(duration, f"clip {clip_id} duration")
 
 
+def clip_tempo_factor(clip: dict[str, Any]) -> float:
+    factor = 1 + (float(clip.get("tempo_shift_pct", 0.0)) / 100)
+    if factor <= 0:
+        raise ValueError(f"clip {clip.get('id')} tempo_shift_pct produces non-positive tempo")
+    return factor
+
+
+def choose_free_deck(payload: dict[str, Any], start_ms: int, end_ms: int, *, avoid: str | None = None) -> str:
+    decks = [str(deck) for deck in payload.get("decks", []) if str(deck)]
+    if not decks:
+        decks = [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+    for deck in decks:
+        if deck == avoid:
+            continue
+        if not any(
+            str(clip.get("deck")) == deck
+            and event_start_ms(clip) < end_ms
+            and start_ms < clip_start_end(payload, str(clip.get("id")))[1]
+            for clip in payload.get("clips", [])
+            if clip.get("duration_ms", clip.get("duration")) is not None
+        ):
+            return deck
+    raise ValueError(f"no compatible free deck/window for instant double {start_ms}ms-{end_ms}ms")
+
+
+def add_instant_double(
+    payload: dict[str, Any],
+    *,
+    source_id: str,
+    double_id: str,
+    start: str | None,
+    deck: str | None,
+    duration: str,
+    gain_db: float | None,
+    fade_in_ms: int,
+    fade_out_ms: int,
+    gate_beats: str | None,
+    cut_source: bool,
+    cache_path: Path = DEFAULT_DJ_CACHE,
+    min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    next_payload = copy.deepcopy(payload)
+    require_unique_event_id(next_payload, double_id)
+    found = find_event(next_payload, source_id)
+    if found is None:
+        raise ValueError(f"event id does not exist: {source_id}")
+    collection, index = found
+    if collection != "clips":
+        raise ValueError(f"instant double source must be a clip: {source_id}")
+    source = next_payload[collection][index]
+    source_start_ms, source_end_ms = clip_start_end(next_payload, source_id)
+    start_ms = parse_ms(start, "instant double start") if start is not None else source_start_ms
+    duration_ms = parse_ms(duration, "instant double duration")
+    end_ms = start_ms + duration_ms
+    if start_ms < source_start_ms or start_ms >= source_end_ms:
+        raise ValueError(f"instant double start must land inside source clip {source_id}")
+    if end_ms > source_end_ms:
+        raise ValueError(f"instant double cannot outlive source clip {source_id}")
+    guard_live_edit(label=f"instant double {double_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+
+    trim_start_ms = parse_ms(source.get("trim_start_ms", source.get("trim_start", 0)), f"clip {source_id} trim_start")
+    trim_start_ms += int(round((start_ms - source_start_ms) * clip_tempo_factor(source)))
+    target_deck = deck or choose_free_deck(next_payload, start_ms, end_ms, avoid=str(source.get("deck") or ""))
+    if deck is not None:
+        decks = [str(item) for item in next_payload.get("decks", [])]
+        if deck not in decks:
+            raise ValueError(f"unknown deck: {deck}")
+        if any(
+            str(clip.get("deck")) == deck
+            and event_start_ms(clip) < end_ms
+            and start_ms < clip_start_end(next_payload, str(clip.get("id")))[1]
+            for clip in next_payload.get("clips", [])
+            if clip.get("duration_ms", clip.get("duration")) is not None
+        ):
+            raise ValueError(f"deck {deck} is not free for instant double {start_ms}ms-{end_ms}ms")
+
+    double_clip: dict[str, Any] = {
+        "id": double_id,
+        "deck": target_deck,
+        "path": source.get("path"),
+        "start_ms": start_ms,
+        "trim_start_ms": trim_start_ms,
+        "duration_ms": duration_ms,
+        "gain_db": float(source.get("gain_db", 0.0)) if gain_db is None else gain_db,
+        "tempo_shift_pct": float(source.get("tempo_shift_pct", 0.0)),
+        "pitch_shift_semitones": int(source.get("pitch_shift_semitones", 0)),
+        "fade_in_ms": fade_in_ms,
+        "fade_out_ms": fade_out_ms,
+        "kind": "planner-double",
+        "planner_role": "instant-double",
+        "source_clip_id": source_id,
+    }
+    next_payload.setdefault("clips", []).append(double_clip)
+
+    if gate_beats:
+        bpm, _beat_offset_ms, _confidence = cached_beatgrid(
+            cache_path,
+            str(source.get("path") or ""),
+            min_confidence=min_confidence,
+            force=force,
+        )
+        gate_ms = max(1, int(round(float(parse_beats(gate_beats)) * (60_000 / bpm))))
+        automations = next_payload.setdefault("automations", [])
+        at_ms = start_ms
+        gate_index = 0
+        while at_ms < end_ms:
+            on_end = min(end_ms, at_ms + gate_ms)
+            off_end = min(end_ms, on_end + gate_ms)
+            automations.append(
+                {
+                    "target": double_id,
+                    "param": "gain_db",
+                    "planner_role": "instant-double-gate",
+                    "points": [{"at_ms": at_ms, "value": double_clip["gain_db"]}, {"at_ms": on_end, "value": double_clip["gain_db"]}],
+                }
+            )
+            if cut_source:
+                automations.append(
+                    {
+                        "target": source_id,
+                        "param": "gain_db",
+                        "planner_role": "instant-double-source-cut",
+                        "points": [{"at_ms": at_ms, "value": -96.0}, {"at_ms": on_end, "value": -96.0}],
+                    }
+                )
+            if off_end > on_end:
+                automations.append(
+                    {
+                        "target": double_id,
+                        "param": "gain_db",
+                        "planner_role": "instant-double-gate",
+                        "points": [{"at_ms": on_end, "value": -96.0}, {"at_ms": off_end, "value": -96.0}],
+                    }
+                )
+                if cut_source:
+                    automations.append(
+                        {
+                            "target": source_id,
+                            "param": "gain_db",
+                            "planner_role": "instant-double-source-cut",
+                            "points": [
+                                {"at_ms": on_end, "value": float(source.get("gain_db", 0.0))},
+                                {"at_ms": off_end, "value": float(source.get("gain_db", 0.0))},
+                            ],
+                        }
+                    )
+            gate_index += 1
+            at_ms = start_ms + (gate_index * gate_ms * 2)
+
+    parse_session(next_payload)
+    return next_payload
+
+
 def add_mashup_bed(
     payload: dict[str, Any],
     *,
@@ -1023,6 +1178,22 @@ def main() -> int:
     beat_jump_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
     add_live_edit_args(beat_jump_parser)
 
+    instant_double_parser = sub.add_parser("instant-double")
+    instant_double_parser.add_argument("session", type=Path)
+    instant_double_parser.add_argument("--source-id", required=True)
+    instant_double_parser.add_argument("--id", required=True)
+    instant_double_parser.add_argument("--start")
+    instant_double_parser.add_argument("--deck")
+    instant_double_parser.add_argument("--duration", default="00:08.000")
+    instant_double_parser.add_argument("--gain-db", type=float)
+    instant_double_parser.add_argument("--fade-in-ms", type=int, default=0)
+    instant_double_parser.add_argument("--fade-out-ms", type=int, default=0)
+    instant_double_parser.add_argument("--gate-beats", help="Optional on/off gate size, e.g. 1/2 or 1.")
+    instant_double_parser.add_argument("--cut-source", action="store_true", help="When gating, cut the source clip while the double is open.")
+    instant_double_parser.add_argument("--cache", type=Path, default=DEFAULT_DJ_CACHE)
+    instant_double_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
+    add_live_edit_args(instant_double_parser)
+
     automate_parser = sub.add_parser("automate")
     automate_parser.add_argument("session", type=Path)
     automate_parser.add_argument("--target", required=True)
@@ -1137,6 +1308,31 @@ def main() -> int:
             ),
         )
         print(f"beat-jumped {args.id} {args.beats} beats on {args.field}")
+        return 0
+
+    if args.command == "instant-double":
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            add_instant_double(
+                load_payload(args.session),
+                source_id=args.source_id,
+                double_id=args.id,
+                start=args.start,
+                deck=args.deck,
+                duration=args.duration,
+                gain_db=args.gain_db,
+                fade_in_ms=args.fade_in_ms,
+                fade_out_ms=args.fade_out_ms,
+                gate_beats=args.gate_beats,
+                cut_source=args.cut_source,
+                cache_path=args.cache,
+                min_confidence=args.min_confidence,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
+        )
+        print(f"added instant double {args.id} from {args.source_id}")
         return 0
 
     if args.command == "automate":
