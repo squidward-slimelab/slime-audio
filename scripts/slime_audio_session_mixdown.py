@@ -326,29 +326,20 @@ def effect_target_clips(session: MixSession, effect: EffectEvent) -> list[Clip]:
     return [clip for clip in session.clips if clip.id == effect.target]
 
 
-def reverb_filter(effect: EffectEvent) -> str:
-    base_delay = max(12, effect.delay_ms)
+def reverb_ir_filter(effect: EffectEvent, sample_rate: int, label: str) -> str:
     room = max(0.1, min(1.0, effect.room_size))
     damping = max(0.0, min(1.0, effect.damping))
-    delay_scales = [0.37, 0.53, 0.71, 0.97, 1.31, 1.73, 2.19, 2.77, 3.41, 4.13, 4.91, 5.83]
-    delays = [max(9, int(base_delay * (scale + room * 0.65))) for scale in delay_scales]
-    decay_base = max(0.05, min(0.95, effect.feedback))
-    damp_factor = 1.0 - (damping * 0.55)
-    decays = [decay_base * (0.84 ** index) * damp_factor for index in range(len(delays))]
+    ir_duration = max(0.45, min(6.0, 0.75 + (room * 2.4) + (effect.feedback * 1.8)))
     damp_lowpass = max(2800.0, min(7600.0, 7600.0 - (damping * 3600.0)))
-    diffusion = [
-        "aecho=0.45:{wet:.3f}:{delays}:{decays}".format(
-            wet=effect.wet,
-            delays="|".join(str(delay) for delay in delays),
-            decays="|".join(f"{decay:.3f}" for decay in decays),
-        ),
-        f"lowpass=f={damp_lowpass:.3f}",
-        "allpass=f=540:width_type=h:width=520:mix=0.56",
-        "allpass=f=1180:width_type=h:width=940:mix=0.48",
-        "allpass=f=2240:width_type=h:width=1500:mix=0.38",
-        "stereowiden=delay=18:feedback=0.08:crossfeed=0.28:drymix=0.78",
-    ]
-    return ",".join(diffusion)
+    seed = sum((index + 1) * ord(char) for index, char in enumerate(effect.id)) % 2_147_483_647
+    return (
+        f"anoisesrc=r={sample_rate}:color=pink:duration={ir_duration:.3f}:amplitude=0.25:seed={seed},"
+        f"afade=t=out:st=0:d={ir_duration:.3f},"
+        f"highpass=f=160,lowpass=f={damp_lowpass:.3f},"
+        f"allpass=f=540:width_type=h:width=520:mix=0.42,"
+        f"allpass=f=1180:width_type=h:width=940:mix=0.34"
+        f"[{label}]"
+    )
 
 
 def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
@@ -369,9 +360,26 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
             f"aecho=0.8:{effect.wet:.3f}:{effect.delay_ms}:{effect.feedback:.3f}"
         )
     elif effect.type == "reverb":
-        filters.append(reverb_filter(effect))
-    if effect.tail_ms:
-        filters.append(f"afade=t=out:st={seconds(effect.duration_ms)}:d={seconds(effect.tail_ms)}")
+        pre_label = f"{label}pre"
+        ir_label = f"{label}ir"
+        reverb_gain = 70.0 * max(0.0, effect.wet)
+        reverb_filters = [
+            f"{','.join(filters)}[{pre_label}]",
+            reverb_ir_filter(effect, sample_rate, ir_label),
+            f"[{pre_label}][{ir_label}]afir=wet=1:gtype=peak:irfmt=mono",
+            f"atrim=duration={seconds(total_duration_ms)}",
+        ]
+        if effect.lowpass_hz is not None:
+            reverb_filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
+        reverb_filters.extend(
+            [
+                f"volume={reverb_gain:.6f}",
+                f"volume={gain_multiplier(effect.gain_db):.6f}",
+                f"adelay={effect.start_ms}:all=1",
+                f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
+            ]
+        )
+        return ";".join([reverb_filters[0], reverb_filters[1], ",".join(reverb_filters[2:])])
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
         filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
