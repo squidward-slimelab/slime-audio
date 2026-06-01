@@ -136,6 +136,57 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("atempo=1.030000", filters)
         self.assertIn("atrim=start=0.000:duration=10.300", filters)
 
+    def test_mixdown_filter_renders_clip_mashup_bed_automation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-1",
+                                "path": "/music/bed.flac",
+                                "start": "00:10.000",
+                                "duration": "00:30.000",
+                            },
+                            {
+                                "id": "lead",
+                                "deck": "deck-2",
+                                "path": "/music/lead.flac",
+                                "start": "00:18.000",
+                                "duration": "00:12.000",
+                            },
+                        ],
+                        "automations": [
+                            {
+                                "target": "bed",
+                                "param": "lowpass_hz",
+                                "points": [{"at": "00:18.000", "value": 1600}, {"at": "00:30.000", "value": 1600}],
+                            },
+                            {
+                                "target": "bed",
+                                "param": "highpass_hz",
+                                "points": [{"at": "00:18.000", "value": 120}, {"at": "00:30.000", "value": 120}],
+                            },
+                            {
+                                "target": "bed",
+                                "param": "gain_db",
+                                "points": [{"at": "00:18.000", "value": -9}, {"at": "00:30.000", "value": -9}],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("lowpass=enable='between(t,8.000,20.000)':f=1600.000", filters)
+        self.assertIn("highpass=enable='between(t,8.000,20.000)':f=120.000", filters)
+        self.assertIn("volume=enable='between(t,8.000,20.000)':volume=0.354813", filters)
+
     def test_session_duration_includes_lean_in_effect_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"

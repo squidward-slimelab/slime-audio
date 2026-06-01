@@ -204,6 +204,36 @@ def window_from_automation(automation: Automation) -> tuple[int, int, float]:
     return automation.points[0].at_ms, automation.points[-1].at_ms, float(automation.points[0].value)
 
 
+def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list[tuple[int, int, float]]:
+    windows: list[tuple[int, int, float]] = []
+    automations = [*clip.automations, *(automation for automation in session.automations if automation.target == clip.id)]
+    for automation in automations:
+        if automation.param != param:
+            continue
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        if len(points) < 2:
+            continue
+        start_ms = max(0, points[0].at_ms - clip.start_ms)
+        end_ms = max(0, points[-1].at_ms - clip.start_ms)
+        if end_ms <= start_ms:
+            continue
+        windows.append((start_ms, end_ms, float(points[0].value)))
+    return sorted(windows, key=lambda item: item[0])
+
+
+def clip_effect_filters(session: MixSession, clip: Clip) -> str:
+    filters: list[str] = []
+    for start_ms, end_ms, lowpass_hz in clip_automation_windows(session, clip, "lowpass_hz"):
+        filters.append(f"lowpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={lowpass_hz:.3f}")
+    for start_ms, end_ms, highpass_hz in clip_automation_windows(session, clip, "highpass_hz"):
+        filters.append(f"highpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={highpass_hz:.3f}")
+    for start_ms, end_ms, gain_db in clip_automation_windows(session, clip, "gain_db"):
+        filters.append(
+            f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={gain_multiplier(gain_db):.6f}"
+        )
+    return ",".join(filters)
+
+
 def build_filter_complex(
     session: MixSession,
     lean_in_audio: dict[str, Path],
@@ -228,12 +258,15 @@ def build_filter_complex(
             fade_filters += f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(fade_out_ms)},"
         retime_filters = ",".join(time_pitch_filters(clip, sample_rate))
         retime_filters = f"{retime_filters}," if retime_filters else ""
+        effect_filters = clip_effect_filters(session, clip)
+        effect_filters = f"{effect_filters}," if effect_filters else ""
         filters.append(
             f"[{index}:a]"
             f"atrim=start={seconds(clip.trim_start_ms)}{duration},"
             "asetpts=PTS-STARTPTS,"
             f"{retime_filters}"
             f"{fade_filters}"
+            f"{effect_filters}"
             f"volume={volume:.6f},"
             f"adelay={clip.start_ms}:all=1,"
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
