@@ -111,13 +111,15 @@ Keep this skill generic and portable.
 
    Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
 
+   Deck convention: prefer the two middle lanes (`deck-2` and `deck-3`, zero-based indices 1 and 2) for the main alternating A/B track flow. Use `deck-1` and `deck-4` for instant doubles, stabs, shadows, beds, and more elaborate three- or four-layer sections unless the operator asks for a different layout.
+
 7. If starting from an old ordered playlist, immediately import it into a timestamped session and do future edits against the session:
 
    ```bash
    python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json \
      --playlist runtime/current-playlist.txt \
      --start 00:00.000 \
-     --decks deck-1,deck-2,deck-3,deck-4
+     --decks deck-2,deck-3
    ```
 
 8. Add, move, trim, overlap, or automate clips by timestamp through the active live-edit wrapper. It defaults to `runtime/mix-session.json`, reads `runtime/mix-session-state.json` as the playhead lock, and records `live_edit_applied` history events. This is the normal way to change a set while it is playing; editing a copied JSON file and restarting playback should be reserved for setup or recovery.
@@ -213,7 +215,9 @@ Keep this skill generic and portable.
    Before playback, audit the session data:
 
    - Summarize clips by deck and confirm the intended deck system is actually used.
+   - Confirm main full-song/lead clips alternate primarily between `deck-2` and `deck-3`; reserve `deck-1` and `deck-4` for doubles, beds, shadows, stabs, or intentionally complex overlays.
    - Inspect all `gain_db`, `duck_volume`, `lowpass_hz`, and `highpass_hz` automations. No automation may fade a main music clip to silence unless it is a named, intentional routine with a rendered proof.
+   - Render at least one proof window that includes a real lean-in with TTS enabled. If voice audio fails or is silent, the renderer must skip both the lean-in and its duck/low-pass envelope; never accept "music ducked but no voice" as valid.
    - Render at least one representative transition proof with `--from`/`--duration --verify`; reject clipping-risk, silence, dead air, or unexplained fade-outs before starting the runner.
    - Keep proof/review files small and delete temporary audio after verification on low-disk machines.
 

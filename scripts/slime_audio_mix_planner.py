@@ -20,7 +20,7 @@ from slime_audio_dj import (
 )
 from slime_audio_session import load_payload, parse_session, playhead_ms_from_state, write_payload
 
-DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4"]
+DECK_ORDER = ["deck-2", "deck-3", "deck-1", "deck-4"]
 DEFAULT_LOCK_LEAD_MS = 20_000
 DEFAULT_DOUBLE_DURATION_MS = 12_000
 MIN_OVERLAY_SCORE = 0.72
@@ -123,17 +123,25 @@ def deck_available(clips: list[dict[str, Any]], deck: str, start_ms: int, end_ms
     return not any(str(clip.get("deck")) == deck and clip_overlaps(clip, start_ms, end_ms) for clip in clips)
 
 
-def choose_deck(clips: list[dict[str, Any]], start_ms: int, end_ms: int, *, avoid: set[str] | None = None) -> str:
+def choose_deck(
+    clips: list[dict[str, Any]],
+    start_ms: int,
+    end_ms: int,
+    *,
+    deck_order: list[str] | None = None,
+    avoid: set[str] | None = None,
+) -> str:
     avoid = avoid or set()
-    for deck in DECK_ORDER:
+    deck_order = deck_order or DECK_ORDER
+    for deck in deck_order:
         if deck in avoid:
             continue
         if deck_available(clips, deck, start_ms, end_ms):
             return deck
-    for deck in DECK_ORDER:
+    for deck in deck_order:
         if deck_available(clips, deck, start_ms, end_ms):
             return deck
-    return DECK_ORDER[0]
+    return deck_order[0]
 
 
 def plan_future_mix(
@@ -153,6 +161,10 @@ def plan_future_mix(
     future = [clip for clip in original_clips if int(clip.get("start_ms", 0)) >= lock_before_ms and clip.get("kind") != "planner-double"]
     if not future:
         return next_payload, []
+    declared_decks = [str(deck) for deck in next_payload.get("decks", [])]
+    deck_order = [deck for deck in DECK_ORDER if deck in declared_decks] + [deck for deck in declared_decks if deck not in DECK_ORDER]
+    if not deck_order:
+        deck_order = DECK_ORDER
 
     planned: list[PlannedMove] = []
     rebuilt: list[dict[str, Any]] = protected[:]
@@ -176,7 +188,7 @@ def plan_future_mix(
         )
         start_ms = cursor if previous is None else max(lock_before_ms, clip_end(previous) - overlap)
         end_ms = start_ms + duration_ms
-        deck = choose_deck(rebuilt, start_ms, end_ms, avoid={previous_deck} if overlap else set())
+        deck = choose_deck(rebuilt, start_ms, end_ms, deck_order=deck_order, avoid={previous_deck} if previous_deck else set())
 
         clip["start_ms"] = start_ms
         clip["deck"] = deck
@@ -207,7 +219,7 @@ def plan_future_mix(
                 double_duration = start_ms - double_start
                 if double_duration >= 4_000:
                     double_end = double_start + double_duration
-                    double_deck = choose_deck(rebuilt, double_start, double_end, avoid={deck, previous_deck})
+                    double_deck = choose_deck(rebuilt, double_start, double_end, deck_order=deck_order, avoid={deck, previous_deck})
                     double_clip = {
                         "id": f"double-{clip.get('id')}",
                         "deck": double_deck,

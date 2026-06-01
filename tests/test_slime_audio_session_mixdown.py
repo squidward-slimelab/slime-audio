@@ -68,6 +68,50 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("lowpass=enable='between(t,9.750,13.000)':f=1400.000", filters)
         self.assertIn("amix=inputs=2", filters)
 
+    def test_mixdown_filter_omits_lean_in_duck_when_audio_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-1",
+                                "path": "/music/bed.flac",
+                                "start": "00:00.000",
+                                "duration": "00:30.000",
+                            }
+                        ],
+                        "mic_lean_ins": [
+                            {
+                                "id": "lean",
+                                "start": "00:10.000",
+                                "text": "quick note",
+                                "ducking": {
+                                    "target": "master",
+                                    "param": "duck_volume",
+                                    "points": [{"at": "00:09.750", "value": 0.45}, {"at": "00:13.000", "value": 1.0}],
+                                },
+                                "lowpass": {
+                                    "target": "master",
+                                    "param": "lowpass_hz",
+                                    "points": [{"at": "00:09.750", "value": 1400}, {"at": "00:13.000", "value": 22050}],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertNotIn("volume=enable='between(t,9.750,13.000)':volume=0.450000", filters)
+        self.assertNotIn("lowpass=enable='between(t,9.750,13.000)':f=1400.000", filters)
+        self.assertIn("amix=inputs=1", filters)
+
     def test_ffmpeg_command_maps_session_inputs_and_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"

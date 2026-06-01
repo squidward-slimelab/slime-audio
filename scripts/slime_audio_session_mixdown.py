@@ -6,6 +6,7 @@ import base64
 import json
 import re
 import subprocess
+import sys
 import tempfile
 import urllib.request
 from dataclasses import replace
@@ -242,6 +243,8 @@ def build_filter_complex(
     channels: int,
     output_duration_ms: int | None = None,
 ) -> str:
+    active_lean_in_ids = set(lean_in_audio)
+    session = replace(session, mic_lean_ins=[lean_in for lean_in in session.mic_lean_ins if lean_in.id in active_lean_in_ids])
     filters: list[str] = []
     music_labels: list[str] = []
     for index, clip in enumerate(session.clips):
@@ -546,9 +549,17 @@ def prepare_lean_in_audio(
                 check=True,
             )
         else:
-            raw = temp_dir / f"{lean_in.id}-raw.wav"
-            synthesize_kokoro(kokoro_url, lean_in.voice or default_voice, lean_in.text, raw, timeout)
-            normalize_tts(raw, wav, sample_rate, channels)
+            try:
+                raw = temp_dir / f"{lean_in.id}-raw.wav"
+                synthesize_kokoro(kokoro_url, lean_in.voice or default_voice, lean_in.text, raw, timeout)
+                normalize_tts(raw, wav, sample_rate, channels)
+                report = rendered_audio_report(wav)
+                if report["silent"]:
+                    print(f"warning: skipping silent lean-in audio for {lean_in.id}", file=sys.stderr)
+                    continue
+            except Exception as error:
+                print(f"warning: skipping failed lean-in audio for {lean_in.id}: {error}", file=sys.stderr)
+                continue
         audio[lean_in.id] = wav
     return audio
 
