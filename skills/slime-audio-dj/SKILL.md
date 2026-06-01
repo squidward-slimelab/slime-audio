@@ -173,6 +173,13 @@ Keep this skill generic and portable.
      --start 01:24.000 \
      --cache runtime/dj-analysis-cache.json
 
+   python3 scripts/slime_audio_live_edit.py instant-double-routine \
+     --source-id lead-hook \
+     --id lead-hook-offbeat \
+     --recipe offbeat-swaps \
+     --start 01:24.000 \
+     --cache runtime/dj-analysis-cache.json
+
    python3 scripts/slime_audio_live_edit.py instant-double \
      --source-id lead-hook \
      --id lead-hook-double \
@@ -182,6 +189,8 @@ Keep this skill generic and portable.
      --cut-source \
      --cache runtime/dj-analysis-cache.json
    ```
+
+   The `offbeat-swaps` recipe uses the cached beatgrid to hold the original side through the downbeat, then schedules the first fader swap on the half-beat and alternates source/double sides on each following half-beat. For raw custom moves, `--gate-offset-beats 1/2` applies the same first-cut-on-the-AND timing.
 
    Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
 

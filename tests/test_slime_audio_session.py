@@ -683,6 +683,65 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(session.automations[-1].target, "crossfader")
         self.assertEqual(session.automations[-1].param, "position")
 
+    def test_cli_instant_double_routine_plans_offbeat_crossfader_swaps_at_multiple_bpms(self):
+        for bpm, half_beat_ms in ((120, 250), (90, 333)):
+            with self.subTest(bpm=bpm), tempfile.TemporaryDirectory() as temp_dir:
+                temp = Path(temp_dir)
+                path = temp / "session.json"
+                cache = temp / "dj-cache.json"
+                track = f"/music/offbeat-{bpm}.flac"
+                write_analysis_cache(cache, track, bpm=bpm)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+                            "clips": [
+                                {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 0, "duration": 40_000}
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    run_cli(
+                        [
+                            "slime_audio_session.py",
+                            "instant-double-routine",
+                            str(path),
+                            "--source-id",
+                            "source",
+                            "--id",
+                            "routine-offbeat",
+                            "--recipe",
+                            "offbeat-swaps",
+                            "--start",
+                            "00:00.000",
+                            "--cache",
+                            str(cache),
+                        ]
+                    ),
+                    0,
+                )
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                crossfader = [automation for automation in payload["automations"] if automation["target"] == "crossfader"]
+
+            self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-1"], "A")
+            self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-2"], "B")
+            self.assertEqual(crossfader[0]["planner_role"], "instant-double-crossfader-hold")
+            self.assertEqual(crossfader[0]["points"], [{"at_ms": 0, "value": -1.0}, {"at_ms": half_beat_ms, "value": -1.0}])
+            self.assertEqual(
+                crossfader[1]["points"],
+                [{"at_ms": half_beat_ms, "value": 1.0}, {"at_ms": half_beat_ms * 2, "value": 1.0}],
+            )
+            self.assertEqual(
+                crossfader[2]["points"],
+                [{"at_ms": half_beat_ms * 2, "value": -1.0}, {"at_ms": half_beat_ms * 3, "value": -1.0}],
+            )
+            self.assertEqual(crossfader[3]["points"][0]["at_ms"], half_beat_ms * 3)
+            self.assertTrue(all(automation["target"] == "crossfader" for automation in payload["automations"]))
+
     def test_cli_instant_double_clones_future_clip_and_rejects_busy_deck(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"

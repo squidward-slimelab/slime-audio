@@ -23,11 +23,11 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True},
     "one-beat-trades": {"duration": "00:12.000", "gate_beats": "1", "cut_source": True},
     "hook-tease": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "cue_kind": "hook"},
+    "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
 }
 DEFERRED_ROUTINE_RECIPES = {
     "brake-drop": "requires slip/flux and vinyl brake primitives (#17/#18)",
     "echo-drop": "requires reverb/echo tail rendering (#19)",
-    "offbeat-swaps": "requires off-beat crossfader/channel-gate automation (#20)",
 }
 AUTOMATABLE_PARAMS = {
     "gain_db",
@@ -629,6 +629,20 @@ def parse_beats(value: str) -> Fraction:
     return beats
 
 
+def parse_gate_offset_beats(value: str | None) -> Fraction:
+    if value is None:
+        return Fraction(0, 1)
+    try:
+        beats = Fraction(value)
+    except ValueError as error:
+        raise ValueError(f"invalid beat offset: {value}") from error
+    if beats < 0:
+        raise ValueError("beat offset cannot be negative")
+    if beats not in {Fraction(0, 1), Fraction(1, 2), Fraction(1, 1), Fraction(2, 1), Fraction(4, 1), Fraction(8, 1)}:
+        raise ValueError("beat offset must be one of 0, 1/2, 1, 2, 4, or 8 beats")
+    return beats
+
+
 def cached_beatgrid(
     cache_path: Path,
     clip_path: str,
@@ -1053,6 +1067,7 @@ def add_instant_double(
     fade_in_ms: int,
     fade_out_ms: int,
     gate_beats: str | None,
+    gate_offset_beats: str | None = None,
     cut_source: bool,
     cache_path: Path = DEFAULT_DJ_CACHE,
     min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
@@ -1130,8 +1145,18 @@ def add_instant_double(
         if cut_source:
             next_payload = set_fader_routing(next_payload, {source_deck: source_side, target_deck: target_side})
         gate_ms = max(1, int(round(float(parse_beats(gate_beats)) * (60_000 / bpm))))
+        offset_ms = max(0, int(round(float(parse_gate_offset_beats(gate_offset_beats)) * (60_000 / bpm))))
         automations = next_payload.setdefault("automations", [])
-        at_ms = start_ms
+        at_ms = min(end_ms, start_ms + offset_ms)
+        if cut_source and at_ms > start_ms:
+            automations.append(
+                {
+                    "target": "crossfader",
+                    "param": "position",
+                    "planner_role": "instant-double-crossfader-hold",
+                    "points": [{"at_ms": start_ms, "value": off_position}, {"at_ms": at_ms, "value": off_position}],
+                }
+            )
         gate_index = 0
         while at_ms < end_ms:
             on_end = min(end_ms, at_ms + gate_ms)
@@ -1174,7 +1199,7 @@ def add_instant_double(
                         }
                     )
             gate_index += 1
-            at_ms = start_ms + (gate_index * gate_ms * 2)
+            at_ms = start_ms + offset_ms + (gate_index * gate_ms * 2)
 
     parse_session(next_payload)
     return next_payload
@@ -1241,6 +1266,7 @@ def add_instant_double_routine(
         fade_in_ms=0,
         fade_out_ms=0,
         gate_beats=str(config["gate_beats"]),
+        gate_offset_beats=str(config.get("gate_offset_beats", "0")),
         cut_source=bool(config["cut_source"]),
         cache_path=cache_path,
         min_confidence=min_confidence,
@@ -1400,6 +1426,7 @@ def main() -> int:
     instant_double_parser.add_argument("--fade-in-ms", type=int, default=0)
     instant_double_parser.add_argument("--fade-out-ms", type=int, default=0)
     instant_double_parser.add_argument("--gate-beats", help="Optional on/off gate size, e.g. 1/2 or 1.")
+    instant_double_parser.add_argument("--gate-offset-beats", help="Optional offset before the first gate, e.g. 1/2 for off-beat swaps.")
     instant_double_parser.add_argument("--cut-source", action="store_true", help="When gating, cut the source clip while the double is open.")
     instant_double_parser.add_argument("--cache", type=Path, default=DEFAULT_DJ_CACHE)
     instant_double_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
@@ -1562,6 +1589,7 @@ def main() -> int:
                 fade_in_ms=args.fade_in_ms,
                 fade_out_ms=args.fade_out_ms,
                 gate_beats=args.gate_beats,
+                gate_offset_beats=args.gate_offset_beats,
                 cut_source=args.cut_source,
                 cache_path=args.cache,
                 min_confidence=args.min_confidence,

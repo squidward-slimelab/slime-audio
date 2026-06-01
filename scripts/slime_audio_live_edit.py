@@ -159,6 +159,7 @@ def main() -> int:
     instant_double_parser.add_argument("--fade-in-ms", type=int, default=0)
     instant_double_parser.add_argument("--fade-out-ms", type=int, default=0)
     instant_double_parser.add_argument("--gate-beats")
+    instant_double_parser.add_argument("--gate-offset-beats")
     instant_double_parser.add_argument("--cut-source", action="store_true")
     instant_double_parser.add_argument("--cache", type=Path, default=session.DEFAULT_DJ_CACHE)
     instant_double_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
@@ -290,6 +291,7 @@ def main() -> int:
                 fade_in_ms=args.fade_in_ms,
                 fade_out_ms=args.fade_out_ms,
                 gate_beats=args.gate_beats,
+                gate_offset_beats=args.gate_offset_beats,
                 cut_source=args.cut_source,
                 cache_path=args.cache,
                 min_confidence=args.min_confidence,
