@@ -398,6 +398,8 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         self.assertIn("asetrate=47311", filters)
         self.assertIn("lowpass=f=920.659", filters)
+        self.assertIn("afade=t=in:st=0:d=0.0030", filters)
+        self.assertIn("afade=t=out:st=0.0122:d=0.0030", filters)
         self.assertIn("concat=n=66:v=0:a=1", filters)
         self.assertIn("adelay=9000:all=1", filters)
 

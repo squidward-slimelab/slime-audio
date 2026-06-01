@@ -389,6 +389,9 @@ def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int,
         part_label = f"{label}part{index}"
         volume = max(0.0, (1.0 - progress) ** 0.65)
         lowpass_hz = max(900.0, 18000.0 * ((900.0 / 18000.0) ** progress))
+        fade_ms = min(3.0, max(0.5, out_ms / 5))
+        fade_seconds = fade_ms / 1000
+        fade_out_start = max(0.0, (out_ms / 1000) - fade_seconds)
         parts.append(
             f"[{input_index}:a]"
             f"atrim=start={seconds(int(round(source_cursor_ms)))}:duration={source_ms / 1000:.3f},"
@@ -397,6 +400,8 @@ def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int,
             f"aresample={sample_rate},"
             f"atrim=duration={out_ms / 1000:.3f},"
             f"lowpass=f={lowpass_hz:.3f},"
+            f"afade=t=in:st=0:d={fade_seconds:.4f},"
+            f"afade=t=out:st={fade_out_start:.4f}:d={fade_seconds:.4f},"
             f"volume={volume:.6f},"
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
             f"[{part_label}]"
