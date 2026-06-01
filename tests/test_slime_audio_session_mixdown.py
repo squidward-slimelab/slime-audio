@@ -299,12 +299,14 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             filters = build_filter_complex(session, {}, 48_000, 2)
 
         self.assertIn("atrim=start=16.000:duration=2.000", filters)
-        self.assertIn("apad=pad_dur=3.000", filters)
-        self.assertIn("aecho=0.8:0.400:375:0.450", filters)
+        self.assertIn("asplit=10", filters)
+        self.assertIn("adelay=9375:all=1", filters)
+        self.assertIn("adelay=12750:all=1", filters)
+        self.assertIn("volume=0.141925", filters)
+        self.assertNotIn("aecho=", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=3.000", filters)
-        self.assertIn("atrim=duration=5.000", filters)
+        self.assertIn("atrim=duration=14.000", filters)
         self.assertIn("lowpass=f=4200.000", filters)
-        self.assertIn("adelay=9000:all=1", filters)
         self.assertEqual(session_duration_ms(session), 25_000)
 
     def test_mixdown_filter_renders_reverb_effect_with_tail(self):

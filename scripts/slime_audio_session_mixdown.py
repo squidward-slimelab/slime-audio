@@ -418,9 +418,49 @@ def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int,
     return ";".join(parts)
 
 
+def echo_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
+    relative_start_ms = max(0, effect.start_ms - clip.start_ms)
+    source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
+    source_duration_ms = max(1, int(round(effect.duration_ms * tempo_factor(clip))))
+    total_duration_ms = effect.duration_ms + effect.tail_ms
+    delay_ms = max(1, effect.delay_ms)
+    tap_count = max(1, min(10, (max(delay_ms + 1, total_duration_ms) - 1) // delay_ms))
+    tap_sources = [f"echo{label}{index}src" for index in range(tap_count)]
+    tap_outputs = [f"echo{label}{index}" for index in range(tap_count)]
+    retime = ",".join(time_pitch_filters(clip, sample_rate))
+    retime = f"{retime}," if retime else ""
+    parts = [
+        f"[{input_index}:a]atrim=start={seconds(source_start_ms)}:duration={seconds(source_duration_ms)},"
+        "asetpts=PTS-STARTPTS,"
+        f"{retime}"
+        f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'},"
+        f"asplit={tap_count}{''.join(f'[{source}]' for source in tap_sources)}"
+    ]
+    for index, (source, output) in enumerate(zip(tap_sources, tap_outputs), start=1):
+        tap_delay_ms = delay_ms * index
+        tap_gain = effect.wet * (effect.feedback ** (index - 1)) * gain_multiplier(effect.gain_db)
+        parts.append(
+            f"[{source}]volume={tap_gain:.6f},"
+            f"adelay={effect.start_ms + tap_delay_ms}:all=1,"
+            f"atrim=duration={seconds(effect.start_ms + total_duration_ms)},"
+            f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{output}]"
+        )
+    post_filters = []
+    if effect.lowpass_hz is not None:
+        post_filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
+    post_filters.append(f"atrim=duration={seconds(effect.start_ms + total_duration_ms)}")
+    parts.append(
+        f"{''.join(f'[{output}]' for output in tap_outputs)}"
+        f"amix=inputs={tap_count}:duration=longest:normalize=0,{','.join(post_filters)}[{label}]"
+    )
+    return ";".join(parts)
+
+
 def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
     if effect.type == "vinyl_brake":
         return vinyl_brake_stream_filter(effect, clip, input_index, label, sample_rate, channels)
+    if effect.type == "echo":
+        return echo_stream_filter(effect, clip, input_index, label, sample_rate, channels)
     relative_start_ms = max(0, effect.start_ms - clip.start_ms)
     source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
     source_duration_ms = max(1, int(round(effect.duration_ms * tempo_factor(clip))))
@@ -433,11 +473,7 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
     filters.extend(retime)
     if effect.tail_ms:
         filters.append(f"apad=pad_dur={seconds(effect.tail_ms)}")
-    if effect.type == "echo":
-        filters.append(
-            f"aecho=0.8:{effect.wet:.3f}:{effect.delay_ms}:{effect.feedback:.3f}"
-        )
-    elif effect.type == "reverb":
+    if effect.type == "reverb":
         filters.append(zita_reverb_filter(effect))
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
