@@ -308,6 +308,14 @@ def clip_effect_filters(session: MixSession, clip: Clip) -> str:
         filters.append(f"lowpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={lowpass_hz:.3f}")
     for start_ms, end_ms, highpass_hz in clip_automation_windows(session, clip, "highpass_hz"):
         filters.append(f"highpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={highpass_hz:.3f}")
+    for start_ms, end_ms, eq_low_db in clip_automation_windows(session, clip, "eq_low_db"):
+        filters.append(f"bass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':g={eq_low_db:.3f}:f=120:w=0.7")
+    for start_ms, end_ms, eq_mid_db in clip_automation_windows(session, clip, "eq_mid_db"):
+        filters.append(
+            f"equalizer=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f=1000:t=q:w=1.0:g={eq_mid_db:.3f}"
+        )
+    for start_ms, end_ms, eq_high_db in clip_automation_windows(session, clip, "eq_high_db"):
+        filters.append(f"treble=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':g={eq_high_db:.3f}:f=6500:w=0.7")
     for start_ms, end_ms, gain_db in clip_automation_windows(session, clip, "gain_db"):
         filters.append(
             f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={gain_multiplier(gain_db):.6f}"

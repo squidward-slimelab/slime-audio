@@ -401,6 +401,51 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("concat=n=66:v=0:a=1", filters)
         self.assertIn("adelay=9000:all=1", filters)
 
+    def test_mixdown_filter_applies_per_track_eq_automation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-1",
+                                "path": "/music/bed.flac",
+                                "start": 5_000,
+                                "duration": 20_000,
+                            }
+                        ],
+                        "automations": [
+                            {
+                                "target": "bed",
+                                "param": "eq_low_db",
+                                "points": [{"at_ms": 8_000, "value": -5.5}, {"at_ms": 18_000, "value": -5.5}],
+                            },
+                            {
+                                "target": "bed",
+                                "param": "eq_mid_db",
+                                "points": [{"at_ms": 8_000, "value": 2.0}, {"at_ms": 18_000, "value": 2.0}],
+                            },
+                            {
+                                "target": "bed",
+                                "param": "eq_high_db",
+                                "points": [{"at_ms": 8_000, "value": -3.0}, {"at_ms": 18_000, "value": -3.0}],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            filters = build_filter_complex(session, {}, 48_000, 2)
+
+        self.assertIn("bass=enable='between(t,3.000,13.000)':g=-5.500:f=120:w=0.7", filters)
+        self.assertIn("equalizer=enable='between(t,3.000,13.000)':f=1000:t=q:w=1.0:g=2.000", filters)
+        self.assertIn("treble=enable='between(t,3.000,13.000)':g=-3.000:f=6500:w=0.7", filters)
+
     def test_crossfader_gain_maps_hard_sides_and_center(self):
         self.assertEqual(crossfader_gain(-1.0, "A"), 1.0)
         self.assertEqual(crossfader_gain(-1.0, "B"), 0.0)
