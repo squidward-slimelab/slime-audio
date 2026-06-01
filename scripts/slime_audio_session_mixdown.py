@@ -327,18 +327,26 @@ def effect_target_clips(session: MixSession, effect: EffectEvent) -> list[Clip]:
 
 
 def reverb_filter(effect: EffectEvent) -> str:
-    base_delay = max(20, effect.delay_ms)
+    base_delay = max(12, effect.delay_ms)
     room = max(0.1, min(1.0, effect.room_size))
     damping = max(0.0, min(1.0, effect.damping))
-    delays = [base_delay, int(base_delay * (1.7 + room)), int(base_delay * (2.9 + room)), int(base_delay * (4.7 + room))]
+    delay_scales = [0.37, 0.53, 0.71, 0.97, 1.31, 1.73, 2.19, 2.77, 3.41, 4.13, 4.91, 5.83]
+    delays = [max(9, int(base_delay * (scale + room * 0.65))) for scale in delay_scales]
     decay_base = max(0.05, min(0.95, effect.feedback))
     damp_factor = 1.0 - (damping * 0.45)
-    decays = [decay_base, decay_base * 0.72 * damp_factor, decay_base * 0.52 * damp_factor, decay_base * 0.36 * damp_factor]
-    return "aecho=0.7:{wet:.3f}:{delays}:{decays}".format(
-        wet=effect.wet,
-        delays="|".join(str(delay) for delay in delays),
-        decays="|".join(f"{decay:.3f}" for decay in decays),
-    )
+    decays = [decay_base * (0.88 ** index) * damp_factor for index in range(len(delays))]
+    diffusion = [
+        "aecho=0.45:{wet:.3f}:{delays}:{decays}".format(
+            wet=effect.wet,
+            delays="|".join(str(delay) for delay in delays),
+            decays="|".join(f"{decay:.3f}" for decay in decays),
+        ),
+        "allpass=f=610:width_type=h:width=420:mix=0.72",
+        "allpass=f=1390:width_type=h:width=860:mix=0.64",
+        "allpass=f=2810:width_type=h:width=1350:mix=0.56",
+        "stereowiden=delay=24:feedback=0.18:crossfeed=0.22:drymix=0.72",
+    ]
+    return ",".join(diffusion)
 
 
 def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
