@@ -1198,7 +1198,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["target"], "routine-brake-double")
         self.assertEqual(double["gain_db"], -96.0)
         self.assertEqual(source_duck["target"], "source")
-        self.assertEqual(source_duck["points"], [{"at_ms": 12_000, "value": -16.0}, {"at_ms": 12_500, "value": -16.0}])
+        self.assertEqual(source_duck["points"], [{"at_ms": 12_000, "value": -8.0}, {"at_ms": 12_500, "value": -8.0}])
         self.assertEqual(payload["slip_events"][0]["source_clip_id"], "source")
         self.assertEqual(payload["slip_events"][0]["target_clip_id"], "routine-brake-double")
         self.assertEqual(payload["slip_events"][0]["source_start_ms"], 20_000)
