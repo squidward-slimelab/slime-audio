@@ -6,7 +6,6 @@ import base64
 import json
 import re
 import subprocess
-import sys
 import tempfile
 import urllib.request
 from dataclasses import replace
@@ -555,11 +554,9 @@ def prepare_lean_in_audio(
                 normalize_tts(raw, wav, sample_rate, channels)
                 report = rendered_audio_report(wav)
                 if report["silent"]:
-                    print(f"warning: skipping silent lean-in audio for {lean_in.id}", file=sys.stderr)
-                    continue
+                    raise ValueError(f"silent lean-in audio for {lean_in.id}")
             except Exception as error:
-                print(f"warning: skipping failed lean-in audio for {lean_in.id}: {error}", file=sys.stderr)
-                continue
+                raise ValueError(f"failed lean-in audio for {lean_in.id}: {error}") from error
         audio[lean_in.id] = wav
     return audio
 

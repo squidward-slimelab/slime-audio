@@ -11,6 +11,7 @@ from slime_audio_session import load_session
 from slime_audio_session_mixdown import (
     build_filter_complex,
     ffmpeg_command,
+    prepare_lean_in_audio,
     routine_taste_report,
     routine_window,
     session_duration_ms,
@@ -111,6 +112,24 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertNotIn("volume=enable='between(t,9.750,13.000)':volume=0.450000", filters)
         self.assertNotIn("lowpass=enable='between(t,9.750,13.000)':f=1400.000", filters)
         self.assertIn("amix=inputs=1", filters)
+
+    def test_prepare_lean_in_audio_fails_when_tts_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [],
+                        "mic_lean_ins": [{"id": "lean", "start": "00:01.000", "text": "quick note"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            with self.assertRaisesRegex(ValueError, "failed lean-in audio for lean"):
+                prepare_lean_in_audio(session, Path(temp_dir), "http://127.0.0.1:1", "af_heart", 1, 48_000, 2, False)
 
     def test_ffmpeg_command_maps_session_inputs_and_output(self):
         with tempfile.TemporaryDirectory() as temp_dir:
