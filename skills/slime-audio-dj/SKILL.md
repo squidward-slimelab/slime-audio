@@ -50,6 +50,13 @@ Keep this skill generic and portable.
 
    If the database is missing or stale, rescan configured sources before falling back to ad hoc filesystem search. Prefer candidates from `preferred_files`; they avoid recently played tracks, skip untagged root files by default, respect excludes, and include reasons for why each track was selected.
 
+   For a "fresh", "clean-room", or new proof set, treat novelty as a hard gate, not a preference:
+
+   - Read recent `runtime/play-history.jsonl`, active/archive set playlists, and current constraints before selecting.
+   - Exclude artists, titles, duplicate keys, and source paths used in recent proof/live sets unless the operator explicitly asks for a repeat.
+   - Do not seed a set from remembered favorite tracks. Build candidates from the database query output and write the chosen playlist to a named runtime file.
+   - If the candidate list is too narrow after exclusions, change the query/vibe and search again instead of reusing stale tracks.
+
 3. Build a short runway, not a whole night. Prefer 30-60 minutes of music so the live set can adapt.
 
 4. Record operator steering before extending the future set:
@@ -138,6 +145,8 @@ Keep this skill generic and portable.
 
    Use `--field start` to delay/advance a clip on the mix timeline and `--field trim-start` to jump the source position while keeping the clip anchored. The command must reject weak BPM grids unless `--force` is explicit.
 
+   Do not run multiple live-edit writes against the same session in parallel. Live edits are read-modify-write operations; serialize them or one edit can overwrite another.
+
    For true instant doubles, clone the source clip onto a free deck at the same musical position, preserving path, trim position, rendered tempo, rendered pitch, and gain. Use optional beat-gated gain automation for simple transform-style routines:
 
    ```bash
@@ -200,6 +209,13 @@ Keep this skill generic and portable.
 
    Use `--from` and `--duration` for a short proof clip around a transition. Keep `--verify` on so empty/silent renders fail before upload.
    Use `--routine-id` before sending or playing routine-heavy mixes. Read the JSON report and fix rejected routine errors instead of forcing through risky overlays.
+
+   Before playback, audit the session data:
+
+   - Summarize clips by deck and confirm the intended deck system is actually used.
+   - Inspect all `gain_db`, `duck_volume`, `lowpass_hz`, and `highpass_hz` automations. No automation may fade a main music clip to silence unless it is a named, intentional routine with a rendered proof.
+   - Render at least one representative transition proof with `--from`/`--duration --verify`; reject clipping-risk, silence, dead air, or unexplained fade-outs before starting the runner.
+   - Keep proof/review files small and delete temporary audio after verification on low-disk machines.
 
 10. Start playback from the native timestamped session runner so the frontend sees the real set:
 
