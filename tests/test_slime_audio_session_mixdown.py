@@ -351,10 +351,11 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         self.assertIn("atrim=start=16.000:duration=2.000", filters)
         self.assertIn("apad=pad_dur=4.000", filters)
-        self.assertIn("anoisesrc=r=48000:color=pink:duration=3.306:amplitude=0.25:seed=6688", filters)
+        self.assertIn("anoisesrc=r=48000:color=velvet:duration=3.306:amplitude=0.65:seed=6688", filters)
         self.assertIn("lowpass=f=5620.000", filters)
         self.assertIn("afir=wet=1:gtype=peak:irfmt=mono", filters)
-        self.assertIn("volume=26.600000", filters)
+        self.assertIn("aecho=0.9:0.180:23|41|67:0.090|0.060|0.040", filters)
+        self.assertIn("volume=36.100000", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=4.000", filters)
         self.assertIn("atrim=duration=6.000", filters)
         self.assertIn("lowpass=f=5200.000", filters)

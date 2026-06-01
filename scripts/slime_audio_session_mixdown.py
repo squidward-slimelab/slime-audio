@@ -333,7 +333,7 @@ def reverb_ir_filter(effect: EffectEvent, sample_rate: int, label: str) -> str:
     damp_lowpass = max(2800.0, min(7600.0, 7600.0 - (damping * 3600.0)))
     seed = sum((index + 1) * ord(char) for index, char in enumerate(effect.id)) % 2_147_483_647
     return (
-        f"anoisesrc=r={sample_rate}:color=pink:duration={ir_duration:.3f}:amplitude=0.25:seed={seed},"
+        f"anoisesrc=r={sample_rate}:color=velvet:duration={ir_duration:.3f}:amplitude=0.65:seed={seed},"
         f"afade=t=out:st=0:d={ir_duration:.3f},"
         f"highpass=f=160,lowpass=f={damp_lowpass:.3f},"
         f"allpass=f=540:width_type=h:width=520:mix=0.42,"
@@ -362,11 +362,12 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
     elif effect.type == "reverb":
         pre_label = f"{label}pre"
         ir_label = f"{label}ir"
-        reverb_gain = 70.0 * max(0.0, effect.wet)
+        reverb_gain = 95.0 * max(0.0, effect.wet)
         reverb_filters = [
             f"{','.join(filters)}[{pre_label}]",
             reverb_ir_filter(effect, sample_rate, ir_label),
             f"[{pre_label}][{ir_label}]afir=wet=1:gtype=peak:irfmt=mono",
+            "aecho=0.9:0.180:23|41|67:0.090|0.060|0.040",
             f"atrim=duration={seconds(total_duration_ms)}",
         ]
         if effect.lowpass_hz is not None:
