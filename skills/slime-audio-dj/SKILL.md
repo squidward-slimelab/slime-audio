@@ -140,6 +140,14 @@ Keep this skill generic and portable.
    For true instant doubles, clone the source clip onto a free deck at the same musical position, preserving path, trim position, rendered tempo, rendered pitch, and gain. Use optional beat-gated gain automation for simple transform-style routines:
 
    ```bash
+   python3 scripts/slime_audio_session.py instant-double-routine runtime/mix-session.json \
+     --source-id lead-hook \
+     --id lead-hook-stabs \
+     --recipe stabs \
+     --start 01:24.000 \
+     --cache runtime/dj-analysis-cache.json \
+     --state runtime/mix-session-state.json
+
    python3 scripts/slime_audio_session.py instant-double runtime/mix-session.json \
      --source-id lead-hook \
      --id lead-hook-double \
@@ -150,6 +158,8 @@ Keep this skill generic and portable.
      --cache runtime/dj-analysis-cache.json \
      --state runtime/mix-session-state.json
    ```
+
+   Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
 
    Plan mashups, not straight playlists. A normal basic move is to keep a rhythmically and harmonically compatible track as a filtered bed under a lead vocal/hook/section:
 
@@ -217,7 +227,7 @@ These are part of the normal workflow, not future wishes.
 - Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
 - Key-fit policy: when more than one track plays at once, aim for exact key fit whenever the rendered correction is tasteful. For major/minor combinations, use the relative major/minor relationship to decide the correct transpose steps. Prefer keeping a compatible key lane for a run of tracks; only change key deliberately when the source song naturally modulates, the transition is short/non-overlapped, or the move is musically justified and documented.
 - Mashup-first planning: DJ sets should be planned as mashups rather than playlists. Prefer one or more compatible rhythm/EDM clips as filtered beds under another lead track or section. Use `slime_audio_session.py mashup-bed` for gain plus low-pass/high-pass bed shaping, and render review files to verify the bed supports the lead instead of fighting it.
-- True instant doubles: use `slime_audio_session.py instant-double`, not a separately-added arbitrary clip, when copying a playing/future clip onto another deck. The command preserves source path, derived musical position, tempo/pitch settings, gain, and labels the dashboard event as an instant double. Optional `--gate-beats` adds quantized on/off gain automation for simple routines; pair it with `--cut-source` when the double should trade against the original instead of phasing on top of it.
+- True instant doubles: use `slime_audio_session.py instant-double-routine` for named recipes, or raw `instant-double` when hand-building. These commands preserve source path, derived musical position, tempo/pitch settings, gain, and label the dashboard event as an instant double/routine. Optional `--gate-beats` adds quantized on/off gain automation for simple routines; pair it with `--cut-source` when the double should trade against the original instead of phasing on top of it.
 - Quantized beat jumps: use `slime_audio_session.py beat-jump` for +/-1/2, +/-1, +/-2, +/-4, and +/-8 beat offsets from cached BPM/beat-offset analysis. Prefer it over manual millisecond edits whenever planning instant doubles, half-beat delays, phrase jumps, or off-beat cuts. Do not use `--force` for normal DJ planning; forced low-confidence grids are only for debugging failed analysis.
 - Metadata authority: BPM/key/Camelot must come from the music DB TuneBat fields. Ignore filename tags. If metadata is missing, use the local TuneBat analyzer to populate the DB before planning overlays, beat jumps, or doubles.
 - Review file export: use `slime_audio_session_mixdown.py --output runtime/mix-review.mp3 --format mp3 --verify` to render the actual planned mix to a shareable file before or after playback. For transition QA, render a shorter window with `--from` and `--duration`, then upload or link that artifact for operator review.

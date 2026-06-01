@@ -17,6 +17,16 @@ MAX_DECKS = 4
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DJ_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
 DEFAULT_MIN_BEATGRID_CONFIDENCE = 0.45
+SUPPORTED_INSTANT_DOUBLE_RECIPES = {
+    "stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True},
+    "one-beat-trades": {"duration": "00:12.000", "gate_beats": "1", "cut_source": True},
+}
+DEFERRED_ROUTINE_RECIPES = {
+    "hook-tease": "requires persisted cue/section jumps (#25)",
+    "brake-drop": "requires slip/flux and vinyl brake primitives (#17/#18)",
+    "echo-drop": "requires reverb/echo tail rendering (#19)",
+    "offbeat-swaps": "requires off-beat crossfader/channel-gate automation (#20)",
+}
 AUTOMATABLE_PARAMS = {
     "gain_db",
     "lowpass_hz",
@@ -1054,6 +1064,69 @@ def add_instant_double(
     return next_payload
 
 
+def add_instant_double_routine(
+    payload: dict[str, Any],
+    *,
+    source_id: str,
+    routine_id: str,
+    recipe: str,
+    start: str | None,
+    cache_path: Path = DEFAULT_DJ_CACHE,
+    min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    if recipe in DEFERRED_ROUTINE_RECIPES:
+        raise ValueError(f"recipe {recipe} is not available yet: {DEFERRED_ROUTINE_RECIPES[recipe]}")
+    config = SUPPORTED_INSTANT_DOUBLE_RECIPES.get(recipe)
+    if config is None:
+        known = ", ".join(sorted([*SUPPORTED_INSTANT_DOUBLE_RECIPES, *DEFERRED_ROUTINE_RECIPES]))
+        raise ValueError(f"unknown instant-double recipe {recipe}; known recipes: {known}")
+    found = find_event(payload, source_id)
+    if found is None:
+        raise ValueError(f"event id does not exist: {source_id}")
+    collection, index = found
+    if collection != "clips":
+        raise ValueError(f"instant-double routine source must be a clip: {source_id}")
+    source = payload[collection][index]
+    cached_beatgrid(
+        cache_path,
+        str(source.get("path") or ""),
+        min_confidence=min_confidence,
+        force=force,
+    )
+    double_id = f"{routine_id}-double"
+    next_payload = add_instant_double(
+        payload,
+        source_id=source_id,
+        double_id=double_id,
+        start=start,
+        deck=None,
+        duration=str(config["duration"]),
+        gain_db=None,
+        fade_in_ms=0,
+        fade_out_ms=0,
+        gate_beats=str(config["gate_beats"]),
+        cut_source=bool(config["cut_source"]),
+        cache_path=cache_path,
+        min_confidence=min_confidence,
+        lock_before_ms=lock_before_ms,
+        force=force,
+    )
+    for clip in next_payload.get("clips", []):
+        if clip.get("id") == double_id:
+            clip["routine_id"] = routine_id
+            clip["routine_recipe"] = recipe
+            clip["source_technique"] = "instant-doubles"
+            break
+    for automation in next_payload.get("automations", []):
+        if automation.get("target") in {double_id, source_id} and str(automation.get("planner_role", "")).startswith("instant-double"):
+            automation["routine_id"] = routine_id
+            automation["routine_recipe"] = recipe
+    parse_session(next_payload)
+    return next_payload
+
+
 def add_mashup_bed(
     payload: dict[str, Any],
     *,
@@ -1194,6 +1267,16 @@ def main() -> int:
     instant_double_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
     add_live_edit_args(instant_double_parser)
 
+    instant_double_routine_parser = sub.add_parser("instant-double-routine")
+    instant_double_routine_parser.add_argument("session", type=Path)
+    instant_double_routine_parser.add_argument("--source-id", required=True)
+    instant_double_routine_parser.add_argument("--id", required=True)
+    instant_double_routine_parser.add_argument("--recipe", required=True)
+    instant_double_routine_parser.add_argument("--start")
+    instant_double_routine_parser.add_argument("--cache", type=Path, default=DEFAULT_DJ_CACHE)
+    instant_double_routine_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
+    add_live_edit_args(instant_double_routine_parser)
+
     automate_parser = sub.add_parser("automate")
     automate_parser.add_argument("session", type=Path)
     automate_parser.add_argument("--target", required=True)
@@ -1333,6 +1416,25 @@ def main() -> int:
             ),
         )
         print(f"added instant double {args.id} from {args.source_id}")
+        return 0
+
+    if args.command == "instant-double-routine":
+        lock_before_ms = live_edit_lock(args)
+        write_payload(
+            args.session,
+            add_instant_double_routine(
+                load_payload(args.session),
+                source_id=args.source_id,
+                routine_id=args.id,
+                recipe=args.recipe,
+                start=args.start,
+                cache_path=args.cache,
+                min_confidence=args.min_confidence,
+                lock_before_ms=lock_before_ms,
+                force=args.force,
+            ),
+        )
+        print(f"added instant double routine {args.id} ({args.recipe}) from {args.source_id}")
         return 0
 
     if args.command == "automate":

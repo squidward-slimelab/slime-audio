@@ -665,6 +665,94 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double.trim_start_ms, 44_000)
         self.assertEqual(double.duration_ms, 8_000)
 
+    def test_cli_instant_double_routine_plans_named_recipe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-a",
+                        "--recipe",
+                        "stabs",
+                        "--start",
+                        "00:12.000",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            session = load_session(path)
+            double = next(clip for clip in session.clips if clip.id == "routine-a-double")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            double_payload = next(clip for clip in payload["clips"] if clip["id"] == "routine-a-double")
+
+        self.assertEqual(double.duration_ms, 8_000)
+        self.assertEqual(double.trim_start_ms, 20_000)
+        self.assertEqual(double_payload["planner_role"], "instant-double")
+        self.assertEqual(double_payload["routine_recipe"], "stabs")
+        self.assertTrue(all(automation.get("routine_id") == "routine-a" for automation in payload["automations"]))
+
+    def test_cli_instant_double_routine_refuses_missing_prerequisite_recipe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not available yet"):
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-b",
+                        "--recipe",
+                        "brake-drop",
+                        "--cache",
+                        str(cache),
+                    ]
+                )
+
     def test_cli_mashup_bed_adds_filter_and_gain_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"

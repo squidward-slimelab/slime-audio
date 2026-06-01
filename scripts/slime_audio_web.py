@@ -63,6 +63,9 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
         "pitch_shift_semitones": clip.get("pitch_shift_semitones", 0),
         "planner_role": clip.get("planner_role"),
         "source_clip_id": clip.get("source_clip_id"),
+        "routine_id": clip.get("routine_id"),
+        "routine_recipe": clip.get("routine_recipe"),
+        "source_technique": clip.get("source_technique"),
         **format_title(str(clip.get("path") or "")),
     }
 
@@ -168,6 +171,8 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         return f"{target} | {event.get('param') or 'automation'}"
     if event.get("kind") == "vocal":
         return "mic lean-in"
+    if event.get("routine_recipe"):
+        return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":
         return f"instant double of {event.get('source_clip_id')}"
     artist_album = " - ".join(str(value) for value in (event.get("artist"), event.get("album")) if value)

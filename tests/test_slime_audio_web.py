@@ -107,13 +107,16 @@ class SlimeAudioWebTests(unittest.TestCase):
                     "duration": "00:08.000",
                     "planner_role": "instant-double",
                     "source_clip_id": "a",
+                    "routine_id": "routine-a",
+                    "routine_recipe": "stabs",
+                    "source_technique": "instant-doubles",
                 }
             ),
             None,
         )
 
         self.assertEqual(event["planner_role"], "instant-double")
-        self.assertEqual(event["display_meta"], "instant double of a")
+        self.assertEqual(event["display_meta"], "stabs routine of a")
 
     def test_dashboard_view_model_separates_stale_missing_and_future_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
