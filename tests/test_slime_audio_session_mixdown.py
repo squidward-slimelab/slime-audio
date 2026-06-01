@@ -396,9 +396,9 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             session = load_session(session_path)
             filters = build_filter_complex(session, {}, 48_000, 2)
 
-        self.assertIn("asetrate=48000", filters)
-        self.assertIn("asetrate=3840", filters)
-        self.assertIn("concat=n=11:v=0:a=1", filters)
+        self.assertIn("asetrate=47311", filters)
+        self.assertIn("lowpass=f=920.659", filters)
+        self.assertIn("concat=n=66:v=0:a=1", filters)
         self.assertIn("adelay=9000:all=1", filters)
 
     def test_crossfader_gain_maps_hard_sides_and_center(self):

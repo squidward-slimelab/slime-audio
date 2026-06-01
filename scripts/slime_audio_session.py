@@ -26,7 +26,7 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
     "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": False, "effect": "reverb"},
-    "brake-drop": {"duration": "00:04.000", "gate_beats": "1", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True},
+    "brake-drop": {"duration": "00:04.000", "gate_beats": "1", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True, "duck_source_db": -16.0},
 }
 DEFERRED_ROUTINE_RECIPES = {
 }
@@ -1613,6 +1613,22 @@ def add_instant_double_routine(
         effect_type = str(config["effect"])
         if effect_type == "vinyl_brake":
             double_clip["gain_db"] = -96.0
+            duck_db = float(config.get("duck_source_db", -16.0))
+            duck_start = int(double_clip["start_ms"])
+            duck_duration = max(1, int(round(float(Fraction(str(config.get("effect_beats", "1")))) * (60_000 / bpm))))
+            next_payload.setdefault("automations", []).append(
+                {
+                    "target": source_id,
+                    "param": "gain_db",
+                    "planner_role": "vinyl-brake-source-duck",
+                    "points": [
+                        {"at_ms": duck_start, "value": duck_db},
+                        {"at_ms": duck_start + duck_duration, "value": duck_db},
+                    ],
+                    "routine_id": routine_id,
+                    "routine_recipe": recipe,
+                }
+            )
         effect_duration = str(double_clip["duration_ms"])
         if effect_type == "vinyl_brake":
             effect_beats = str(config.get("effect_beats", "1"))
@@ -1626,7 +1642,7 @@ def add_instant_double_routine(
             duration=effect_duration,
             tail_ms=3500 if effect_type == "reverb" else 0 if effect_type == "vinyl_brake" else 2000,
             wet=1.0 if effect_type == "vinyl_brake" else 0.82 if effect_type == "reverb" else 0.42,
-            gain_db=0.0 if effect_type == "vinyl_brake" else -2.0 if effect_type == "reverb" else -9.0,
+            gain_db=-4.0 if effect_type == "vinyl_brake" else -2.0 if effect_type == "reverb" else -9.0,
             delay_ms=1 if effect_type == "vinyl_brake" else 10 if effect_type == "reverb" else 375,
             feedback=0.0 if effect_type == "vinyl_brake" else 0.5 if effect_type == "reverb" else 0.38,
             room_size=0.75,

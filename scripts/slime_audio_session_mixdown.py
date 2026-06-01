@@ -368,18 +368,19 @@ def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int,
     relative_start_ms = max(0, effect.start_ms - clip.start_ms)
     source_start_ms = clip.trim_start_ms + int(round(relative_start_ms * tempo_factor(clip)))
     total_ms = max(1, effect.duration_ms)
-    slices = max(6, min(16, total_ms // 90))
+    slices = max(18, min(72, total_ms // 15))
     slice_ms = total_ms / slices
     source_cursor_ms = float(source_start_ms)
     parts: list[str] = []
     labels: list[str] = []
     for index in range(slices):
-        progress = index / max(1, slices - 1)
-        speed = max(0.08, (1.0 - progress) ** 1.65)
+        progress = (index + 0.5) / slices
+        speed = max(0.045, (1.0 - progress) ** 1.9)
         out_ms = slice_ms if index < slices - 1 else total_ms - (slice_ms * (slices - 1))
         source_ms = max(2.0, out_ms * speed * tempo_factor(clip))
         part_label = f"{label}part{index}"
-        volume = max(0.0, 1.0 - (progress ** 1.35))
+        volume = max(0.0, (1.0 - progress) ** 0.65)
+        lowpass_hz = max(900.0, 18000.0 * ((900.0 / 18000.0) ** progress))
         parts.append(
             f"[{input_index}:a]"
             f"atrim=start={seconds(int(round(source_cursor_ms)))}:duration={source_ms / 1000:.3f},"
@@ -387,6 +388,7 @@ def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int,
             f"asetrate={max(1, int(round(sample_rate * speed)))},"
             f"aresample={sample_rate},"
             f"atrim=duration={out_ms / 1000:.3f},"
+            f"lowpass=f={lowpass_hz:.3f},"
             f"volume={volume:.6f},"
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
             f"[{part_label}]"
