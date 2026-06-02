@@ -149,6 +149,9 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
     automations = [
         shifted for automation in session.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
     ]
+    deck_automations = [
+        shifted for automation in session.deck_automations if (shifted := shift_automation_window(automation, from_ms)) is not None
+    ]
     return MixSession(
         version=session.version,
         decks=session.decks,
@@ -156,6 +159,7 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         mic_lean_ins=mic_lean_ins,
         effects=effects,
         automations=automations,
+        deck_automations=deck_automations,
         slip_events=slip_events,
         fader_routing=session.fader_routing,
     )
@@ -224,11 +228,48 @@ def session_duration_ms(session: MixSession, lean_in_default_ms: int = 5000) -> 
     ends.extend(event.end_ms for event in session.slip_events)
     for param in ("duck_volume", "lowpass_hz"):
         ends.extend(end for _start, end, _value in collect_master_automation(session, param))
+    for automation in session.deck_automations:
+        if automation.points:
+            ends.append(max(point.at_ms for point in automation.points))
     return max(ends, default=1000)
 
 
 def window_from_automation(automation: Automation) -> tuple[int, int, float]:
     return automation.points[0].at_ms, automation.points[-1].at_ms, float(automation.points[0].value)
+
+
+def interpolate_automation_value(left: AutomationPoint, right: AutomationPoint, at_ms: int) -> float:
+    left_value = float(left.value)
+    right_value = float(right.value)
+    if right.at_ms <= left.at_ms:
+        return right_value
+    ratio = max(0.0, min(1.0, (at_ms - left.at_ms) / (right.at_ms - left.at_ms)))
+    return left_value + ((right_value - left_value) * ratio)
+
+
+def deck_automation_windows(session: MixSession, clip: Clip, param: str) -> list[tuple[int, int, float]]:
+    if clip.end_ms is None:
+        return []
+    windows: list[tuple[int, int, float]] = []
+    for automation in session.deck_automations:
+        if automation.target != clip.deck or automation.param != param:
+            continue
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        for left, right in zip(points, points[1:]):
+            if right.at_ms <= left.at_ms:
+                continue
+            overlap_start_ms = max(left.at_ms, clip.start_ms)
+            overlap_end_ms = min(right.at_ms, clip.end_ms)
+            if overlap_end_ms <= overlap_start_ms:
+                continue
+            windows.append(
+                (
+                    max(0, overlap_start_ms - clip.start_ms),
+                    max(0, overlap_end_ms - clip.start_ms),
+                    interpolate_automation_value(left, right, overlap_start_ms),
+                )
+            )
+    return sorted(windows, key=lambda item: item[0])
 
 
 def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list[tuple[int, int, float]]:
@@ -245,6 +286,7 @@ def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list
         if end_ms <= start_ms:
             continue
         windows.append((start_ms, end_ms, float(points[0].value)))
+    windows.extend(deck_automation_windows(session, clip, param))
     return sorted(windows, key=lambda item: item[0])
 
 

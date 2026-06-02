@@ -91,13 +91,13 @@ If a network share is nearly full, mounted read-only, or missing, choose another
 Use these controls deliberately. They are part of the creative surface, not hidden implementation details.
 
 - `trim_db`: input trim for loudness matching. Set this once per clip/source so tracks enter the mixer at comparable level.
-- `gain_db`: channel fader/performance level. Use static gain for placement and `gain_db` automation for fades, cuts, trades, and source replacement.
+- `gain_db`: static clip placement only. Performance fader/EQ/filter moves belong in top-level `deck_automations` targeted to deck names such as `deck-2`.
 - `trim_start_ms` / `duration_ms`: source window. Use these for cueing hooks, drops, loops, and phrase-safe sections.
 - `fade_in_ms` / `fade_out_ms`: click protection and short musical fades. Do not use them to fake an effect tail.
 - `tempo_shift_pct` / `pitch_shift_semitones`: rendered beat/key correction. Keep it conservative and explain why it helps the overlap.
 - `playback_rate` / `reverse`: record-motion scratch material where speed and pitch move together.
-- `lowpass_hz` / `highpass_hz`: filter moves and bed carving.
-- `eq_low_db` / `eq_mid_db` / `eq_high_db`: per-track EQ. Use this before burying a bed with extreme filters.
+- `lowpass_hz` / `highpass_hz`: deck filter moves and bed carving. Automate these on the deck, not the clip, unless you are deliberately building a clip-local special case.
+- `eq_low_db` / `eq_mid_db` / `eq_high_db`: deck EQ. Use this before burying a bed with extreme filters.
 - `send_reverb`, `duck_volume`, and effect `wet` / `gain_db`: send-style effect balance. If an effect is too loud, lower the send/effect first instead of ducking the lead into a weird hole.
 - `crossfader.position` plus `fader_routing.deck_assignments`: controller-style cuts and blends between deck sides.
 - `deck-5`: dedicated vocal channel for `add-mic`/TTS lean-ins. Keep it `THRU` in fader routing and do not use it for beds, doubles, scratches, or normal music clips.
@@ -110,7 +110,7 @@ Mix in this order:
 
 1. Set `trim_db` per source for loudness matching before touching fader balance. If a source is already quiet, raise or normalize its trim instead of compensating with strange automation later.
 2. Classify each clip as lead, rhythm bed, ghost texture, double/routine, effect, or vocal. The intended role determines its level.
-3. Balance with `gain_db`/fader automation, then carve with EQ and filters. For rhythm beds, prefer EQ and high-pass/low-pass carving over burying the whole deck.
+3. Balance with deck `gain_db` fader automation, then carve with deck EQ and filters. For rhythm beds, prefer EQ and high-pass/low-pass carving over burying the whole deck.
 4. Render and listen to the overlap windows where beds matter. A dashboard that shows a bed is not proof that the bed is audible.
 5. Fix failed windows, then render again.
 
@@ -249,7 +249,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --highpass-hz 100
 
    python3 scripts/slime_audio_live_edit.py automate \
-     --target lead-bed-a \
+     --target deck-2 \
      --param eq_low_db \
      --points-json '[{"at":"01:16.000","value":-4},{"at":"02:04.000","value":-4}]'
    ```

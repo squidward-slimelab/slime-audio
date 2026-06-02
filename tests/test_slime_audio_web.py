@@ -357,6 +357,23 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(dashboard["automation"][0]["param"], "gain_db")
         self.assertEqual(dashboard["health"]["runner_state"], "stale")
 
+    def test_dashboard_places_deck_automation_on_deck_lane(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1", "deck-2"],
+            "clips": [{"id": "lead", "deck": "deck-2", "path": "/music/A/B/a.flac", "start": 0, "duration": 20_000}],
+            "deck_automations": [
+                {"target": "deck-2", "param": "gain_db", "points": [{"at": 0, "value": -9}, {"at": 20_000, "value": -8}]}
+            ],
+        }
+
+        events = [web.normalize_event(event, None) for event in web.session_events(payload)]
+        automation = next(event for event in events if event["kind"] == "automation")
+
+        self.assertEqual(automation["lane"], "deck-2")
+        self.assertEqual(automation["target"], "deck-2")
+        self.assertEqual(automation["display_meta"], "deck-2 | gain_db | -9 -> -8")
+
     def test_native_runner_window_is_not_stale_between_state_writes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"

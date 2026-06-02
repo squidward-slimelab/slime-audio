@@ -270,7 +270,15 @@ def new_set(
     directory = set_dir(sets_dir, clean_slug)
     if directory.exists() and not overwrite:
         raise FileExistsError(f"set already exists: {clean_slug}")
-    payload = {"version": 1, "decks": ["deck-1", "deck-2", "deck-3", "deck-4"], "clips": [], "mic_lean_ins": [], "effects": [], "automations": []}
+    payload = {
+        "version": 1,
+        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+        "clips": [],
+        "mic_lean_ins": [],
+        "effects": [],
+        "automations": [],
+        "deck_automations": [],
+    }
     session_path = directory / "session.json"
     write_payload(session_path, payload)
     metadata = set_metadata(title=title, slug=clean_slug, session_path=session_path, sets_dir=sets_dir)

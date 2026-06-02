@@ -125,6 +125,8 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
             events.append(automation_payload(automation, owner=str(lean_in.get("id"))))
     for automation in payload.get("automations", []):
         events.append(automation_payload(automation))
+    for automation in payload.get("deck_automations", payload.get("deckAutomations", [])):
+        events.append({**automation_payload(automation), "deck": automation.get("target")})
     for effect in payload.get("effects", []):
         start_ms = parse_ms(effect.get("start_ms", effect.get("start", 0)), "effect start")
         duration_ms = parse_ms(effect.get("duration_ms", effect.get("duration", 0)), "effect duration")

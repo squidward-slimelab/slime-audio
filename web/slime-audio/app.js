@@ -261,12 +261,14 @@ function laneAutomationEvents(lane) {
   const allTimelineIds = eventIds((dashboardState.dashboard?.events || []).filter((event) => event.kind !== "automation"));
   if (lane.id === "fader") return automations.filter((event) => event.target === "crossfader");
   if (lane.id === "automation") {
-      return automations.filter((event) => event.target !== "crossfader" && !allTimelineIds.has(String(event.target || event.owner || "")));
+    return automations.filter((event) => event.target !== "crossfader" && !allTimelineIds.has(String(event.target || event.owner || "")));
   }
+  const directDeckAutomations = automations.filter((event) => event.target === lane.id);
   const laneAutomations = automations.filter((event) => laneIds.has(String(event.target || "")) || laneIds.has(String(event.owner || "")));
-  const deckGain = deckGainAutomation(lane, laneAutomations);
+  const deckGain = directDeckAutomations.some((event) => event.param === "gain_db") ? null : deckGainAutomation(lane, laneAutomations);
   return [
     ...(deckGain ? [deckGain] : []),
+    ...directDeckAutomations,
     ...laneAutomations.filter((event) => event.param !== "gain_db"),
   ];
 }

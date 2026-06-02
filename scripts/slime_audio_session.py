@@ -235,6 +235,7 @@ class MixSession:
     mic_lean_ins: list[MicLeanIn]
     effects: list[EffectEvent]
     automations: list[Automation]
+    deck_automations: list[Automation] = field(default_factory=list)
     slip_events: list[SlipEvent] = field(default_factory=list)
     fader_routing: dict[str, str] = field(default_factory=dict)
 
@@ -589,6 +590,7 @@ def playlist_to_session_payload(
         "clips": clips,
         "mic_lean_ins": [],
         "automations": [],
+        "deck_automations": [],
     }
     parse_session(payload)
     return payload
@@ -609,6 +611,7 @@ def parse_session(payload: dict[str, Any]) -> MixSession:
         mic_lean_ins=[parse_mic_lean_in(item) for item in payload.get("mic_lean_ins", payload.get("micLeanIns", []))],
         effects=[parse_effect_event(item) for item in payload.get("effects", [])],
         automations=[parse_automation(item) for item in payload.get("automations", [])],
+        deck_automations=[parse_automation(item) for item in payload.get("deck_automations", payload.get("deckAutomations", []))],
         slip_events=[parse_slip_event(item) for item in payload.get("slip_events", payload.get("slipEvents", []))],
         fader_routing=parse_fader_routing(payload, decks),
     )
@@ -655,7 +658,7 @@ def validate_session(session: MixSession) -> None:
         if clip.playback_rate <= 0:
             errors.append(f"clip {clip.id} playback_rate must be positive")
         for automation in clip.automations:
-            validate_automation(automation, session.event_ids, errors, prefix=f"clip {clip.id}")
+            validate_automation(automation, session.event_ids, deck_set, errors, prefix=f"clip {clip.id}", allow_deck_targets=False)
 
     for deck in session.decks:
         clips = sorted(
@@ -672,7 +675,7 @@ def validate_session(session: MixSession) -> None:
         if lean_in.start_ms < 0:
             errors.append(f"mic lean-in {lean_in.id} starts before zero")
         for effect in lean_in.effects:
-            validate_automation(effect, session.event_ids, errors, prefix=f"mic lean-in {lean_in.id}")
+            validate_automation(effect, session.event_ids, deck_set, errors, prefix=f"mic lean-in {lean_in.id}", allow_deck_targets=False)
 
     for effect in session.effects:
         if effect.target not in session.event_ids and not effect.target.startswith("deck:") and effect.target not in {"master", "all"}:
@@ -700,16 +703,37 @@ def validate_session(session: MixSession) -> None:
             errors.append(f"slip event {event.id} resume must be after source start")
 
     for automation in session.automations:
-        validate_automation(automation, session.event_ids, errors, prefix="session")
+        validate_automation(automation, session.event_ids, deck_set, errors, prefix="session", allow_deck_targets=False)
+
+    for automation in session.deck_automations:
+        validate_automation(automation, session.event_ids, deck_set, errors, prefix="deck", allow_deck_targets=True)
+        if automation.target not in deck_set:
+            errors.append(f"deck automation target must be a deck: {automation.target}")
+        if automation.param == "position":
+            errors.append(f"deck automation {automation.target}.position belongs on crossfader automation")
 
     if errors:
         raise ValueError("\n".join(errors))
 
 
-def validate_automation(automation: Automation, event_ids: set[str], errors: list[str], prefix: str) -> None:
+def validate_automation(
+    automation: Automation,
+    event_ids: set[str],
+    deck_ids: set[str],
+    errors: list[str],
+    prefix: str,
+    *,
+    allow_deck_targets: bool,
+) -> None:
     if automation.param not in AUTOMATABLE_PARAMS:
         errors.append(f"{prefix} automation {automation.target}.{automation.param} is not an automatable param")
-    if automation.target not in event_ids and automation.target not in {"master", "all", "crossfader"} and not automation.target.startswith("deck:"):
+    target_ok = (
+        automation.target in event_ids
+        or automation.target in {"master", "all", "crossfader"}
+        or automation.target.startswith("deck:")
+        or (allow_deck_targets and automation.target in deck_ids)
+    )
+    if not target_ok:
         errors.append(f"{prefix} automation target does not exist: {automation.target}")
     previous = -1
     for point in automation.points:
@@ -753,6 +777,7 @@ def session_summary(session: MixSession) -> dict[str, Any]:
         "slip_event_count": len(session.slip_events),
         "automation_count": (
             len(session.automations)
+            + len(session.deck_automations)
             + sum(len(clip.automations) for clip in session.clips)
             + sum(len(lean_in.effects) for lean_in in session.mic_lean_ins)
         ),
@@ -834,7 +859,16 @@ def base_payload(path: Path, create: bool) -> dict[str, Any]:
         return load_payload(path)
     if not create:
         raise FileNotFoundError(path)
-    return {"version": 1, "decks": DEFAULT_SESSION_DECKS, "clips": [], "mic_lean_ins": [], "effects": [], "slip_events": [], "automations": []}
+    return {
+        "version": 1,
+        "decks": DEFAULT_SESSION_DECKS,
+        "clips": [],
+        "mic_lean_ins": [],
+        "effects": [],
+        "slip_events": [],
+        "automations": [],
+        "deck_automations": [],
+    }
 
 
 def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None:
@@ -1231,7 +1265,11 @@ def add_automation(
                 force=force,
             )
     automation = {"target": target, "param": param, "points": points}
-    next_payload.setdefault("automations", []).append(automation)
+    decks = [str(deck) for deck in next_payload.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
+    if target in decks and target not in {str(event.get("id")) for event in next_payload.get("clips", [])}:
+        next_payload.setdefault("deck_automations", []).append(automation)
+    else:
+        next_payload.setdefault("automations", []).append(automation)
     parse_session(next_payload)
     return next_payload
 
@@ -1887,16 +1925,23 @@ def add_mashup_bed(
         raise ValueError("--end must be after --start")
     guard_event_live_edit(next_payload, bed_id, lock_before_ms=lock_before_ms, force=force)
     guard_live_edit(label=f"mashup bed automation for {bed_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+    found = find_event(next_payload, bed_id)
+    if found is None:
+        raise ValueError(f"bed clip does not exist: {bed_id}")
+    bed_payload = next_payload[found[0]][found[1]]
+    deck = str(bed_payload.get("deck") or "")
+    if not deck:
+        raise ValueError(f"bed clip {bed_id} has no deck")
 
     def points(value: float) -> list[dict[str, float | int]]:
         return [{"at_ms": start_ms, "value": value}, {"at_ms": end_ms, "value": value}]
 
-    automations = next_payload.setdefault("automations", [])
-    automations.append({"target": bed_id, "param": "gain_db", "points": points(gain_db)})
+    automations = next_payload.setdefault("deck_automations", [])
+    automations.append({"target": deck, "param": "gain_db", "points": points(gain_db), "source_clip_id": bed_id})
     if lowpass_hz is not None:
-        automations.append({"target": bed_id, "param": "lowpass_hz", "points": points(lowpass_hz)})
+        automations.append({"target": deck, "param": "lowpass_hz", "points": points(lowpass_hz), "source_clip_id": bed_id})
     if highpass_hz is not None:
-        automations.append({"target": bed_id, "param": "highpass_hz", "points": points(highpass_hz)})
+        automations.append({"target": deck, "param": "highpass_hz", "points": points(highpass_hz), "source_clip_id": bed_id})
     parse_session(next_payload)
     return next_payload
 

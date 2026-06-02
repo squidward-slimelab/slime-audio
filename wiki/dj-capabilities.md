@@ -54,7 +54,8 @@ Use the real mixer surface:
 
 - `trim_db`: source input trim/loudness matching.
 - `gain_db`: channel fader or static placement.
-- `gain_db` automation: fader moves, fades, cuts, and replacement ducks.
+- `deck_automations`: canonical deck fader/EQ/filter state. Target deck names directly, for example `deck-2.gain_db`, so the knob move follows the deck timeline instead of a particular clip id.
+- Clip-targeted `gain_db` automation: clip-local gates and replacement ducks only.
 - `eq_low_db`: low shelf around 120 Hz.
 - `eq_mid_db`: 1 kHz bell.
 - `eq_high_db`: high shelf around 6.5 kHz.

@@ -22,9 +22,9 @@ Common clip controls:
 - `trim_start_ms` chooses the source-file cue.
 - `duration_ms` limits the section used.
 - `trim_db` matches source loudness before performance moves.
-- `gain_db` and `gain_db` automation are channel fader moves.
-- `eq_low_db`, `eq_mid_db`, and `eq_high_db` carve beds and leads.
-- `lowpass_hz` and `highpass_hz` are filter moves and bed carving controls.
+- `gain_db` is static clip placement.
+- Top-level `deck_automations` targeted to `deck-1`, `deck-2`, `deck-3`, `deck-4`, or `deck-5` are the canonical channel fader and knob moves. Use deck `gain_db` for fader moves, deck `eq_low_db`/`eq_mid_db`/`eq_high_db` for EQ, and deck `lowpass_hz`/`highpass_hz` for filters. Mixdown resolves those absolute-timeline points onto the clip currently occupying that deck.
+- Clip-targeted `gain_db` automation is reserved for clip-local gates/replacement moves, not normal deck fader state.
 - `tempo_shift_pct` and `pitch_shift_semitones` are rendered beat/key correction controls. Keep them conservative and intentional.
 - `reverse`, `playback_rate`, and `scratch_motion` are record-motion/scratch controls where speed and pitch move together.
 

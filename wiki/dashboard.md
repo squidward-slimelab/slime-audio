@@ -7,7 +7,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 - Show active runner state and stale/playback status.
 - Render the canonical DJ session timeline, including normal decks, attached effect lanes, the dedicated `deck-5` vocal lane, fader assignments, automation, effects, slip events, and mic lean-ins.
 - Order deck lanes and the mixer mirror as `deck-3`, `deck-1`, `MIC`, `deck-2`, `deck-4`, matching the physical/operator view.
-- Overlay per-track automation curves on timeline rows. Clip-owned EQ/filter automation is remapped from the generic automation events back onto the target clip lane, while clip `gain_db` automation is collapsed into one synthetic deck gain/fader curve per deck row. Crossfader automation remains on the fader lane. Hovering a curve shows automation values that are active at the hovered timestamp, rather than every future automation event on that deck.
+- Overlay per-deck automation curves on timeline rows. Top-level `deck_automations` target deck names directly and render on that deck row; legacy clip-owned EQ/filter automation is still remapped from generic automation events back onto the target clip lane, while legacy clip `gain_db` automation is collapsed into one synthetic deck gain/fader curve per deck row for compatibility. Crossfader automation remains on the fader lane. Hovering a curve shows automation values that are active at the hovered timestamp, rather than every future automation event on that deck.
 - Draw clip waveforms in timeline blocks through the lazy `/api/waveform` endpoint. The endpoint decodes a trimmed clip segment with `ffmpeg`, returns normalized bass/mid/high peak bands, and caches results under `runtime/waveform-cache.json` keyed by file identity plus trim/duration/bin count. The frontend requests bins from clip pixel width so waveform bar density stays visually consistent across short and long timeline blocks, and renders bass/mid/high as red/green/blue overlays.
 - Expose named set archive browsing without loading archived sets into playback.
 - Provide a compact operational view of what the native session runner is about to play.
@@ -35,6 +35,7 @@ The frontend consumes the server view model from `/api/state`. Keep this contrac
 - style flags
 - fader assignments
 - crossfader automation
+- deck automation for mixer fader/EQ/filter moves
 - slip events
 - attached effect lane metadata
 - dedicated vocal lane metadata for mic lean-ins/TTS drops

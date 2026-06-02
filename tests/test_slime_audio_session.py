@@ -1493,10 +1493,50 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(path)
 
-        self.assertEqual([automation.param for automation in session.automations], ["gain_db", "lowpass_hz", "highpass_hz"])
-        self.assertEqual([automation.target for automation in session.automations], ["bed", "bed", "bed"])
-        self.assertEqual(session.automations[0].points[0].at_ms, 16_000)
-        self.assertEqual(session.automations[0].points[-1].at_ms, 48_000)
+        self.assertEqual(session.automations, [])
+        self.assertEqual([automation.param for automation in session.deck_automations], ["gain_db", "lowpass_hz", "highpass_hz"])
+        self.assertEqual([automation.target for automation in session.deck_automations], ["deck-1", "deck-1", "deck-1"])
+        self.assertEqual(session.deck_automations[0].points[0].at_ms, 16_000)
+        self.assertEqual(session.deck_automations[0].points[-1].at_ms, 48_000)
+
+    def test_cli_automate_deck_writes_deck_automation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "bed", "deck": "deck-2", "path": "/music/bed.flac", "start": 0, "duration": 60_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "automate",
+                        str(path),
+                        "--target",
+                        "deck-2",
+                        "--param",
+                        "gain_db",
+                        "--points-json",
+                        '[{"at":"00:00.000","value":-9},{"at":"01:00.000","value":-8}]',
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            session = load_session(path)
+
+        self.assertEqual(payload.get("automations", []), [])
+        self.assertEqual(payload["deck_automations"][0]["target"], "deck-2")
+        self.assertEqual(session.deck_automations[0].param, "gain_db")
 
 
 if __name__ == "__main__":

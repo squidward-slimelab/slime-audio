@@ -361,6 +361,38 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("highpass=enable='between(t,8.000,20.000)':f=120.000", filters)
         self.assertIn("volume=enable='between(t,8.000,20.000)':volume=0.354813", filters)
 
+    def test_mixdown_applies_deck_automation_to_clip_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-2",
+                                "path": "/music/bed.flac",
+                                "start": "00:10.000",
+                                "duration": "00:30.000",
+                            }
+                        ],
+                        "deck_automations": [
+                            {
+                                "target": "deck-2",
+                                "param": "gain_db",
+                                "points": [{"at": "00:08.000", "value": -9}, {"at": "00:38.000", "value": -6}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("volume=enable='between(t,0.000,28.000)':volume=0.363078", filters)
+
     def test_mixdown_filter_renders_echo_effect_with_tail(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
