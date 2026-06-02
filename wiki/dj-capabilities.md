@@ -61,7 +61,7 @@ Use the real mixer surface:
 - `lowpass_hz` and `highpass_hz`: filter moves and broad bed carving.
 - `tempo_shift_pct` and `pitch_shift_semitones`: rendered tempo/key correction.
 - `crossfader.position`: `-1` hard A, `0` center, `1` hard B.
-- `fader_routing.deck_assignments`: normally `deck-1`/`deck-3` on A and `deck-2`/`deck-4` on B.
+- `fader_routing.deck_assignments`: normally `deck-1`/`deck-3` on A, `deck-2`/`deck-4` on B, and the dedicated vocal `deck-5` on THRU.
 
 Hard lead ducks are risky. They are correct for replacement moves like scratches and brakes, but they can sound like a broken volume drop around echo stabs or bed flourishes. If an effect is too loud, lower the effect clip/send first.
 

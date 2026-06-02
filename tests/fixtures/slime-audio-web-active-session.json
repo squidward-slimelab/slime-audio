@@ -1,12 +1,13 @@
 {
   "version": 1,
-  "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+  "decks": ["deck-1", "deck-2", "deck-3", "deck-4", "deck-5"],
   "fader_routing": {
     "deck_assignments": {
       "deck-1": "A",
       "deck-2": "B",
       "deck-3": "A",
-      "deck-4": "B"
+      "deck-4": "B",
+      "deck-5": "THRU"
     }
   },
   "clips": [
@@ -101,6 +102,7 @@
   "mic_lean_ins": [
     {
       "id": "lean-a",
+      "deck": "deck-5",
       "start_ms": 104000,
       "text": "short incoming vocal note",
       "volume": 1.4,

@@ -82,9 +82,10 @@ def add_mic_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--id", required=True)
     parser.add_argument("--start", required=True)
     parser.add_argument("--text", required=True)
+    parser.add_argument("--deck", default=session.VOCAL_DECK)
     parser.add_argument("--voice")
     parser.add_argument("--rate")
-    parser.add_argument("--volume", type=float, default=1.0)
+    parser.add_argument("--volume", type=float, default=1.45)
     parser.add_argument("--duck-volume", type=float)
     parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     parser.add_argument("--duck-ms", type=int, default=2500)
@@ -237,6 +238,7 @@ def main() -> int:
                 lean_id=args.id,
                 start=args.start,
                 text=args.text,
+                deck=args.deck,
                 voice=args.voice,
                 rate=args.rate,
                 volume=args.volume,

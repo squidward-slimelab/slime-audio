@@ -61,7 +61,7 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(data["dashboard"]["transport"]["status"], "playing")
         self.assertEqual(data["dashboard"]["transport"]["playhead_ms"], 70_000)
         self.assertEqual(data["dashboard"]["now"]["id"], "c")
-        self.assertEqual([lane["id"] for lane in data["dashboard"]["lanes"][:4]], ["deck-3", "deck-1", "deck-2", "deck-4"])
+        self.assertEqual([lane["id"] for lane in data["dashboard"]["lanes"][:5]], ["deck-3", "deck-1", "deck-2", "deck-4", "deck-5"])
         self.assertEqual(data["dashboard"]["session"]["counts"]["song"], 3)
         self.assertEqual([event["status"] for event in data["dashboard"]["events"] if event["kind"] == "song"], ["done", "done", "current"])
 
@@ -96,6 +96,23 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual([event["kind"] for event in events], ["song", "automation", "automation", "vocal"])
         self.assertEqual(events[0]["title"], "a")
         self.assertEqual(events[-1]["text"], "hello")
+        self.assertEqual(events[-1]["deck"], "deck-5")
+
+    def test_dashboard_places_vocals_on_dedicated_vocal_lane(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+            "clips": [],
+            "mic_lean_ins": [{"id": "drop", "start": "00:10.000", "text": "hello"}],
+        }
+
+        events = [web.normalize_event(event, None) for event in web.session_events(payload)]
+        vocal = next(event for event in events if event["kind"] == "vocal")
+        lanes = web.lane_rows(events)
+
+        self.assertEqual(vocal["lane"], "deck-5")
+        self.assertEqual(vocal["display_meta"], "mic lean-in | vocal channel")
+        self.assertIn("deck-5", [lane["id"] for lane in lanes])
 
     def test_dashboard_shows_crossfader_routing_and_motion(self):
         with tempfile.TemporaryDirectory() as temp_dir:

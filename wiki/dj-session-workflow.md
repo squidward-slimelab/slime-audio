@@ -32,7 +32,8 @@ Deck convention for creative sets:
 
 - Main full tracks normally alternate on `deck-2` and `deck-3`.
 - `deck-1` and `deck-4` are useful for doubles, shadows, beds, and utility moves.
-- Crossfader routing normally follows controller-style sides: `deck-1`/`deck-3` on `A`, `deck-2`/`deck-4` on `B`.
+- `deck-5` is the dedicated vocal lane for mic lean-ins/TTS drops. Do not use it for music beds or doubles.
+- Crossfader routing normally follows controller-style sides: `deck-1`/`deck-3` on `A`, `deck-2`/`deck-4` on `B`, and `deck-5` on `THRU`.
 
 ## Main Tools
 
@@ -48,7 +49,7 @@ Make safe live edits against the active session:
 ```bash
 python3 scripts/slime_audio_live_edit.py add-clip --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000 --trim-db -3 --gain-db -6 --reason "add future bed"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]' --reason "shape bed entrance"
-python3 scripts/slime_audio_live_edit.py fader-routing --assign deck-1=A --assign deck-3=A --assign deck-2=B --assign deck-4=B --reason "DDJ-style routing"
+python3 scripts/slime_audio_live_edit.py fader-routing --assign deck-1=A --assign deck-3=A --assign deck-2=B --assign deck-4=B --assign deck-5=THRU --reason "DDJ-style routing plus vocal lane"
 python3 scripts/slime_audio_live_edit.py crossfader --points-json '[{"at_ms":84000,"value":-1},{"at_ms":88000,"value":1}]' --reason "planned fader cut"
 ```
 

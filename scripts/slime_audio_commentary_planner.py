@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from slime_audio_session import (
+    VOCAL_DECK,
     add_mic_lean_in,
     base_payload,
     load_payload,
@@ -217,6 +218,7 @@ def add_commentary(
     lean_id: str,
     voice: str | None,
     rate: str | None,
+    deck: str,
     volume: float,
     duck_volume: float,
     lowpass_hz: float,
@@ -229,6 +231,7 @@ def add_commentary(
         lean_id=lean_id,
         start=format_ms(candidate.start_ms),
         text=candidate.text,
+        deck=deck,
         voice=voice,
         rate=rate,
         volume=volume,
@@ -263,6 +266,7 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tension-plan", type=Path)
     parser.add_argument("--voice")
     parser.add_argument("--rate")
+    parser.add_argument("--deck", default=VOCAL_DECK)
     parser.add_argument("--volume", type=float, default=1.7)
     parser.add_argument("--duck-volume", type=float, default=0.45)
     parser.add_argument("--lowpass-hz", type=float, default=1400.0)
@@ -317,6 +321,7 @@ def main() -> int:
                 lean_id=lean_id,
                 voice=args.voice,
                 rate=args.rate,
+                deck=args.deck,
                 volume=args.volume,
                 duck_volume=args.duck_volume,
                 lowpass_hz=args.lowpass_hz,

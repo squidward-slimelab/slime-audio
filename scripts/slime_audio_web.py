@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from slime_audio_session import load_payload, parse_ms, parse_session, playhead_ms_from_state
+from slime_audio_session import VOCAL_DECK, load_payload, parse_ms, parse_session, playhead_ms_from_state
 from slime_audio_sets import (
     DEFAULT_ACTIVE_SET,
     DEFAULT_SETS_DIR,
@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
-DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4"]
+DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4", VOCAL_DECK]
 DEFAULT_VOCAL_DURATION_MS = 4500
 
 
@@ -101,7 +101,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "id": lean_in.get("id"),
                 "kind": "vocal",
-                "deck": "voice",
+                "deck": lean_in.get("deck") or VOCAL_DECK,
                 "start_ms": start_ms,
                 "duration_ms": None,
                 "end_ms": None,
@@ -247,7 +247,7 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
                 value_text = f" | {values[0]} -> {values[-1]}" if len(values) > 1 else f" | {values[0]}"
         return f"{target} | {event.get('param') or 'automation'}{value_text}"
     if event.get("kind") == "vocal":
-        return "mic lean-in"
+        return "mic lean-in | vocal channel"
     if event.get("kind") == "effect":
         target = event.get("target") or "session"
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
@@ -350,7 +350,7 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         fx_lane = f"{lane}-fx"
         if fx_lane in active_lanes:
             ordered_lanes.append(fx_lane)
-    for lane in ("voice", "effects", "fader", "automation"):
+    for lane in ("effects", "fader", "automation"):
         ordered_lanes.append(lane)
     for event in events:
         lane = str(event.get("lane") or "timeline")

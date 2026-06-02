@@ -7,7 +7,7 @@ import random
 import time
 from pathlib import Path
 
-from slime_audio_session import add_mic_lean_in, base_payload, write_payload
+from slime_audio_session import VOCAL_DECK, add_mic_lean_in, base_payload, write_payload
 
 DEFAULT_PHRASES = [
     "quick squid note. the mix is still alive and making questionable decisions.",
@@ -55,6 +55,7 @@ def append_lean_in(
     lean_id: str,
     start_ms: int,
     text: str,
+    deck: str,
     voice: str | None,
     rate: str | None,
     volume: float,
@@ -69,6 +70,7 @@ def append_lean_in(
         lean_id=lean_id,
         start=format_ms(start_ms),
         text=text,
+        deck=deck,
         voice=voice,
         rate=rate,
         volume=volume,
@@ -86,6 +88,7 @@ def main() -> int:
     parser.add_argument("--session", type=Path, default=Path("runtime/mix-session.json"))
     parser.add_argument("--create", action="store_true")
     parser.add_argument("--id-prefix", default="lean-in")
+    parser.add_argument("--deck", default=VOCAL_DECK)
     parser.add_argument("--start", default="00:00.000")
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--gap-ms", type=int, default=240_000)
@@ -93,7 +96,7 @@ def main() -> int:
     parser.add_argument("--phrases-file", type=Path)
     parser.add_argument("--voice")
     parser.add_argument("--rate")
-    parser.add_argument("--volume", type=float, default=1.0, help="Voice gain multiplier applied during session mixdown.")
+    parser.add_argument("--volume", type=float, default=1.45, help="Voice gain multiplier applied during session mixdown.")
     parser.add_argument("--duck-volume", type=float, default=0.45)
     parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     parser.add_argument("--duck-ms", type=int, default=3500)
@@ -119,6 +122,7 @@ def main() -> int:
                 lean_id=lean_id,
                 start_ms=event_start_ms,
                 text=text,
+                deck=args.deck,
                 voice=args.voice,
                 rate=args.rate,
                 volume=args.volume,

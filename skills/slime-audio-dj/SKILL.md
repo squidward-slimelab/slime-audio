@@ -100,6 +100,7 @@ Use these controls deliberately. They are part of the creative surface, not hidd
 - `eq_low_db` / `eq_mid_db` / `eq_high_db`: per-track EQ. Use this before burying a bed with extreme filters.
 - `send_reverb`, `duck_volume`, and effect `wet` / `gain_db`: send-style effect balance. If an effect is too loud, lower the send/effect first instead of ducking the lead into a weird hole.
 - `crossfader.position` plus `fader_routing.deck_assignments`: controller-style cuts and blends between deck sides.
+- `deck-5`: dedicated vocal channel for `add-mic`/TTS lean-ins. Keep it `THRU` in fader routing and do not use it for beds, doubles, scratches, or normal music clips.
 
 ### Creative Moves
 
@@ -116,7 +117,7 @@ Prefer named edit-api routines when they fit, then customize with automation or 
 - `slip-brake`: phrase-safe brake color that returns exactly on time.
 - `brake-drop`: real timing brake that mutes/replaces the source during the slowdown and resumes late from the pre-brake source position.
 - `add-effect`: custom `echo`, `reverb`, or `vinyl_brake` events on a clip, deck, master, or all.
-- `add-mic` / commentary planner: short hosted lean-ins with explicit ducking and low-pass automation.
+- `add-mic` / commentary planner: short hosted lean-ins on `deck-5` with explicit voice volume, ducking, and low-pass automation.
 
 ### Effect Semantics
 
@@ -141,7 +142,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
 - Use BPM/key/Camelot analysis to construct overlays, not just to sort songs. Prefer exact or corrected key-fit for layered vocals/hooks and rhythm beds.
 - Add visible edit-api moves throughout the set: filter rides, EQ carving, echo/reverb throws, instant doubles, stabs, offbeat swaps, hook teases, scratches, slip brakes, or brake drops.
 - Add a healthy amount of TTS vocal drops. They should be short, spaced out, and about what is happening in the songs: texture, groove, genre lineage, energy, transition intent, a hook, or why the next layer fits.
-- The dashboard should visibly show the arrangement: main decks, bed/utility decks, attached `deck-N-fx` lanes, effects, fader motion, automation, and mic lean-ins. If it visually looks like one song after another, the set is not done.
+- The dashboard should visibly show the arrangement: main decks, bed/utility decks, attached `deck-N-fx` lanes, the `deck-5` vocal lane, effects, fader motion, automation, and mic lean-ins. If it visually looks like one song after another, the set is not done.
 
 ### Build Sequence
 
@@ -194,7 +195,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --apply
    ```
 
-6. Add beds and carve them. Use `deck-1`/`deck-4` as utility lanes for beds, doubles, shadows, and stabs while `deck-2`/`deck-3` carry the main A/B lead flow.
+6. Add beds and carve them. Use `deck-1`/`deck-4` as utility lanes for beds, doubles, shadows, and stabs while `deck-2`/`deck-3` carry the main A/B lead flow. Reserve `deck-5` for vocals only.
 
    ```bash
    python3 scripts/slime_audio_live_edit.py add-clip \
@@ -263,6 +264,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
    python3 scripts/slime_audio_lean_ins.py \
      --session runtime/mix-session.json \
      --create \
+     --deck deck-5 \
      --start 02:20.000 \
      --text "short music-aware line here" \
      --volume 1.7 \
@@ -429,13 +431,15 @@ When sending a standalone song section or drop clip to the operator, export it l
 Lean-ins are planned mix-session events, not immediate side streams.
 
 - Always schedule lean-ins at an explicit mix timeline time with `--start`; do not fire them "now" unless the operator explicitly asks for an immediate test.
-- Always set voice level deliberately with `--volume`; use the same gain-staging judgment as the previous working lean-in system.
+- Always keep lean-ins on `deck-5`, the dedicated vocal lane. Do not place TTS drops on bed/utility decks.
+- Always set voice level deliberately with `--volume`; use the same gain-staging judgment as the previous working lean-in system. Default `add-mic` gain is intentionally audible, and subtle drops should be an explicit choice.
 - Pair lean-ins with music ducking and low-pass automation by default:
 
   ```bash
   python3 scripts/slime_audio_lean_ins.py \
     --session runtime/mix-session.json \
     --create \
+    --deck deck-5 \
     --start 01:20.000 \
     --text "quick note" \
     --volume 1.7 \

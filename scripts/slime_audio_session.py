@@ -15,7 +15,10 @@ from pathlib import Path
 from time import time
 from typing import Any
 
-MAX_DECKS = 4
+MAX_DECKS = 5
+DEFAULT_MUSIC_DECKS = ["deck-1", "deck-2", "deck-3", "deck-4"]
+VOCAL_DECK = "deck-5"
+DEFAULT_SESSION_DECKS = [*DEFAULT_MUSIC_DECKS, VOCAL_DECK]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DJ_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
 DEFAULT_LIBRARY_DB = REPO_ROOT / "runtime" / "slime-music-library.sqlite3"
@@ -52,6 +55,7 @@ DEFAULT_FADER_ASSIGNMENTS = {
     "deck-2": "B",
     "deck-3": "A",
     "deck-4": "B",
+    "deck-5": "THRU",
 }
 
 @dataclass(frozen=True)
@@ -99,6 +103,7 @@ class Clip:
 @dataclass(frozen=True)
 class MicLeanIn:
     id: str
+    deck: str
     start_ms: int
     text: str
     voice: str | None = None
@@ -354,6 +359,7 @@ def parse_mic_lean_in(payload: dict[str, Any]) -> MicLeanIn:
     effects.extend(parse_automation(item, default_target="master") for item in payload.get("effects", []))
     return MicLeanIn(
         id=lean_id,
+        deck=str(payload.get("deck") or VOCAL_DECK),
         start_ms=parse_ms(payload.get("start_ms", payload.get("start", 0)), f"mic lean-in {lean_id} start"),
         text=text,
         voice=str(payload["voice"]) if payload.get("voice") else None,
@@ -552,7 +558,7 @@ def playlist_to_session_payload(
     if gap_ms and overlap_ms:
         raise ValueError("gap_ms and overlap_ms cannot both be set")
     if not decks:
-        decks = [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+        decks = list(DEFAULT_MUSIC_DECKS)
     if len(decks) > MAX_DECKS:
         raise ValueError(f"too many decks: {len(decks)} > {MAX_DECKS}")
 
@@ -591,7 +597,11 @@ def playlist_to_session_payload(
 def parse_session(payload: dict[str, Any]) -> MixSession:
     decks = [str(deck) for deck in payload.get("decks", [])]
     if not decks:
-        decks = [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+        decks = list(DEFAULT_SESSION_DECKS)
+    for lean_in_payload in payload.get("mic_lean_ins", payload.get("micLeanIns", [])):
+        lean_deck = str(lean_in_payload.get("deck") or VOCAL_DECK)
+        if lean_deck not in decks:
+            decks.append(lean_deck)
     session = MixSession(
         version=int(payload.get("version", 1)),
         decks=decks,
@@ -657,6 +667,8 @@ def validate_session(session: MixSession) -> None:
                 errors.append(f"clips {left.id} and {right.id} overlap on {deck}")
 
     for lean_in in session.mic_lean_ins:
+        if lean_in.deck not in deck_set:
+            errors.append(f"mic lean-in {lean_in.id} uses unknown deck {lean_in.deck}")
         if lean_in.start_ms < 0:
             errors.append(f"mic lean-in {lean_in.id} starts before zero")
         for effect in lean_in.effects:
@@ -751,7 +763,7 @@ def session_summary(session: MixSession) -> dict[str, Any]:
 def template_session() -> dict[str, Any]:
     return {
         "version": 1,
-        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+        "decks": DEFAULT_SESSION_DECKS,
         "fader_routing": {
             "deck_assignments": DEFAULT_FADER_ASSIGNMENTS,
         },
@@ -780,6 +792,7 @@ def template_session() -> dict[str, Any]:
         "mic_lean_ins": [
             {
                 "id": "squid-drop-1",
+                "deck": VOCAL_DECK,
                 "start": "00:44.000",
                 "text": "incoming, try to act normal",
                 "volume": 1.4,
@@ -821,7 +834,7 @@ def base_payload(path: Path, create: bool) -> dict[str, Any]:
         return load_payload(path)
     if not create:
         raise FileNotFoundError(path)
-    return {"version": 1, "decks": [f"deck-{index + 1}" for index in range(MAX_DECKS)], "clips": [], "mic_lean_ins": [], "effects": [], "slip_events": [], "automations": []}
+    return {"version": 1, "decks": DEFAULT_SESSION_DECKS, "clips": [], "mic_lean_ins": [], "effects": [], "slip_events": [], "automations": []}
 
 
 def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None:
@@ -1046,6 +1059,7 @@ def add_mic_lean_in(
     lean_id: str,
     start: str,
     text: str,
+    deck: str,
     voice: str | None,
     rate: str | None,
     volume: float,
@@ -1059,7 +1073,13 @@ def add_mic_lean_in(
     require_unique_event_id(next_payload, lean_id)
     start_ms = parse_ms(start, f"mic lean-in {lean_id} start")
     guard_live_edit(label=f"mic lean-in {lean_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
-    lean_in: dict[str, Any] = {"id": lean_id, "start": start, "text": text}
+    decks = [str(item) for item in next_payload.get("decks", [])]
+    if not decks:
+        decks = list(DEFAULT_SESSION_DECKS)
+    if deck not in decks:
+        decks.append(deck)
+    next_payload["decks"] = decks
+    lean_in: dict[str, Any] = {"id": lean_id, "deck": deck, "start": start, "text": text}
     if voice is not None:
         lean_in["voice"] = voice
     if rate is not None:
@@ -1218,7 +1238,7 @@ def add_automation(
 
 def set_fader_routing(payload: dict[str, Any], assignments: dict[str, str]) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
-    decks = [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+    decks = [str(deck) for deck in next_payload.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
     current = parse_fader_routing(next_payload, decks)
     current.update({str(deck): str(side).upper() for deck, side in assignments.items()})
     next_payload["fader_routing"] = {"deck_assignments": current}
@@ -1372,9 +1392,9 @@ def clip_tempo_factor(clip: dict[str, Any]) -> float:
 def choose_free_deck(payload: dict[str, Any], start_ms: int, end_ms: int, *, avoid: str | None = None) -> str:
     decks = [str(deck) for deck in payload.get("decks", []) if str(deck)]
     if not decks:
-        decks = [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+        decks = list(DEFAULT_MUSIC_DECKS)
     for deck in decks:
-        if deck == avoid:
+        if deck == avoid or deck == VOCAL_DECK:
             continue
         if not any(
             str(clip.get("deck")) == deck
@@ -1468,7 +1488,7 @@ def add_instant_double(
             force=force,
         )
         source_deck = str(source.get("deck") or "")
-        routing = parse_fader_routing(next_payload, [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)])
+        routing = parse_fader_routing(next_payload, [str(deck) for deck in next_payload.get("decks", [])] or list(DEFAULT_SESSION_DECKS))
         source_side = routing.get(source_deck, DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A"))
         if source_side == "THRU":
             source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
@@ -1692,15 +1712,15 @@ def add_instant_double_routine(
             source_deck = str(source_payload.get("deck") or "")
             routing = parse_fader_routing(
                 next_payload,
-                [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)],
+                [str(deck) for deck in next_payload.get("decks", [])] or list(DEFAULT_SESSION_DECKS),
             )
             source_side = routing.get(source_deck, DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A"))
             if source_side == "THRU":
                 source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
             target_side = "B" if source_side == "A" else "A"
             on_position = -1.0 if target_side == "A" else 1.0
-            decks = [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
-            brake_assignments = {deck: source_side for deck in decks}
+            decks = [str(deck) for deck in next_payload.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
+            brake_assignments = {deck: (source_side if deck != VOCAL_DECK else "THRU") for deck in decks}
             next_payload = set_fader_routing(next_payload, brake_assignments)
             next_payload.setdefault("automations", []).append(
                 {
@@ -1944,9 +1964,10 @@ def main() -> int:
     add_mic_parser.add_argument("--id", required=True)
     add_mic_parser.add_argument("--start", required=True)
     add_mic_parser.add_argument("--text", required=True)
+    add_mic_parser.add_argument("--deck", default=VOCAL_DECK)
     add_mic_parser.add_argument("--voice")
     add_mic_parser.add_argument("--rate")
-    add_mic_parser.add_argument("--volume", type=float, default=1.0)
+    add_mic_parser.add_argument("--volume", type=float, default=1.45)
     add_mic_parser.add_argument("--duck-volume", type=float)
     add_mic_parser.add_argument("--lowpass-hz", type=float, default=1400.0)
     add_mic_parser.add_argument("--duck-ms", type=int, default=2500)
@@ -2110,6 +2131,7 @@ def main() -> int:
             lean_id=args.id,
             start=args.start,
             text=args.text,
+            deck=args.deck,
             voice=args.voice,
             rate=args.rate,
             volume=args.volume,

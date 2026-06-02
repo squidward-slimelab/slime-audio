@@ -5,7 +5,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 ## Responsibilities
 
 - Show active runner state and stale/playback status.
-- Render the canonical DJ session timeline, including normal decks, attached effect lanes, fader assignments, automation, effects, slip events, and mic lean-ins.
+- Render the canonical DJ session timeline, including normal decks, attached effect lanes, the dedicated `deck-5` vocal lane, fader assignments, automation, effects, slip events, and mic lean-ins.
 - Expose named set archive browsing without loading archived sets into playback.
 - Provide a compact operational view of what the native session runner is about to play.
 
@@ -34,6 +34,7 @@ The frontend consumes the server view model from `/api/state`. Keep this contrac
 - crossfader automation
 - slip events
 - attached effect lane metadata
+- dedicated vocal lane metadata for mic lean-ins/TTS drops
 - echo, reverb, and vinyl brake events
 - summary counts
 

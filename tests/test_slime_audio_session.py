@@ -322,11 +322,35 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(summary["clip_count"], 1)
         self.assertEqual(summary["mic_lean_in_count"], 1)
         self.assertEqual(summary["automation_count"], 3)
+        self.assertIn("deck-5", summary["decks"])
+        self.assertEqual(session.mic_lean_ins[0].deck, "deck-5")
+        self.assertEqual(summary["fader_routing"]["deck-5"], "THRU")
         self.assertEqual(session.clips[0].trim_db, -4.0)
         self.assertEqual(session.clips[0].gain_db, -2.0)
         self.assertEqual(summary["clips_by_deck"]["deck-1"][0]["start_ms"], 4_000)
         lean_in = session.mic_lean_ins[0]
         self.assertEqual([effect.param for effect in lean_in.effects], ["duck_volume", "lowpass_hz"])
+
+    def test_session_defaults_lean_ins_to_dedicated_vocal_deck(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+                        "clips": [],
+                        "mic_lean_ins": [{"id": "drop", "start": "00:04.000", "text": "short drop"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            session = load_session(path)
+
+        self.assertEqual(session.mic_lean_ins[0].deck, "deck-5")
+        self.assertIn("deck-5", session.decks)
+        self.assertEqual(session.fader_routing["deck-5"], "THRU")
 
     def test_cli_imports_playlist_as_timestamped_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
