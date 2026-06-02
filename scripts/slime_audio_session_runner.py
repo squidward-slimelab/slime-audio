@@ -395,7 +395,10 @@ def render_window(args: argparse.Namespace, start_ms: int, duration_ms: int, out
 
 
 def prepare_window(args: argparse.Namespace, session: MixSession, start_ms: int, end_ms: int) -> PreparedWindow:
-    temp = tempfile.TemporaryDirectory(prefix="slime-session-runner-")
+    temp_root = args.temp_dir
+    if temp_root is not None:
+        temp_root.mkdir(parents=True, exist_ok=True)
+    temp = tempfile.TemporaryDirectory(prefix="slime-session-runner-", dir=temp_root)
     output = Path(temp.name) / f"window-{start_ms}-{end_ms}.wav"
     active_clips = clips_in_window(session, start_ms, end_ms)
     try:
@@ -579,6 +582,12 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--channels", type=int, default=2)
     parser.add_argument("--skip-tts", action="store_true")
     parser.add_argument("--reset-state", action="store_true")
+    parser.add_argument(
+        "--temp-dir",
+        type=Path,
+        default=None,
+        help="Directory for prerendered runner windows. Defaults to the system temp directory.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     if args.target is None:

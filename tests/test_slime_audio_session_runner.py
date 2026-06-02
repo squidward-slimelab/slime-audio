@@ -92,6 +92,40 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--mode") + 1], "snapcast")
         self.assertEqual(command[command.index("--delay-ms") + 1], "0")
 
+    def test_prepare_window_uses_configured_temp_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            temp_root = temp / "runner-temp"
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(session_path),
+                    "--temp-dir",
+                    str(temp_root),
+                    "--dry-run",
+                ]
+            )
+            session = runner.load_session(session_path)
+
+            prepared = runner.prepare_window(args, session, 0, 10_000)
+            try:
+                self.assertTrue(prepared.output.is_relative_to(temp_root))
+            finally:
+                prepared.cleanup()
+
     def test_persistent_snapcast_reuses_fifo_handle_between_windows(self):
         args = Namespace(
             snapcast_fifo=Mock(),
