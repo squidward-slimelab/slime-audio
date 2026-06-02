@@ -129,79 +129,60 @@ Treat each effect according to what it is supposed to do in the mix.
 
 Hard source ducks are dangerous. They are correct for replacement moves like scratches and vinyl brakes, but they sound broken when placed after an echo stab or bed flourish with no obvious reason. If there is an audible volume cliff, inspect `gain_db` automation before blaming the effect DSP.
 
-## Default Workflow
+## Creative Set Workflow
 
-1. Check current state before acting:
+Do not build a straight playlist and call it a DJ set. The default product is an edited arrangement: lead songs plus key/beat-matched EDM beds, visible routines/effects, and recurring TTS drops about the music. `slime_audio_mix_planner.py` is only a helper for beat/key-safe transitions; it is not the creative pass.
+
+### Creative Baseline
+
+For most requested sets, aim for this shape unless the operator explicitly asks for restraint:
+
+- Every lead song should have a compatible EDM/techno/house/club bed for a meaningful section of its runtime. Use `mashup-bed`, `add-clip`, filter/EQ automation, and clip trim/gain to make the bed audible without fighting the lead.
+- Use BPM/key/Camelot analysis to construct overlays, not just to sort songs. Prefer exact or corrected key-fit for layered vocals/hooks and rhythm beds.
+- Add visible edit-api moves throughout the set: filter rides, EQ carving, echo/reverb throws, instant doubles, stabs, offbeat swaps, hook teases, scratches, slip brakes, or brake drops.
+- Add a healthy amount of TTS vocal drops. They should be short, spaced out, and about what is happening in the songs: texture, groove, genre lineage, energy, transition intent, a hook, or why the next layer fits.
+- The dashboard should visibly show the arrangement: main decks, bed/utility decks, attached `deck-N-fx` lanes, effects, fader motion, automation, and mic lean-ins. If it visually looks like one song after another, the set is not done.
+
+### Build Sequence
+
+1. Check receiver/session state and recent history so the new set does not repeat stale material:
 
    ```bash
    python3 scripts/slime_audio_stream.py discover
    tail -n 80 runtime/play-history.jsonl
+   python3 scripts/slime_audio_sets.py list --json
    ```
 
-2. Use the music database as the authority for song selection:
+2. Select lead tracks and bed candidates from the database. Use novelty constraints for fresh sets, but do not let novelty override mixability.
 
    ```bash
    python3 scripts/slime_music_library.py stats
-   python3 scripts/slime_music_library.py search "query"
-   python3 scripts/slime_audio_candidates.py candidates "query" --recent-limit 40 --limit 12
+   python3 scripts/slime_audio_candidates.py candidates "lead vibe" --recent-limit 40 --limit 20
+   python3 scripts/slime_audio_candidates.py candidates "edm techno house bed" --recent-limit 40 --limit 30
    ```
 
-   If the database is missing or stale, rescan configured sources before falling back to ad hoc filesystem search. Prefer candidates from `preferred_files`; they avoid recently played tracks, skip untagged root files by default, respect excludes, and include reasons for why each track was selected.
+   If the material is missing, use the Music Acquisition workflow first. Download to a mounted music share, rescan, confirm search/candidates, then analyze.
 
-   For a "fresh", "clean-room", or new proof set, treat novelty as a hard gate, not a preference:
-
-   - Read recent `runtime/play-history.jsonl`, active/archive set playlists, and current constraints before selecting.
-   - Exclude artists, titles, duplicate keys, and source paths used in recent proof/live sets unless the operator explicitly asks for a repeat.
-   - Do not seed a set from remembered favorite tracks. Build candidates from the database query output and write the chosen playlist to a named runtime file.
-   - If the candidate list is too narrow after exclusions, change the query/vibe and search again instead of reusing stale tracks.
-
-3. Build a short runway, not a whole night. Prefer 30-60 minutes of music so the live set can adapt.
-
-4. Record operator steering before extending the future set:
-
-   ```bash
-   python3 scripts/slime_audio_candidates.py constraints --init
-   python3 scripts/slime_audio_candidates.py set-constraints \
-     --vibe "fresh daytime" \
-     --direction "brighter but not corny" \
-     --energy-target 0.65 \
-     --exclude-artist "Artist Name" \
-     --exclude-term "avoid this" \
-     --reason "operator steering"
-   ```
-
-   Keep current vibe, requested direction, energy target, excluded artists/terms, notes, and change reasons in the runtime constraints file. Candidate selection must read this scratchpad so steering survives restarts and affects future picks.
-
-5. Analyze and rank transitions:
-
-   ```bash
-   python3 scripts/slime_audio_dj.py structure ./track.flac
-   python3 scripts/slime_audio_dj.py cues ./track.flac --kind drop --kind hook
-   python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --state runtime/mix-session-state.json --horizon-ms 2700000 > runtime/tension-windows.json
-   python3 scripts/slime_audio_dj.py plan --playlist runtime/current-playlist.txt
-   python3 scripts/slime_audio_dj.py rank ./current-track.flac --playlist runtime/candidates.txt --limit 12
-   ```
-
-   Analysis must prefer music-database TuneBat metadata over raw local estimates. Do not trust filename tags like `8B - 126`; if the database lacks BPM/key/Camelot for a track, run/store TuneBat analysis first:
+3. Analyze the selected lead and bed tracks before arranging. TuneBat/library BPM/key/Camelot is the authority for beat/key work; filename tags are not.
 
    ```bash
    python3 scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY
+   python3 scripts/slime_audio_dj.py structure ./track.flac
+   python3 scripts/slime_audio_dj.py cues ./track.flac --kind drop --kind hook --kind clean_intro --kind clean_outro
+   python3 scripts/slime_audio_dj.py rank ./lead.flac --playlist runtime/bed-candidates.txt --limit 12
    ```
 
-   `slime_audio_dj.py` and `slime_audio_mix_planner.py` hydrate from `runtime/slime-music-library.sqlite3` and mirror results into `runtime/dj-analysis-cache.json` for older live-edit commands. Running structure analysis once persists reusable beatgrid, phrase-grid, structure windows, drop candidates, and named cues in the music DB; unchanged files should come from SQLite before raw audio decode, and changed size/mtime must invalidate the stored row. Treat the raw analyzer as fallback structure help, not as authority for beat/key decisions.
-
-   Use cue kinds for routines instead of hand-entered milliseconds when possible. Cues include `clean_intro`, `build`, `drop`, `hook`, `stabs`, `vocal`, `clean_outro`, `safe_loop`, and `pre_drop`, quantized to phrase or beat boundaries when confidence is high enough:
+4. Create or activate a named set and build the base timeline. The base timeline is only scaffolding; do not stop here.
 
    ```bash
-   python3 scripts/slime_audio_live_edit.py instant-double-routine \
-     --source-id lead-hook \
-     --id lead-hook-tease \
-     --recipe hook-tease \
-     --cue-kind hook \
-     --cache runtime/dj-analysis-cache.json
+   python3 scripts/slime_audio_sets.py new --title "Named set"
+   python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json \
+     --playlist runtime/current-playlist.txt \
+     --start 00:00.000 \
+     --decks deck-2,deck-3
    ```
 
-   Then run the real mix planner against the future session, especially after importing a straight playlist:
+5. Run the mix planner for phrase-aware overlaps and safe transition automation, then make the creative pass through the edit API.
 
    ```bash
    python3 scripts/slime_audio_mix_planner.py \
@@ -213,87 +194,42 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
      --apply
    ```
 
-   The planner must respect the live lock from runner state, keep already-rendered audio intact, and only rewrite clips safely in the future.
-   Use `--max-render-pitch-shift-semitones 0` when a routine should preserve original keys and avoid rendered key correction.
-   For overlapping transitions, treat key-fit as the default target, not a nice-to-have. Prefer exact same-key blends after conservative rendered pitch correction. When matching major against minor, compare against the relative major/minor pitch set first, then choose the smallest tasteful transpose that lands the overlap in the intended key. Camelot-neighbor compatibility is acceptable for non-overlapped handoffs or naturally resolving musical moves, but it should not be the default excuse for layered vocals, doubles, or long blends.
-
-6. Treat `runtime/mix-session.json` and `runtime/mix-session-state.json` as active live pointers, not the long-term identity of a set. Build named sessions under a set/archive path, preserve that named artifact, then activate it through the native runner so the dashboard, playhead, and live edit lock all follow the same state. Do not play a rendered MP3 directly when the operator expects dashboard control.
-
-   Use `scripts/slime_audio_sets.py` for set identity and replay work:
-
-   ```bash
-   python3 scripts/slime_audio_sets.py archive --title "Named set" --slug named-set --session runtime/mix-session.json
-   python3 scripts/slime_audio_sets.py list --json
-   python3 scripts/slime_audio_sets.py new --title "Scratch set"
-   python3 scripts/slime_audio_sets.py activate named-set --reset-state
-   python3 scripts/slime_audio_sets.py replay named-set --target all --reset-state
-   python3 scripts/slime_audio_sets.py save-loaded
-   python3 scripts/slime_audio_sets.py fork named-set --title "Named set revision"
-   python3 scripts/slime_audio_sets.py render --slug named-set --format mp3 --mp3-bitrate 128k --keep 3 --max-total-mb 256
-   python3 scripts/slime_audio_sets.py cleanup-renders --keep 3 --max-age-hours 12 --max-total-mb 256
-   ```
-
-   Read old sets through `slime_audio_sets.py list/show` or the dashboard archive view before loading them. Viewing an archived set must not overwrite the active pointers; `activate`/`replay` are the intentional loading steps. After editing a loaded set through live edit commands, run `save-loaded` to copy the active session back into the archived set identity. Use set-level render cleanup defaults so review artifacts do not fill the disk.
-
-   Clips live on an absolute mix timeline with `start_ms`, `trim_start_ms`, and optional `duration_ms`; they are not playlist slots. Multiple decks may overlap like an Ableton arrangement.
-
-   Deck convention: prefer the two middle lanes (`deck-2` and `deck-3`, zero-based indices 1 and 2) for the main alternating A/B track flow. Use `deck-1` and `deck-4` for instant doubles, stabs, shadows, beds, and more elaborate three- or four-layer sections unless the operator asks for a different layout.
-
-   Crossfader convention: route `deck-1` and `deck-3` to side `A`, and `deck-2` and `deck-4` to side `B`, matching common DDJ 1/3 vs 2/4 thinking. Use `crossfader.position` automation for controller-style cuts and gradual blends (`-1` hard A, `0` center, `1` hard B) instead of manually muting unrelated clip gains.
-
-7. If starting from an old ordered playlist, immediately import it into a timestamped session and do future edits against the session:
-
-   ```bash
-   python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json \
-     --playlist runtime/current-playlist.txt \
-     --start 00:00.000 \
-     --decks deck-2,deck-3
-   ```
-
-8. Add, move, trim, overlap, or automate clips by timestamp through the active live-edit wrapper. It defaults to `runtime/mix-session.json`, reads `runtime/mix-session-state.json` as the playhead lock, and records `live_edit_applied` history events. This is the normal way to change a set while it is playing; editing a copied JSON file and restarting playback should be reserved for setup or recovery.
+6. Add beds and carve them. Use `deck-1`/`deck-4` as utility lanes for beds, doubles, shadows, and stabs while `deck-2`/`deck-3` carry the main A/B lead flow.
 
    ```bash
    python3 scripts/slime_audio_live_edit.py add-clip \
-     --id next-drop \
-     --deck deck-2 \
-     --path ./track.flac \
-     --start 02:16.000 \
-     --trim-start 01:04.000 \
-     --duration 00:32.000 \
-     --trim-db -3 \
-     --gain-db -6 \
-     --reason "extend future set"
+     --id lead-bed-a \
+     --deck deck-4 \
+     --path ./bed.flac \
+     --start 01:16.000 \
+     --trim-start 00:32.000 \
+     --duration 00:48.000 \
+     --trim-db -4 \
+     --gain-db -10 \
+     --reason "key and beat matched rhythm bed under lead"
+
+   python3 scripts/slime_audio_live_edit.py mashup-bed \
+     --bed-id lead-bed-a \
+     --start 01:16.000 \
+     --end 02:04.000 \
+     --gain-db -10 \
+     --lowpass-hz 1800 \
+     --highpass-hz 100
+
+   python3 scripts/slime_audio_live_edit.py automate \
+     --target lead-bed-a \
+     --param eq_low_db \
+     --points-json '[{"at":"01:16.000","value":-4},{"at":"02:04.000","value":-4}]'
    ```
 
-   For doubles and rhythmic offsets, use cached beatgrid analysis instead of hand-entered millisecond nudges:
-
-   ```bash
-   python3 scripts/slime_audio_live_edit.py beat-jump \
-     --id doubled-hook \
-     --beats 1/2 \
-     --field start \
-     --cache runtime/dj-analysis-cache.json
-   ```
-
-   Use `--field start` to delay/advance a clip on the mix timeline and `--field trim-start` to jump the source position while keeping the clip anchored. The command must reject weak BPM grids unless `--force` is explicit.
-
-   Do not run multiple live-edit writes against the same session in parallel. Live edits are read-modify-write operations; serialize them or one edit can overwrite another.
-
-   For true instant doubles, clone the source clip onto a free deck at the same musical position, preserving path, trim position, rendered tempo, rendered pitch, and gain. Use optional beat-gated gain automation for simple transform-style routines:
+7. Add routines/effects as audible musical punctuation, not as hidden decorations. Use cue kinds and beatgrid where possible.
 
    ```bash
    python3 scripts/slime_audio_live_edit.py instant-double-routine \
      --source-id lead-hook \
      --id lead-hook-stabs \
      --recipe stabs \
-     --start 01:24.000 \
-     --cache runtime/dj-analysis-cache.json
-
-   python3 scripts/slime_audio_live_edit.py instant-double-routine \
-     --source-id lead-hook \
-     --id lead-hook-offbeat \
-     --recipe offbeat-swaps \
-     --start 01:24.000 \
+     --cue-kind hook \
      --cache runtime/dj-analysis-cache.json
 
    python3 scripts/slime_audio_live_edit.py instant-double-routine \
@@ -307,42 +243,8 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
      --source-id lead-hook \
      --id lead-hook-scratch \
      --recipe scratch-cuts \
-     --start 01:24.000 \
+     --start 01:40.000 \
      --cache runtime/dj-analysis-cache.json
-
-   python3 scripts/slime_audio_live_edit.py instant-double-routine \
-     --source-id lead-hook \
-     --id lead-hook-slip-brake \
-     --recipe slip-brake \
-     --start 01:24.000 \
-     --cache runtime/dj-analysis-cache.json
-
-   python3 scripts/slime_audio_live_edit.py instant-double-routine \
-     --source-id lead-hook \
-     --id lead-hook-brake \
-     --recipe brake-drop \
-     --start 01:24.000 \
-     --cache runtime/dj-analysis-cache.json
-
-   python3 scripts/slime_audio_live_edit.py instant-double \
-     --source-id lead-hook \
-     --id lead-hook-double \
-     --start 01:24.000 \
-     --duration 00:08.000 \
-     --gate-beats 1/2 \
-     --cut-source \
-     --cache runtime/dj-analysis-cache.json
-
-   python3 scripts/slime_audio_live_edit.py add-effect \
-     --id lead-hook-echo-tail \
-     --type echo \
-     --target lead-hook \
-     --start 01:31.500 \
-     --duration 00:02.000 \
-     --tail-ms 3000 \
-     --wet 0.4 \
-     --feedback 0.45 \
-     --lowpass-hz 4200
 
    python3 scripts/slime_audio_live_edit.py add-effect \
      --id lead-hook-reverb-tail \
@@ -351,65 +253,47 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
      --target lead-hook \
      --start 01:31.500 \
      --duration 00:02.000
-
-   python3 scripts/slime_audio_live_edit.py add-effect \
-     --id lead-hook-brake \
-     --type vinyl_brake \
-     --target lead-hook \
-     --start 01:31.500 \
-     --duration 00:00.500
    ```
 
-   The `offbeat-swaps` recipe uses the cached beatgrid to hold the original side through the downbeat, then schedules the first fader swap on the half-beat and alternates source/double sides on each following half-beat. For raw custom moves, `--gate-offset-beats 1/2` applies the same first-cut-on-the-AND timing.
+   Use `stabs`, `one-beat-trades`, `offbeat-swaps`, `hook-tease`, `echo-stabs`, `echo-drop`, `scratch-cuts`, `slip-brake`, and `brake-drop` as the normal vocabulary. Scratch/brake generated clips must stay attached to the affected deck as `effect-track` child lanes.
 
-   Slip/flux gestures live in `slip_events`, not hidden timeline edits. A slip event marks a temporary manipulated target clip while the source clip continues underneath, and stores `source_start_ms` plus `source_resume_ms` so the deck can return to the source position it would have reached naturally. Treat slip mode as a short performance flourish: schedule the move on a downbeat or clear phrase point, release it on a downbeat, and leave room for the track to breathe between moves. Useful slip-mode families are vinyl brake/pause, backspin, baby scratch, and hot-cue trigger gestures; do not scatter random scratch slices over a dry track. Use `scratch-cuts` for DJ-style transform scratches: it schedules sparse attached scratch clips on the source deck's effect lane and locally ducks the parent clip so the scratch replaces the source while the source timeline keeps moving underneath. Keep scratch clips continuous and audible, roughly 140-260 ms; micro-slicing reads as glitch stutter. A scratch child lane must stay attached to the deck being scratched; do not route it as an independent crossfader deck. Use `slip-brake` when the brake is only a phrase-safe color and must return exactly on time. Use `brake-drop` when the brake should actually change timing: it splits the source, inserts a one-beat attached brake effect track, and resumes the source late from the pre-brake source position. Use raw `slip` only when hand-building a custom manipulated clip.
-
-   Track levels have separate static trim and performance gain. Use clip `trim_db` for input trim/loudness matching, then use clip `gain_db` and `gain_db` automation as the channel fader lane. DJ effects live in the session `effects` collection, not in hidden renderer flags. The available rendered primitives are `echo`, `reverb`, and `vinyl_brake`, with `start`, `duration`, `tail_ms`, `wet`, `gain_db`, `delay_ms`, `feedback`, and optional `lowpass_hz`; reverb also accepts `room_size` and `damping`. Echo renders as clean delayed wet taps that decay by `feedback`; validate it with a simple arpeggio proof if it sounds garbled or volume-wobbly. Echo is normally a wet send and should not require ducking the dry source; if a stab is too loud, lower the stab clip/effect gain rather than punching a hard hole in the lead. Reverb command defaults are mapped from Audacity's Reverb defaults: room size 75%, pre-delay 10 ms, reverberance/damping 50%, wet/dry gain -1 dB, and full stereo width. Use `--preset` for Audacity factory starting points: `defaults`, `acoustic`, `ambience`, `artificial`, `clean`, `modern`, `vocal-i`, `vocal-ii`, `dance-vocal`, `modern-vocal`, `voice-tail`, `bathroom`, `small-room-bright`, `small-room-dark`, `medium-room`, `large-room`, `church-hall`, `cathedral`, and `big-cave`. Presets are not taste decisions: pick one as a starting color, then override `--wet`, `--tail-ms`, `--gain-db`, `--room-size`, `--feedback`, or `--damping` for the moment. Effects can target a clip, `deck:<name>`, `master`, or `all`; prefer clip/deck sends unless the whole master really needs space. Mixdown renders only the wet copy for echo/reverb, pads the configured tail, and renders reverb with the LADSPA `zita-reverb` plugin from the tiny `rev-plugins` package. Vinyl brake is a replacement effect: it mutes the dry target during the brake window while the deterministic speed/pitch slowdown plays. Keep brake short and beat-derived, and validate suspected brake bugs with a simple tone proof before diagnosing a full mix. Clip `reverse` plus `playback_rate` renders record-motion scratch clips where speed and pitch move together. Routine-generated scratch/brake artifacts are `effect-track` clips attached to the source deck through `attached_deck` and `effect_parent_clip_id`, so the dashboard shows them as child lanes such as `deck-2-fx` instead of normal music lanes. Use `echo-stabs` when a named double should carry an echo tail, `echo-drop` when it should carry a reverb tail, `scratch-cuts` for source-replacing transform scratches, `slip-brake` for phrase-safe brake color, `brake-drop` for a real timing brake, and raw `add-effect` for custom planned moves.
-
-   Prefer `instant-double-routine` when a named recipe fits. It labels the resulting events and refuses recipes whose prerequisites are still missing. Use raw `instant-double` only when hand-building a specific move.
-
-   Plan mashups, not straight playlists. A normal basic move is to keep a rhythmically and harmonically compatible track as a filtered bed under a lead vocal/hook/section:
+8. Add TTS drops through session lean-ins, not side streams. Write drops like a DJ host who is listening to the arrangement: mention the bed, lead texture, incoming key/energy move, or why two records work together. Do not invent artist facts.
 
    ```bash
-   python3 scripts/slime_audio_live_edit.py mashup-bed \
-     --bed-id bed-loop \
-     --start 01:16.000 \
-     --end 01:48.000 \
-     --gain-db -8 \
-     --lowpass-hz 1800 \
-     --highpass-hz 100
-
-   python3 scripts/slime_audio_live_edit.py automate \
-     --target bed-loop \
-     --param eq_low_db \
-     --points-json '[{"at":"01:16.000","value":-4},{"at":"01:48.000","value":-4}]'
+   python3 scripts/slime_audio_lean_ins.py \
+     --session runtime/mix-session.json \
+     --create \
+     --start 02:20.000 \
+     --text "short music-aware line here" \
+     --volume 1.7 \
+     --duck-volume 0.45 \
+     --lowpass-hz 1400
    ```
 
-   Use per-track EQ before hiding beds behind extreme filters: `eq_low_db` is a low shelf around 120 Hz, `eq_mid_db` is a 1 kHz bell, and `eq_high_db` is a high shelf around 6.5 kHz. Cut bed lows or upper bite to make room for the lead while keeping enough midrange motion for the bed to be audible. Use filtered full-track beds for now. Proper vocal/drum/bass/other stem mashups belong to the deferred stem-separation workflow and should not block basic filter-bed routines.
+   For longer sets, use `slime_audio_commentary_planner.py` with `slime_audio_dj.py tension` output, but still review the generated text so it is about the actual songs and mix moves.
 
-   For deck-pair cuts, set fader routing and automate the crossfader as planned session data:
+9. Audit before rendering. A creative set should fail review if it only contains main song clips and transition automation.
+
+   Look for:
+
+   - lead clips primarily on `deck-2`/`deck-3`
+   - EDM/club bed clips on utility decks across most lead songs
+   - nonzero `effects`, `slip_events`, routines, or attached `effect-track` child lanes
+   - TTS lean-ins present and placed around musically sensible moments
+   - fader/filter/EQ automation that makes the bed/lead relationship clear
+   - no hard lead ducks unless tied to a named replacement move with a proof
 
    ```bash
-   python3 scripts/slime_audio_live_edit.py fader-routing \
-     --assign deck-1=A \
-     --assign deck-3=A \
-     --assign deck-2=B \
-     --assign deck-4=B \
-     --reason "DDJ-style fader assignment"
-
-   python3 scripts/slime_audio_live_edit.py crossfader \
-     --points-json '[{"at_ms":84000,"value":-1},{"at_ms":88000,"value":1}]' \
-     --reason "planned fader cut"
+   python3 scripts/slime_audio_session.py summary runtime/mix-session.json
+   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json \
+     --routine-id ROUTINE_ID \
+     --output runtime/routine-proof.mp3 \
+     --format mp3 \
+     --report-output runtime/routine-proof.json \
+     --verify
    ```
 
-9. Dry-run the timestamped mix render before starting, or render only the future window when applying a live swap from the current playhead:
-
-   ```bash
-   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --output runtime/mix-render.wav --dry-run
-   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --from 02:10.000 --output runtime/mix-render-from-playhead.wav --dry-run
-   ```
-
-   To send the operator a verifiable mix artifact, render an MP3 review file directly from the planned session:
+10. Render proof from the actual session and save the set.
 
    ```bash
    python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json \
@@ -417,31 +301,12 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
      --format mp3 \
      --mp3-bitrate 192k \
      --verify
-
-   python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json \
-     --routine-id lead-hook-stabs \
-     --output runtime/routine-proof.mp3 \
-     --format mp3 \
-     --report-output runtime/routine-proof.json \
-     --verify
+   python3 scripts/slime_audio_sets.py save-loaded
    ```
 
-   Use `--from` and `--duration` for a short proof clip around a transition. Keep `--verify` on so empty/silent renders fail before upload.
-   Use `--routine-id` before sending or playing routine-heavy mixes. Read the JSON report and fix rejected routine errors instead of forcing through risky overlays.
+   For Discord review requests, send the MP3 media. Do not paste a path and do not hand-render proof audio outside the session toolchain.
 
-   Before playback, audit the session data:
-
-   - Summarize clips by deck and confirm the intended deck system is actually used.
-   - Confirm main full-song/lead clips alternate primarily between `deck-2` and `deck-3`; reserve `deck-1` and `deck-4` for doubles, beds, shadows, stabs, or intentionally complex overlays.
-   - Inspect all `trim_db`, `gain_db`, `duck_volume`, `lowpass_hz`, `highpass_hz`, `eq_low_db`, `eq_mid_db`, and `eq_high_db` levels/automations. No automation may fade a main music clip to silence unless it is a named, intentional routine with a rendered proof.
-   - Inspect every `gain_db` duck around stabs/effects. A hard duck on a lead can sound like a broken volume drop even when the effect itself is correct. Prefer lowering the effect clip/send level unless the duck is a deliberate trade-off.
-   - For suspect primitives, build the smallest honest session proof through `slime_audio_session_mixdown.py`: a tone plus `vinyl_brake` for brakes, an arpeggio plus `echo` for echo stabs, or a single attached scratch lane for scratches. Do not debug primitives only inside a full song arrangement.
-   - Always send the requested proof MP3 as an attachment/media message, not just a text path.
-   - Render at least one proof window that includes a real lean-in with TTS enabled. If voice audio fails or is silent, the render must fail hard. Do not silently skip failed TTS in live or review renders; `--skip-tts` is only for explicit command validation and must not be used for audible/live proof.
-   - Render at least one representative transition proof with `--from`/`--duration --verify`; reject clipping-risk, silence, dead air, or unexplained fade-outs before starting the runner.
-   - Keep proof/review files small and delete temporary audio after verification on low-disk machines.
-
-10. Start playback from the native timestamped session runner so the frontend sees the real set:
+11. Start playback from the native timestamped session runner only after the dashboard shows the arrangement clearly.
 
    ```bash
    python3 scripts/slime_audio_session_runner.py \
@@ -450,8 +315,7 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
      --target TARGET
    ```
 
-Do not use legacy slot queues for DJ sets.
-Do not stream a review render directly as the main set unless the operator explicitly asks for a file-only playback and does not need the dashboard.
+Do not use legacy slot queues for DJ sets. Do not stream a review render directly as the main set unless the operator explicitly asks for file-only playback and does not need the dashboard.
 
 ## Live Set Rules
 
