@@ -571,9 +571,21 @@ h2 {
 }
 
 .timeline-waveform-drawing path {
-  stroke: rgba(238, 243, 239, 0.78);
-  stroke-width: 0.42;
+  mix-blend-mode: screen;
+  stroke-width: 0.55;
   vector-effect: non-scaling-stroke;
+}
+
+.timeline-waveform-drawing .waveform-low {
+  stroke: rgba(255, 80, 76, 0.7);
+}
+
+.timeline-waveform-drawing .waveform-mid {
+  stroke: rgba(100, 232, 116, 0.62);
+}
+
+.timeline-waveform-drawing .waveform-high {
+  stroke: rgba(88, 158, 255, 0.58);
 }
 
 .timeline-event.current {

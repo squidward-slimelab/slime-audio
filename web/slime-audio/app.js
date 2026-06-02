@@ -350,39 +350,64 @@ function waveformKey(event) {
     path: event.path,
     trim_start_ms: numericValue(event.trim_start_ms, 0),
     duration_ms: numericValue(event.duration_ms, 0),
+    bins: waveformBins(event),
   });
+}
+
+function waveformBins(event) {
+  const duration = numericValue(event?.duration_ms, 0);
+  const scale = dashboardState.scale;
+  const width = scale && duration > 0 ? Math.max(18, (duration / scale.duration) * scale.stageWidth) : 180;
+  return Math.max(24, Math.min(800, Math.round(width / 3)));
 }
 
 function waveformUrl(event) {
   const params = new URLSearchParams({
     path: event.path,
     trim_start_ms: String(numericValue(event.trim_start_ms, 0)),
-    bins: "180",
+    bins: String(waveformBins(event)),
   });
   const duration = numericValue(event.duration_ms, 0);
   if (duration > 0) params.set("duration_ms", String(duration));
   return `/api/waveform?${params.toString()}`;
 }
 
-function drawWaveform(peaks) {
+function drawWaveform(payload) {
   const wrap = document.createElement("div");
   wrap.className = "timeline-waveform-drawing";
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 100 36");
+  const bands = payload?.bands || {};
+  const bandEntries = [
+    ["low", bands.low || payload?.peaks || [], "waveform-low"],
+    ["mid", bands.mid || [], "waveform-mid"],
+    ["high", bands.high || [], "waveform-high"],
+  ].filter(([, values]) => values.length);
+  const count = Math.max(1, ...bandEntries.map(([, values]) => values.length));
+  svg.setAttribute("viewBox", `0 0 ${count} 36`);
   svg.setAttribute("preserveAspectRatio", "none");
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  const values = (peaks || []).map((value) => clamp(numericValue(value, 0), 0, 1));
-  const commands = values
-    .map((value, index) => {
-      const x = values.length <= 1 ? 0 : (index / (values.length - 1)) * 100;
-      const height = Math.max(1.2, value * 16);
-      return `M${x.toFixed(2)} ${(18 - height).toFixed(2)}V${(18 + height).toFixed(2)}`;
-    })
-    .join("");
-  path.setAttribute("d", commands);
-  svg.append(path);
+  for (const [, bandValues, className] of bandEntries) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const values = bandValues.map((value) => clamp(numericValue(value, 0), 0, 1));
+    const commands = values
+      .map((value, index) => {
+        const height = Math.max(0.8, value * 16);
+        return `M${index + 0.5} ${(18 - height).toFixed(2)}V${(18 + height).toFixed(2)}`;
+      })
+      .join("");
+    path.setAttribute("d", commands);
+    path.setAttribute("class", className);
+    svg.append(path);
+  }
   wrap.append(svg);
   return wrap;
+}
+
+function waveformAvailable(payload) {
+  return payload?.available && (payload.peaks?.length || payload.bands?.low?.length || payload.bands?.mid?.length || payload.bands?.high?.length);
+}
+
+function appendWaveformDrawing(container, payload) {
+  container.append(drawWaveform(payload));
 }
 
 function renderEventWaveform(container, event) {
@@ -393,7 +418,7 @@ function renderEventWaveform(container, event) {
   waveform.dataset.waveformKey = key;
   waveform.dataset.waveformUrl = waveformUrl(event);
   const cached = dashboardState.waveformCache.get(key);
-  if (cached?.available && cached.peaks?.length) waveform.append(drawWaveform(cached.peaks));
+  if (waveformAvailable(cached)) appendWaveformDrawing(waveform, cached);
   container.append(waveform);
 }
 
@@ -413,7 +438,7 @@ async function hydrateWaveforms() {
   );
   for (const item of placeholders) {
     const payload = dashboardState.waveformCache.get(item.dataset.waveformKey);
-    if (payload?.available && payload.peaks?.length && !item.firstChild) item.append(drawWaveform(payload.peaks));
+    if (waveformAvailable(payload) && !item.firstChild) appendWaveformDrawing(item, payload);
   }
 }
 

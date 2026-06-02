@@ -38,6 +38,7 @@ DECK_ORDER = ["deck-3", "deck-1", VOCAL_DECK, "deck-2", "deck-4"]
 LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
 WAVEFORM_BINS = 240
+WAVEFORM_CACHE_VERSION = 2
 
 
 def parse_timestamp(value: str | None) -> float | None:
@@ -604,6 +605,7 @@ def waveform_cache_key(path: Path, trim_start_ms: int, duration_ms: int | None, 
     stat = path.stat()
     identity = "|".join(
         [
+            str(WAVEFORM_CACHE_VERSION),
             str(path.resolve()),
             str(stat.st_size),
             str(stat.st_mtime_ns),
@@ -628,6 +630,53 @@ def save_waveform_cache(cache: dict[str, Any]) -> None:
     DEFAULT_WAVEFORM_CACHE.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
 
 
+def normalize_peaks(raw_peaks: list[float], peak_max: float | None = None) -> list[float]:
+    safe_max = peak_max if peak_max and peak_max > 0 else max(raw_peaks, default=0.0) or 1.0
+    return [round(max(0.0, min(1.0, value / safe_max)), 4) for value in raw_peaks]
+
+
+def band_envelopes(samples: array, rate: int, bins: int) -> dict[str, list[float]]:
+    low = 0.0
+    mid_low = 0.0
+    mid_high = 0.0
+    high_low = 0.0
+    low_values: list[float] = []
+    mid_values: list[float] = []
+    high_values: list[float] = []
+
+    def alpha(cutoff: float) -> float:
+        return min(1.0, max(0.0, (2.0 * 3.141592653589793 * cutoff) / (rate + (2.0 * 3.141592653589793 * cutoff))))
+
+    low_alpha = alpha(250.0)
+    mid_low_alpha = alpha(250.0)
+    mid_high_alpha = alpha(2800.0)
+    high_alpha = alpha(4200.0)
+    for sample in samples:
+        value = float(sample)
+        low += low_alpha * (value - low)
+        mid_low += mid_low_alpha * (value - mid_low)
+        mid_high += mid_high_alpha * (value - mid_high)
+        high_low += high_alpha * (value - high_low)
+        low_values.append(abs(low))
+        mid_values.append(abs(mid_high - mid_low))
+        high_values.append(abs(value - high_low))
+
+    bin_size = max(1, len(samples) // bins)
+    raw = {"low": [], "mid": [], "high": []}
+    for index in range(bins):
+        start = index * bin_size
+        end = len(samples) if index == bins - 1 else min(len(samples), start + bin_size)
+        if start >= len(samples):
+            for values in raw.values():
+                values.append(0.0)
+            continue
+        raw["low"].append(max(low_values[start:end], default=0.0))
+        raw["mid"].append(max(mid_values[start:end], default=0.0))
+        raw["high"].append(max(high_values[start:end], default=0.0))
+    peak_max = max((value for values in raw.values() for value in values), default=0.0) or 1.0
+    return {band: normalize_peaks(values, peak_max) for band, values in raw.items()}
+
+
 def waveform_payload(path: Path, trim_start_ms: int = 0, duration_ms: int | None = None, bins: int = WAVEFORM_BINS) -> dict[str, Any]:
     resolved = path.expanduser()
     if not resolved.exists() or not resolved.is_file():
@@ -647,7 +696,8 @@ def waveform_payload(path: Path, trim_start_ms: int = 0, duration_ms: int | None
     command.extend(["-i", str(resolved)])
     if safe_duration:
         command.extend(["-t", f"{safe_duration / 1000:.3f}"])
-    command.extend(["-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"])
+    sample_rate = 12_000
+    command.extend(["-vn", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "pipe:1"])
     try:
         result = subprocess.run(command, check=True, capture_output=True, timeout=20)
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as ex:
@@ -657,23 +707,16 @@ def waveform_payload(path: Path, trim_start_ms: int = 0, duration_ms: int | None
     samples.frombytes(result.stdout)
     if not samples:
         return {"available": False, "path": str(path), "peaks": [], "error": "no decoded samples"}
-    bin_size = max(1, len(samples) // safe_bins)
-    raw_peaks: list[int] = []
-    for index in range(safe_bins):
-        start = index * bin_size
-        end = len(samples) if index == safe_bins - 1 else min(len(samples), start + bin_size)
-        if start >= len(samples):
-            raw_peaks.append(0)
-            continue
-        raw_peaks.append(max(abs(sample) for sample in samples[start:end]))
-    peak_max = max(raw_peaks) or 1
+    bands = band_envelopes(samples, sample_rate, safe_bins)
+    peaks = [max(values) for values in zip(bands["low"], bands["mid"], bands["high"])]
     payload = {
         "available": True,
         "path": str(resolved),
         "trim_start_ms": safe_trim,
         "duration_ms": safe_duration,
         "bins": safe_bins,
-        "peaks": [round(value / peak_max, 4) for value in raw_peaks],
+        "peaks": peaks,
+        "bands": bands,
     }
     cache[key] = payload
     if len(cache) > 500:

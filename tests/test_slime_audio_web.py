@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from array import array
 from pathlib import Path
 from unittest.mock import patch
 
@@ -270,6 +271,17 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertFalse(payload["available"])
         self.assertEqual(payload["peaks"], [])
         self.assertIn("not found", payload["error"])
+
+    def test_band_envelopes_return_rgb_frequency_bands(self):
+        samples = array("h", [0, 8000, -8000, 12000, -12000, 4000, -4000, 0] * 20)
+
+        bands = web.band_envelopes(samples, rate=12_000, bins=8)
+
+        self.assertEqual(set(bands), {"low", "mid", "high"})
+        self.assertEqual({len(values) for values in bands.values()}, {8})
+        self.assertGreater(max(bands["low"]), 0)
+        self.assertGreater(max(bands["mid"]), 0)
+        self.assertGreater(max(bands["high"]), 0)
 
     def test_dashboard_shows_slip_events_on_effects_lane(self):
         payload = {
