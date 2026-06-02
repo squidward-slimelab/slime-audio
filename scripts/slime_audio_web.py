@@ -30,7 +30,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
-DECK_ORDER = ["deck-3", "deck-1", "deck-2", "deck-4", VOCAL_DECK]
+DECK_ORDER = ["deck-1", VOCAL_DECK, "deck-2", "deck-3", "deck-4"]
+LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
 
 
@@ -108,6 +109,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "text": lean_in.get("text"),
                 "voice": lean_in.get("voice"),
                 "rate": lean_in.get("rate"),
+                "volume": lean_in.get("volume", 1.0),
             }
         )
         for key in ("ducking", "lowpass"):
@@ -359,7 +361,7 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "id": lane,
-            "label": lane.replace("-", " "),
+            "label": LANE_LABELS.get(lane, lane.replace("-", " ")),
             "kind": "effect-lane" if lane.endswith("-fx") else "deck" if lane.startswith("deck-") else lane,
             "attached_deck": lane[:-3] if lane.endswith("-fx") else None,
             "events": [event for event in events if event.get("lane") == lane],

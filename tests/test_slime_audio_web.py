@@ -61,7 +61,8 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(data["dashboard"]["transport"]["status"], "playing")
         self.assertEqual(data["dashboard"]["transport"]["playhead_ms"], 70_000)
         self.assertEqual(data["dashboard"]["now"]["id"], "c")
-        self.assertEqual([lane["id"] for lane in data["dashboard"]["lanes"][:5]], ["deck-3", "deck-1", "deck-2", "deck-4", "deck-5"])
+        self.assertEqual([lane["id"] for lane in data["dashboard"]["lanes"][:5]], ["deck-1", "deck-5", "deck-2", "deck-3", "deck-4"])
+        self.assertEqual(data["dashboard"]["lanes"][1]["label"], "MIC")
         self.assertEqual(data["dashboard"]["session"]["counts"]["song"], 3)
         self.assertEqual([event["status"] for event in data["dashboard"]["events"] if event["kind"] == "song"], ["done", "done", "current"])
 

@@ -85,7 +85,7 @@ def run_chrome(chrome: str, url: str, out_dir: Path, name: str, size: str) -> st
     if not screenshot.exists() or screenshot.stat().st_size < 10_000:
         raise AssertionError(f"{name} screenshot looks empty: {screenshot}")
     dom = result.stdout
-    required = ["transport-strip", "timeline-event", "playhead", "short incoming vocal note"]
+    required = ["transport-strip", "timeline-event", "playhead", "mixer-channel", "short incoming vocal note"]
     missing = [needle for needle in required if needle not in dom]
     if missing:
         raise AssertionError(f"{name} DOM missing expected dashboard markers: {missing}")

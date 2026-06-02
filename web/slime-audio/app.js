@@ -38,10 +38,23 @@ const els = {
   timelineScroll: document.querySelector("#timeline-scroll"),
   timeline: document.querySelector("#timeline"),
   followPlayhead: document.querySelector("#follow-playhead"),
+  mixerChannels: document.querySelector("#mixer-channels"),
+  crossfaderStrip: document.querySelector("#crossfader-strip"),
 };
 
 const MIN_STAGE_WIDTH = 1600;
 const LANE_LABEL_WIDTH = 104;
+const MIXER_DECK_ORDER = ["deck-1", "deck-5", "deck-2", "deck-3", "deck-4"];
+const DECK_LABELS = { "deck-5": "MIC" };
+const KNOB_DEFS = [
+  { key: "trim", label: "trim", min: -12, max: 12, neutral: 0, unit: "dB" },
+  { key: "hi", label: "hi", min: -12, max: 12, neutral: 0, unit: "dB" },
+  { key: "mid", label: "mid", min: -12, max: 12, neutral: 0, unit: "dB" },
+  { key: "low", label: "low", min: -12, max: 12, neutral: 0, unit: "dB" },
+  { key: "filter", label: "filter", min: -1, max: 1, neutral: 0, unit: "" },
+];
+const KNOB_MIN_DEG = -135;
+const KNOB_MAX_DEG = 135;
 
 function fmtMs(ms) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "--:--";
@@ -118,6 +131,174 @@ function eventSignature(dashboard) {
 
 function statusLabel(value) {
   return String(value || "unknown").replace("-", " ");
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function lerp(a, b, pct) {
+  return a + (b - a) * pct;
+}
+
+function numericValue(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function automationValue(points, atMs, fallback = null) {
+  const valid = (points || [])
+    .map((point) => ({ at: numericValue(point.at_ms, null), value: numericValue(point.value, null) }))
+    .filter((point) => point.at !== null && point.value !== null)
+    .sort((a, b) => a.at - b.at);
+  if (!valid.length || atMs === null || atMs === undefined) return fallback;
+  if (atMs <= valid[0].at) return valid[0].value;
+  for (let index = 1; index < valid.length; index += 1) {
+    const left = valid[index - 1];
+    const right = valid[index];
+    if (atMs <= right.at) {
+      const span = Math.max(1, right.at - left.at);
+      return lerp(left.value, right.value, clamp((atMs - left.at) / span, 0, 1));
+    }
+  }
+  return valid[valid.length - 1].value;
+}
+
+function automationFor(targetId, param, atMs, fallback = null) {
+  const events = dashboardState.dashboard?.events || [];
+  const automation = events
+    .filter((event) => event.kind === "automation" && event.param === param && (event.target === targetId || event.owner === targetId))
+    .sort((a, b) => numericValue(a.start_ms, 0) - numericValue(b.start_ms, 0));
+  let value = fallback;
+  for (const event of automation) {
+    const start = numericValue(event.start_ms, null);
+    const end = numericValue(event.end_ms, null);
+    if (start === null || end === null || atMs === null || atMs === undefined) continue;
+    if (atMs >= start && atMs <= end) value = automationValue(event.points, atMs, value);
+  }
+  return value;
+}
+
+function pickDeckEvent(deckId, playhead) {
+  const events = (dashboardState.dashboard?.events || []).filter((event) => event.lane === deckId && ["song", "vocal"].includes(event.kind));
+  return (
+    events.find((event) => playhead !== null && event.start_ms <= playhead && playhead < event.end_ms) ||
+    events.find((event) => playhead !== null && event.start_ms >= playhead) ||
+    events[events.length - 1] ||
+    null
+  );
+}
+
+function filterState(event, playhead) {
+  if (!event) return 0;
+  const lowpass = automationFor(event.id, "lowpass_hz", playhead, null);
+  const highpass = automationFor(event.id, "highpass_hz", playhead, null);
+  if (Number.isFinite(highpass) && highpass > 30) return clamp(highpass / 2500, 0, 1);
+  if (Number.isFinite(lowpass) && lowpass > 0 && lowpass < 18_000) return -clamp((18_000 - lowpass) / 18_000, 0, 1);
+  return 0;
+}
+
+function channelState(deckId) {
+  const playhead = livePlayheadMs();
+  const event = pickDeckEvent(deckId, playhead);
+  const isMic = deckId === "deck-5";
+  const trim = isMic ? 0 : numericValue(event?.trim_db, 0);
+  const gain = isMic
+    ? (numericValue(event?.volume, 1) - 1) * 12
+    : automationFor(event?.id, "gain_db", playhead, numericValue(event?.gain_db, 0));
+  const eqLow = automationFor(event?.id, "eq_low_db", playhead, 0);
+  const eqMid = automationFor(event?.id, "eq_mid_db", playhead, 0);
+  const eqHigh = automationFor(event?.id, "eq_high_db", playhead, 0);
+  const filter = filterState(event, playhead);
+  const level = clamp((gain + trim + 30) / 42, 0, 1);
+  return {
+    id: deckId,
+    label: DECK_LABELS[deckId] || deckId.replace("deck-", ""),
+    route: dashboardState.dashboard?.session?.fader_assignments?.[deckId] || (isMic ? "THRU" : ""),
+    title: event?.display_title || "empty",
+    meta: event?.display_meta || "",
+    active: event?.status === "current",
+    values: {
+      trim,
+      hi: eqHigh,
+      mid: eqMid,
+      low: eqLow,
+      filter,
+      fader: gain,
+      level,
+    },
+  };
+}
+
+function knobDeg(def, value) {
+  const pct = clamp((numericValue(value, def.neutral) - def.min) / (def.max - def.min), 0, 1);
+  return lerp(KNOB_MIN_DEG, KNOB_MAX_DEG, pct);
+}
+
+function knobValueText(def, value) {
+  if (def.key === "filter") {
+    if (Math.abs(value) < 0.02) return "center";
+    return value < 0 ? `lp ${Math.round(Math.abs(value) * 100)}%` : `hp ${Math.round(value * 100)}%`;
+  }
+  return `${numericValue(value, 0).toFixed(1)}${def.unit}`;
+}
+
+function renderKnob(def, value) {
+  const wrap = document.createElement("div");
+  wrap.className = "knob-control";
+  const knob = document.createElement("div");
+  knob.className = "knob";
+  knob.style.setProperty("--knob-deg", `${knobDeg(def, value)}deg`);
+  knob.title = `${def.label}: ${knobValueText(def, value)}`;
+  const label = document.createElement("span");
+  label.textContent = def.label;
+  wrap.append(knob, label);
+  return wrap;
+}
+
+function sliderValueFromDb(value) {
+  return clamp(((numericValue(value, 0) + 36) / 42) * 100, 0, 100);
+}
+
+function renderMixer() {
+  if (!els.mixerChannels || !els.crossfaderStrip) return;
+  const channels = MIXER_DECK_ORDER.map(channelState);
+  els.mixerChannels.replaceChildren();
+  for (const channel of channels) {
+    const strip = document.createElement("article");
+    strip.className = `mixer-channel ${channel.active ? "active" : ""} ${channel.id === "deck-5" ? "mic" : ""}`;
+    const head = document.createElement("div");
+    head.className = "mixer-channel-head";
+    head.innerHTML = `<strong>${channel.label}</strong><span>${channel.route || "deck"}</span>`;
+    const title = document.createElement("p");
+    title.className = "mixer-channel-title";
+    title.textContent = channel.title;
+    const knobs = document.createElement("div");
+    knobs.className = "knob-grid";
+    for (const def of KNOB_DEFS) knobs.append(renderKnob(def, channel.values[def.key]));
+    const fader = document.createElement("div");
+    fader.className = "channel-fader";
+    const level = Math.round(channel.values.level * 100);
+    fader.innerHTML = `
+      <label>
+        <span>level</span>
+        <input type="range" min="0" max="100" value="${level}" disabled aria-label="${channel.label} level" />
+      </label>
+      <label>
+        <span>fader</span>
+        <input type="range" min="0" max="100" value="${Math.round(sliderValueFromDb(channel.values.fader))}" disabled aria-label="${channel.label} fader" />
+      </label>
+    `;
+    strip.append(head, title, knobs, fader);
+    els.mixerChannels.append(strip);
+  }
+  const crossfader = (dashboardState.dashboard?.events || []).find((event) => event.kind === "automation" && event.target === "crossfader" && event.param === "position");
+  const position = automationValue(crossfader?.points, livePlayheadMs(), 0);
+  els.crossfaderStrip.innerHTML = `
+    <span>A</span>
+    <input type="range" min="-100" max="100" value="${Math.round(clamp(position, -1, 1) * 100)}" disabled aria-label="crossfader position" />
+    <span>B</span>
+  `;
 }
 
 function setBadgeState(el, status) {
@@ -313,7 +494,9 @@ function renderTimeline() {
     const number = laneNumber(lane.id);
     const fxNumber = fxLaneNumber(lane.id);
     const utilityLabel = lane.id === "voice" ? "mic" : lane.id === "automation" ? "auto" : lane.id === "fader" ? "xfade" : lane.label || lane.id;
-    if (number) {
+    if (lane.id === "deck-5") {
+      label.innerHTML = `<strong>MIC</strong><span>vocal</span>`;
+    } else if (number) {
       label.innerHTML = `<strong>${number}</strong><span>deck</span>`;
     } else if (fxNumber) {
       label.innerHTML = `<strong>${fxNumber}</strong><span>fx lane</span>`;
@@ -388,6 +571,7 @@ function render() {
   renderList(els.automationList, dashboard.automation, "no upcoming automation", 10);
   renderHealth();
   renderSummary();
+  renderMixer();
   els.timelineTitle.textContent = dashboard.session?.timeline_mode || "native mix session";
   const signature = eventSignature(dashboard);
   if (signature !== dashboardState.signature) {
