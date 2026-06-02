@@ -141,6 +141,7 @@ Prefer named edit-api routines when they fit, then customize with automation or 
 - `instant-double`: clone a source onto another deck at the same musical position for trades, cuts, and layered emphasis.
 - `stabs` / `one-beat-trades` / `offbeat-swaps`: quantized double routines for audible DJ-style motion.
 - `hook-tease`: briefly reveal a hook or cue as a future hint.
+- Hook teases, callbacks, and third-deck teasers must resolve like DJ moves, not orphaned overlays. Put them on a phrase boundary, keep them intentionally short as a stab/1-2-4-8 bar cue, then cut or echo out cleanly. If the borrowed hook stays longer than a phrase gesture, treat it as a real bed/layer instead: carve with EQ/filtering, set an audible but balanced gain, and plan a phrase-safe exit. Avoid arbitrary 8-12 second teases that appear, drift under the lead, and vanish without musical payoff.
 - `echo-stabs`: gated double plus echo tail. Echo is a wet send; the dry source should usually keep playing unless the routine intentionally trades it.
 - `echo-drop`: gated double plus reverb tail for a larger moment.
 - `scratch-cuts`: sparse source-replacing transform scratches. Scratch child clips must stay attached to the deck being scratched, not become independent music decks.
