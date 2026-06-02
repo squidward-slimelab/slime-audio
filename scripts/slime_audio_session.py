@@ -1774,22 +1774,7 @@ def add_scratch_cut_routine(
     source_deck = str(source_payload.get("deck") or "")
     source_trim_ms = parse_ms(source_payload.get("trim_start_ms", source_payload.get("trim_start", 0)), f"clip {source_id} trim_start")
     source_trim_at_start = source_trim_ms + int(round((start_ms - source_start_ms) * clip_tempo_factor(source_payload)))
-    decks = [str(deck) for deck in payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
-    scratch_deck = next((deck for deck in decks if deck != source_deck), None)
-    if scratch_deck is None:
-        raise ValueError(f"scratch routine {routine_id} needs a free scratch deck")
     next_payload = copy.deepcopy(payload)
-    routing = parse_fader_routing(next_payload, decks)
-    source_side = routing.get(source_deck, DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A"))
-    if source_side == "THRU":
-        source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
-    scratch_side = "B" if source_side == "A" else "A"
-    source_position = -1.0 if source_side == "A" else 1.0
-    scratch_position = -1.0 if scratch_side == "A" else 1.0
-    assignments = {deck: source_side for deck in decks}
-    assignments[scratch_deck] = scratch_side
-    next_payload = set_fader_routing(next_payload, assignments)
-    cut_points: list[dict[str, int | float]] = [{"at_ms": start_ms, "value": source_position}]
     # Scratch-cuts use the older continuous scratch vocabulary: short but audible
     # record-motion pulls spaced across the phrase, with the source deck audible
     # between cuts. Keep this sparse; dense micro-slices read as glitch stutter.
@@ -1809,7 +1794,7 @@ def add_scratch_cut_routine(
         scratch_gain_db = 2.0 + (20 * math.log10(gain))
         scratch_clip = {
             "id": f"{routine_id}-scratch-{index + 1:02d}",
-            "deck": scratch_deck,
+            "deck": source_deck,
             "path": source_payload.get("path"),
             "start_ms": clip_start,
             "trim_start_ms": source_trim_at_start + trim_offset_ms,
@@ -1832,30 +1817,19 @@ def add_scratch_cut_routine(
             "source_technique": "slip-transform-scratch",
         }
         next_payload.setdefault("clips", []).append(scratch_clip)
-        cut_points.extend(
-            [
-                {"at_ms": clip_start, "value": source_position},
-                {"at_ms": clip_start + 1, "value": scratch_position},
-                {"at_ms": clip_start + max(1, clip_duration - 1), "value": scratch_position},
-                {"at_ms": clip_start + clip_duration, "value": source_position},
-            ]
+        next_payload.setdefault("automations", []).append(
+            {
+                "target": source_id,
+                "param": "gain_db",
+                "planner_role": "scratch-source-duck",
+                "points": [
+                    {"at_ms": clip_start, "value": -96.0},
+                    {"at_ms": clip_start + clip_duration, "value": -96.0},
+                ],
+                "routine_id": routine_id,
+                "routine_recipe": recipe,
+            }
         )
-    cut_points.append({"at_ms": routine_end_ms, "value": source_position})
-    deduped_points: list[dict[str, int | float]] = []
-    for point in sorted(cut_points, key=lambda item: (int(item["at_ms"]), float(item["value"]))):
-        if deduped_points and deduped_points[-1]["at_ms"] == point["at_ms"] and deduped_points[-1]["value"] == point["value"]:
-            continue
-        deduped_points.append(point)
-    next_payload.setdefault("automations", []).append(
-        {
-            "target": "crossfader",
-            "param": "position",
-            "planner_role": "scratch-transform-cuts",
-            "points": deduped_points,
-            "routine_id": routine_id,
-            "routine_recipe": recipe,
-        }
-    )
     next_payload.setdefault("slip_events", []).append(
         {
             "id": f"{routine_id}-slip",

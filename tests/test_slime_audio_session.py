@@ -1323,7 +1323,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             payload = json.loads(path.read_text(encoding="utf-8"))
             scratch_clips = [clip for clip in payload["clips"] if clip.get("routine_id") == "routine-scratch"]
-            crossfader = next(automation for automation in payload["automations"] if automation.get("planner_role") == "scratch-transform-cuts")
+            source_ducks = [automation for automation in payload["automations"] if automation.get("planner_role") == "scratch-source-duck"]
 
         self.assertEqual(len(scratch_clips), 4)
         self.assertTrue(any(clip.get("reverse") for clip in scratch_clips))
@@ -1332,11 +1332,13 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual([clip["start_ms"] for clip in scratch_clips], [12_000, 14_000, 16_000, 18_500])
         self.assertTrue(all(clip["fade_in_ms"] == 18 for clip in scratch_clips))
         self.assertTrue(all(clip["kind"] == "effect-track" for clip in scratch_clips))
+        self.assertTrue(all(clip["deck"] == "deck-2" for clip in scratch_clips))
         self.assertTrue(all(clip["attached_deck"] == "deck-2" for clip in scratch_clips))
         self.assertEqual(payload["slip_events"][0]["routine_recipe"], "scratch-cuts")
-        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "A", "deck-2": "B", "deck-3": "B"})
-        self.assertEqual(crossfader["target"], "crossfader")
-        self.assertIn({"at_ms": 12_001, "value": -1.0}, crossfader["points"])
+        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "A", "deck-2": "B", "deck-3": "A"})
+        self.assertEqual(len(source_ducks), 4)
+        self.assertTrue(all(automation["target"] == "source" for automation in source_ducks))
+        self.assertEqual(source_ducks[0]["points"], [{"at_ms": 12_000, "value": -96.0}, {"at_ms": 12_200, "value": -96.0}])
 
     def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:
