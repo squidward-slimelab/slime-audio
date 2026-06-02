@@ -1790,24 +1790,17 @@ def add_scratch_cut_routine(
     next_payload = set_fader_routing(next_payload, assignments)
     cut_points: list[dict[str, int | float]] = [{"at_ms": start_ms, "value": source_position}]
     # Beat-derived baby/transform scratches: short throws, alternating forward/back,
-    # with the source deck audible between cuts.
+    # with the source deck audible between cuts. Keep this sparse; slip-mode tricks
+    # should land and release on beats instead of machine-gunning random slices.
     pattern = [
-        (0.00, 0.48, False, 0.84, 1.0),
-        (0.56, 0.36, True, 1.08, 0.96),
-        (1.00, 0.30, False, 1.35, 1.0),
-        (1.36, 0.28, True, 0.72, 0.94),
-        (2.00, 0.42, False, 0.95, 1.0),
-        (2.50, 0.32, True, 1.18, 0.96),
-        (3.00, 0.24, False, 1.55, 0.9),
-        (3.28, 0.24, True, 1.28, 0.9),
-        (4.00, 0.52, False, 0.70, 1.0),
-        (4.64, 0.30, True, 1.10, 0.95),
-        (5.00, 0.26, False, 1.42, 0.9),
-        (5.32, 0.22, True, 1.42, 0.9),
-        (6.00, 0.42, False, 0.92, 1.0),
-        (6.52, 0.30, True, 1.20, 0.95),
-        (7.00, 0.24, False, 1.65, 0.86),
-        (7.28, 0.20, True, 1.50, 0.86),
+        (0.00, 0.42, False, 0.86, 1.0),
+        (0.50, 0.34, True, 1.02, 0.94),
+        (1.00, 0.36, False, 1.12, 0.98),
+        (1.50, 0.30, True, 0.82, 0.92),
+        (2.00, 0.42, False, 0.94, 1.0),
+        (2.50, 0.30, True, 1.16, 0.92),
+        (3.00, 0.28, False, 1.28, 0.88),
+        (3.50, 0.24, True, 1.20, 0.88),
     ]
     for index, (offset_beats, duration_beats, reverse, playback_rate, gain) in enumerate(pattern):
         clip_start = start_ms + int(round(offset_beats * beat_ms))
