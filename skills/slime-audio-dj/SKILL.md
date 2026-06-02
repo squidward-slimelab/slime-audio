@@ -132,6 +132,22 @@ Mix review should fail when:
 - hard ducks are present without a replacement move like scratch/brake
 - the render report is clean but the musical proof still sounds like a straight playlist
 
+### EQ And Filter Performance
+
+DJ EQ/filter work is a musical handoff tool, not a checkbox. Tutorial references: Club Ready DJ School, "5 DJ EQ Techniques That Instantly Improve Your Mixes"; Club Ready DJ School, "3 PRO DJ FILTER TECHNIQUES to enhance your transitions"; Club Ready DJ School, "DJ Transitions Masterclass - Master Phrasing, EQ & Filters".
+
+Important lessons to encode in the session:
+
+- EQ is more than swapping bass. Use it to prevent frequency clashes, control energy, make vocals/melodies readable, soften or brighten transitions, and create tension around choruses/drops.
+- Low EQ/bass controls weight and kick/bass ownership. Do not leave two full basslines fighting. Time bass swaps to phrase boundaries, new sections, drops, or chorus entries.
+- Mid EQ controls vocals, hooks, guitars, and melodic identity. When a bed fights a lead vocal or hook, carve mids on the bed instead of only turning the whole bed down.
+- High EQ controls hats, brightness, and perceived sharpness. Pulling highs can soften an incoming/outgoing track; restoring highs can make a section open up.
+- Filters should move with intention. Use high-pass/low-pass sweeps to introduce, thin, build tension, or exit a layer. A static low-pass/high-pass value for an entire bed is only basic carving, not a DJ filter move.
+- Make changes audible but not cartoonish. Gentle EQ shifts often beat huge cuts; hard kills are for deliberate drops, swaps, or special effects.
+- The listener should be able to hear why the knob moved. Every important overlap should have a plan: which source owns bass, which source owns mids/hooks, which source owns highs/texture, and when ownership changes.
+
+Session review should fail when EQ/filter use is only token automation: identical static high-pass/low-pass points on every bed, no mid/high decisions, no phrase-timed bass handoffs, no filter rides, or no audible difference in the proof.
+
 ### Creative Moves
 
 Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
