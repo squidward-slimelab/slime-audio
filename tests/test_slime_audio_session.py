@@ -1328,6 +1328,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertGreaterEqual(len(scratch_clips), 8)
         self.assertTrue(any(clip.get("reverse") for clip in scratch_clips))
         self.assertTrue(any(float(clip.get("playback_rate", 1.0)) > 1.0 for clip in scratch_clips))
+        self.assertTrue(all(clip.get("scratch_motion") for clip in scratch_clips))
         self.assertTrue(all(clip["kind"] == "effect-track" for clip in scratch_clips))
         self.assertTrue(all(clip["attached_deck"] == "deck-2" for clip in scratch_clips))
         self.assertEqual(payload["slip_events"][0]["routine_recipe"], "scratch-cuts")
