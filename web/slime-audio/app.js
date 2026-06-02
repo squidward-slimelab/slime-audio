@@ -211,15 +211,64 @@ function eventIds(events) {
   return new Set((events || []).map((event) => event.id).filter(Boolean).map(String));
 }
 
+function deckGainAutomation(lane, automations) {
+  if (!lane.id?.startsWith("deck-") || lane.id.endsWith("-fx")) return null;
+  const clips = (lane.events || [])
+    .filter((event) => event.kind !== "automation" && event.id && ["song", "effect-track"].includes(event.kind))
+    .sort((a, b) => numericValue(a.start_ms, 0) - numericValue(b.start_ms, 0));
+  if (!clips.length) return null;
+  const clipAutomation = new Map(
+    automations
+      .filter((event) => event.param === "gain_db" && event.target)
+      .map((event) => [String(event.target), event])
+  );
+  const points = [];
+  for (const clip of clips) {
+    const start = numericValue(clip.start_ms, null);
+    const end = numericValue(clip.end_ms, null);
+    if (start === null || end === null) continue;
+    const automation = clipAutomation.get(String(clip.id));
+    const sourcePoints = automationPoints(automation);
+    if (sourcePoints.length) {
+      for (const point of sourcePoints) points.push(point);
+    } else {
+      const value = numericValue(clip.gain_db, 0);
+      points.push({ at: start, value }, { at: end, value });
+    }
+  }
+  const deduped = new Map();
+  for (const point of points) deduped.set(point.at, point.value);
+  const merged = [...deduped.entries()]
+    .map(([at, value]) => ({ at_ms: at, value }))
+    .sort((a, b) => a.at_ms - b.at_ms);
+  if (merged.length < 2) return null;
+  return {
+    kind: "automation",
+    target: lane.id,
+    param: "gain_db",
+    points: merged,
+    start_ms: merged[0].at_ms,
+    end_ms: merged[merged.length - 1].at_ms,
+    display_title: "gain",
+    display_meta: `${lane.id} fader gain`,
+    synthetic: "deck-gain",
+  };
+}
+
 function laneAutomationEvents(lane) {
   const automations = (dashboardState.dashboard?.events || []).filter((event) => event.kind === "automation" && automationPoints(event).length);
   const laneIds = eventIds((lane.events || []).filter((event) => event.kind !== "automation"));
   const allTimelineIds = eventIds((dashboardState.dashboard?.events || []).filter((event) => event.kind !== "automation"));
   if (lane.id === "fader") return automations.filter((event) => event.target === "crossfader");
   if (lane.id === "automation") {
-    return automations.filter((event) => event.target !== "crossfader" && !allTimelineIds.has(String(event.target || event.owner || "")));
+      return automations.filter((event) => event.target !== "crossfader" && !allTimelineIds.has(String(event.target || event.owner || "")));
   }
-  return automations.filter((event) => laneIds.has(String(event.target || "")) || laneIds.has(String(event.owner || "")));
+  const laneAutomations = automations.filter((event) => laneIds.has(String(event.target || "")) || laneIds.has(String(event.owner || "")));
+  const deckGain = deckGainAutomation(lane, laneAutomations);
+  return [
+    ...(deckGain ? [deckGain] : []),
+    ...laneAutomations.filter((event) => event.param !== "gain_db"),
+  ];
 }
 
 function automationMeta(event, index = 0) {
@@ -297,7 +346,7 @@ function showAutomationTooltip(pointerEvent, lane, automations, scale) {
   const rows = activeAutomations.map((event, index) => {
     const meta = automationMeta(event, index);
     const value = automationValue(event.points, atMs, null);
-    const target = event.target && event.target !== "crossfader" ? `${event.target} ` : "";
+    const target = event.synthetic === "deck-gain" || event.target === "crossfader" ? "" : event.target ? `${event.target} ` : "";
     const row = document.createElement("div");
     row.className = "automation-tooltip-row";
     row.innerHTML = `<i style="background:${meta.color}"></i><span>${target}${meta.label}</span><strong>${automationValueText(event.param, value)}</strong>`;
