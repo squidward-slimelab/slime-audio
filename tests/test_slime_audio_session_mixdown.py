@@ -507,6 +507,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("afade=t=out:st=0.0122:d=0.0030", filters)
         self.assertIn("concat=n=66:v=0:a=1", filters)
         self.assertIn("adelay=9000:all=1", filters)
+        self.assertIn("volume=enable='between(t,4.000,5.000)':volume=0.000000", filters)
 
     def test_mixdown_filter_applies_per_track_eq_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:

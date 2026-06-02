@@ -345,6 +345,13 @@ def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, 
 
 def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     filters: list[str] = []
+    for effect in session.effects:
+        if effect.type != "vinyl_brake" or clip not in effect_target_clips(session, effect):
+            continue
+        start_ms = max(0, effect.start_ms - clip.start_ms)
+        end_ms = max(start_ms, min((clip.end_ms or effect.end_ms) - clip.start_ms, effect.end_ms - clip.start_ms))
+        if end_ms > start_ms:
+            filters.append(f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume=0.000000")
     for start_ms, end_ms, lowpass_hz in clip_automation_windows(session, clip, "lowpass_hz"):
         filters.append(f"lowpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={lowpass_hz:.3f}")
     for start_ms, end_ms, highpass_hz in clip_automation_windows(session, clip, "highpass_hz"):
