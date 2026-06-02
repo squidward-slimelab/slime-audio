@@ -885,6 +885,7 @@ h2 {
   filter: drop-shadow(0 3px 5px rgba(0, 0, 0, 0.65));
   transform: rotate(var(--knob-deg));
   transform-origin: 50% 50%;
+  transition: transform 180ms linear, filter 180ms ease;
 }
 
 .knob::after {
@@ -910,6 +911,16 @@ h2 {
   font-weight: 900;
 }
 
+.knob-control.moving .knob {
+  filter:
+    drop-shadow(0 3px 5px rgba(0, 0, 0, 0.65))
+    drop-shadow(0 0 10px rgba(111, 184, 232, 0.72));
+}
+
+.knob-control.moving span {
+  color: var(--blue);
+}
+
 .channel-fader {
   display: grid;
   grid-template-columns: repeat(2, minmax(48px, 1fr));
@@ -933,8 +944,14 @@ h2 {
   width: 34px;
   height: 150px;
   accent-color: var(--blue);
+  transition: accent-color 180ms ease;
   writing-mode: vertical-lr;
   direction: rtl;
+}
+
+.channel-fader input[type="range"].moving {
+  accent-color: var(--yellow);
+  filter: drop-shadow(0 0 7px rgba(224, 184, 90, 0.62));
 }
 
 .mixer-channel.mic .channel-fader input[type="range"] {

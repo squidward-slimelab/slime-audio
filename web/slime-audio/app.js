@@ -10,6 +10,7 @@ const dashboardState = {
   activeSet: null,
   selectedSet: null,
   waveformCache: new Map(),
+  lastMixerFrame: 0,
 };
 
 const els = {
@@ -58,6 +59,7 @@ const KNOB_MIN_DEG = -135;
 const KNOB_MAX_DEG = 135;
 const AUTOMATION_GRAPH_HEIGHT = 64;
 const AUTOMATION_PARAM_META = {
+  level: { label: "level", min: 0, max: 1, unit: "", color: "#eef3ef" },
   gain_db: { label: "gain", min: -24, max: 6, unit: "dB", color: "#6fb8e8" },
   trim_db: { label: "trim", min: -12, max: 12, unit: "dB", color: "#82c66f" },
   eq_low_db: { label: "low", min: -12, max: 12, unit: "dB", color: "#e0b85a" },
@@ -65,10 +67,12 @@ const AUTOMATION_PARAM_META = {
   eq_high_db: { label: "hi", min: -12, max: 12, unit: "dB", color: "#df7070" },
   lowpass_hz: { label: "lowpass", min: 40, max: 22050, unit: "Hz", color: "#82c66f", scale: "log" },
   highpass_hz: { label: "highpass", min: 20, max: 6000, unit: "Hz", color: "#e0b85a", scale: "log" },
+  filter: { label: "filter", min: -1, max: 1, unit: "", color: "#82c66f" },
   duck_volume: { label: "duck", min: 0, max: 1, unit: "", color: "#df7070" },
   position: { label: "xfader", min: -1, max: 1, unit: "", color: "#6fb8e8" },
 };
 const AUTOMATION_FALLBACK_COLORS = ["#6fb8e8", "#82c66f", "#e0b85a", "#b79cf5", "#df7070"];
+const DECK_GRAPH_PARAMS = ["level", "gain_db", "trim_db", "eq_high_db", "eq_mid_db", "eq_low_db", "filter"];
 
 function fmtMs(ms) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "--:--";
@@ -200,6 +204,39 @@ function automationFor(targetId, param, atMs, fallback = null) {
   return value;
 }
 
+function automationEventsFor(targetId, param) {
+  return (dashboardState.dashboard?.events || [])
+    .filter((event) => event.kind === "automation" && event.param === param && event.target === targetId)
+    .sort((a, b) => numericValue(a.start_ms, 0) - numericValue(b.start_ms, 0));
+}
+
+function automationValueFromEvents(events, atMs, fallback = null) {
+  let value = fallback;
+  for (const event of events || []) {
+    const start = numericValue(event.start_ms, null);
+    const end = numericValue(event.end_ms, null);
+    if (start === null || end === null || atMs === null || atMs === undefined) continue;
+    if (atMs >= start && atMs <= end) value = automationValue(event.points, atMs, value);
+  }
+  return value;
+}
+
+function deckAutomationFor(deckId, param, atMs, fallback = null) {
+  return automationValueFromEvents(automationEventsFor(deckId, param), atMs, fallback);
+}
+
+function automationIsMoving(targetId, param, atMs) {
+  return automationEventsFor(targetId, param).some((event) => {
+    const points = automationPoints(event);
+    for (let index = 1; index < points.length; index += 1) {
+      const left = points[index - 1];
+      const right = points[index];
+      if (atMs >= left.at && atMs <= right.at && Math.abs(right.value - left.value) > 0.0001) return true;
+    }
+    return false;
+  });
+}
+
 function automationPoints(event) {
   return (event?.points || [])
     .map((point) => ({ at: numericValue(point.at_ms, null), value: numericValue(point.value, null) }))
@@ -209,6 +246,74 @@ function automationPoints(event) {
 
 function eventIds(events) {
   return new Set((events || []).map((event) => event.id).filter(Boolean).map(String));
+}
+
+function clipAt(lane, atMs) {
+  const clips = (lane.events || [])
+    .filter((event) => event.kind !== "automation" && ["song", "effect-track", "vocal"].includes(event.kind))
+    .sort((a, b) => numericValue(a.start_ms, 0) - numericValue(b.start_ms, 0));
+  return clips.find((event) => atMs >= numericValue(event.start_ms, 0) && atMs < numericValue(event.end_ms, event.start_ms || 0)) || null;
+}
+
+function filterValueFromState(lowpass, highpass) {
+  if (Number.isFinite(highpass) && highpass > 30) return clamp(highpass / 2500, 0, 1);
+  if (Number.isFinite(lowpass) && lowpass > 0 && lowpass < 18_000) return -clamp((18_000 - lowpass) / 18_000, 0, 1);
+  return 0;
+}
+
+function deckParamValue(lane, param, atMs, directDeckAutomations, legacyAutomations) {
+  const clip = clipAt(lane, atMs);
+  const clipId = clip?.id;
+  const legacyFor = (legacyParam, fallback) => {
+    const events = legacyAutomations.filter((event) => event.param === legacyParam && (event.target === clipId || event.owner === clipId));
+    return automationValueFromEvents(events, atMs, fallback);
+  };
+  const deckFor = (deckParam, fallback) => {
+    const events = directDeckAutomations.filter((event) => event.param === deckParam);
+    return automationValueFromEvents(events, atMs, fallback);
+  };
+  const trim = numericValue(clip?.trim_db, 0);
+  const gain = deckFor("gain_db", legacyFor("gain_db", numericValue(clip?.gain_db, 0)));
+  if (param === "level") return clamp((gain + trim + 30) / 42, 0, 1);
+  if (param === "gain_db") return gain;
+  if (param === "trim_db") return trim;
+  if (param === "eq_high_db") return deckFor("eq_high_db", legacyFor("eq_high_db", 0));
+  if (param === "eq_mid_db") return deckFor("eq_mid_db", legacyFor("eq_mid_db", 0));
+  if (param === "eq_low_db") return deckFor("eq_low_db", legacyFor("eq_low_db", 0));
+  if (param === "filter") {
+    const lowpass = deckFor("lowpass_hz", legacyFor("lowpass_hz", null));
+    const highpass = deckFor("highpass_hz", legacyFor("highpass_hz", null));
+    return filterValueFromState(lowpass, highpass);
+  }
+  return 0;
+}
+
+function synthesizeDeckParamAutomation(lane, param, directDeckAutomations, legacyAutomations) {
+  if (!lane.id?.startsWith("deck-") || lane.id.endsWith("-fx")) return null;
+  const duration = dashboardState.scale?.duration || dashboardState.dashboard?.session?.duration_ms || 60_000;
+  const breakpoints = new Set([0, duration]);
+  for (const event of lane.events || []) {
+    const start = numericValue(event.start_ms, null);
+    const end = numericValue(event.end_ms, null);
+    if (start !== null) breakpoints.add(clamp(start, 0, duration));
+    if (end !== null) breakpoints.add(clamp(end, 0, duration));
+  }
+  for (const event of [...directDeckAutomations, ...legacyAutomations]) {
+    for (const point of automationPoints(event)) breakpoints.add(clamp(point.at, 0, duration));
+  }
+  const points = [...breakpoints]
+    .sort((a, b) => a - b)
+    .map((at) => ({ at_ms: at, value: deckParamValue(lane, param, at, directDeckAutomations, legacyAutomations) }));
+  if (points.length < 2) return null;
+  return {
+    kind: "automation",
+    target: lane.id,
+    param,
+    points,
+    start_ms: 0,
+    end_ms: duration,
+    synthetic: "deck-state",
+  };
 }
 
 function deckGainAutomation(lane, automations) {
@@ -265,12 +370,12 @@ function laneAutomationEvents(lane) {
   }
   const directDeckAutomations = automations.filter((event) => event.target === lane.id);
   const laneAutomations = automations.filter((event) => laneIds.has(String(event.target || "")) || laneIds.has(String(event.owner || "")));
-  const deckGain = directDeckAutomations.some((event) => event.param === "gain_db") ? null : deckGainAutomation(lane, laneAutomations);
-  return [
-    ...(deckGain ? [deckGain] : []),
-    ...directDeckAutomations,
-    ...laneAutomations.filter((event) => event.param !== "gain_db"),
-  ];
+  if (lane.id?.startsWith("deck-") && !lane.id.endsWith("-fx")) {
+    return DECK_GRAPH_PARAMS
+      .map((param) => synthesizeDeckParamAutomation(lane, param, directDeckAutomations, laneAutomations))
+      .filter(Boolean);
+  }
+  return [...directDeckAutomations, ...laneAutomations.filter((event) => event.param !== "gain_db")];
 }
 
 function automationMeta(event, index = 0) {
@@ -513,13 +618,16 @@ function pickDeckEvent(deckId, playhead) {
   );
 }
 
-function filterState(event, playhead) {
-  if (!event) return 0;
-  const lowpass = automationFor(event.id, "lowpass_hz", playhead, null);
-  const highpass = automationFor(event.id, "highpass_hz", playhead, null);
-  if (Number.isFinite(highpass) && highpass > 30) return clamp(highpass / 2500, 0, 1);
-  if (Number.isFinite(lowpass) && lowpass > 0 && lowpass < 18_000) return -clamp((18_000 - lowpass) / 18_000, 0, 1);
-  return 0;
+function clipOrDeckAutomation(deckId, event, param, playhead, fallback = null) {
+  const deckValue = deckAutomationFor(deckId, param, playhead, null);
+  if (deckValue !== null && deckValue !== undefined) return deckValue;
+  return automationFor(event?.id, param, playhead, fallback);
+}
+
+function filterState(deckId, event, playhead) {
+  const lowpass = clipOrDeckAutomation(deckId, event, "lowpass_hz", playhead, null);
+  const highpass = clipOrDeckAutomation(deckId, event, "highpass_hz", playhead, null);
+  return filterValueFromState(lowpass, highpass);
 }
 
 function channelState(deckId) {
@@ -529,12 +637,21 @@ function channelState(deckId) {
   const trim = isMic ? 0 : numericValue(event?.trim_db, 0);
   const gain = isMic
     ? (numericValue(event?.volume, 1) - 1) * 12
-    : automationFor(event?.id, "gain_db", playhead, numericValue(event?.gain_db, 0));
-  const eqLow = automationFor(event?.id, "eq_low_db", playhead, 0);
-  const eqMid = automationFor(event?.id, "eq_mid_db", playhead, 0);
-  const eqHigh = automationFor(event?.id, "eq_high_db", playhead, 0);
-  const filter = filterState(event, playhead);
+    : clipOrDeckAutomation(deckId, event, "gain_db", playhead, numericValue(event?.gain_db, 0));
+  const eqLow = clipOrDeckAutomation(deckId, event, "eq_low_db", playhead, 0);
+  const eqMid = clipOrDeckAutomation(deckId, event, "eq_mid_db", playhead, 0);
+  const eqHigh = clipOrDeckAutomation(deckId, event, "eq_high_db", playhead, 0);
+  const filter = filterState(deckId, event, playhead);
   const level = clamp((gain + trim + 30) / 42, 0, 1);
+  const moving = {
+    trim: false,
+    hi: automationIsMoving(deckId, "eq_high_db", playhead),
+    mid: automationIsMoving(deckId, "eq_mid_db", playhead),
+    low: automationIsMoving(deckId, "eq_low_db", playhead),
+    filter: automationIsMoving(deckId, "lowpass_hz", playhead) || automationIsMoving(deckId, "highpass_hz", playhead),
+    fader: automationIsMoving(deckId, "gain_db", playhead),
+    level: automationIsMoving(deckId, "gain_db", playhead),
+  };
   return {
     id: deckId,
     label: DECK_LABELS[deckId] || deckId.replace("deck-", ""),
@@ -551,6 +668,7 @@ function channelState(deckId) {
       fader: gain,
       level,
     },
+    moving,
   };
 }
 
@@ -567,9 +685,9 @@ function knobValueText(def, value) {
   return `${numericValue(value, 0).toFixed(1)}${def.unit}`;
 }
 
-function renderKnob(def, value) {
+function renderKnob(def, value, moving = false) {
   const wrap = document.createElement("div");
-  wrap.className = "knob-control";
+  wrap.className = `knob-control ${moving ? "moving" : ""}`;
   const knob = document.createElement("div");
   knob.className = "knob";
   knob.style.setProperty("--knob-deg", `${knobDeg(def, value)}deg`);
@@ -599,18 +717,18 @@ function renderMixer() {
     title.textContent = channel.title;
     const knobs = document.createElement("div");
     knobs.className = "knob-grid";
-    for (const def of KNOB_DEFS) knobs.append(renderKnob(def, channel.values[def.key]));
+    for (const def of KNOB_DEFS) knobs.append(renderKnob(def, channel.values[def.key], channel.moving[def.key]));
     const fader = document.createElement("div");
     fader.className = "channel-fader";
     const level = Math.round(channel.values.level * 100);
     fader.innerHTML = `
       <label>
         <span>level</span>
-        <input type="range" min="0" max="100" value="${level}" disabled aria-label="${channel.label} level" />
+        <input class="${channel.moving.level ? "moving" : ""}" type="range" min="0" max="100" value="${level}" disabled aria-label="${channel.label} level" />
       </label>
       <label>
         <span>fader</span>
-        <input type="range" min="0" max="100" value="${Math.round(sliderValueFromDb(channel.values.fader))}" disabled aria-label="${channel.label} fader" />
+        <input class="${channel.moving.fader ? "moving" : ""}" type="range" min="0" max="100" value="${Math.round(sliderValueFromDb(channel.values.fader))}" disabled aria-label="${channel.label} fader" />
       </label>
     `;
     strip.append(head, title, knobs, fader);
@@ -958,6 +1076,11 @@ async function postJson(url, body = {}) {
 
 function animatePlayhead() {
   updatePlayhead();
+  const now = performance.now();
+  if (dashboardState.dashboard && now - dashboardState.lastMixerFrame > 180) {
+    dashboardState.lastMixerFrame = now;
+    renderMixer();
+  }
   requestAnimationFrame(animatePlayhead);
 }
 
