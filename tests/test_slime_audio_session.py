@@ -88,6 +88,40 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(parse_ms("01:02.500", "time"), 62_500)
         self.assertEqual(parse_ms("1:02:03", "time"), 3_723_000)
 
+    def test_cli_add_clip_accepts_rendered_tempo_and_pitch_correction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "session.json"
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "add-clip",
+                        str(path),
+                        "--create",
+                        "--id",
+                        "tempo-corrected-bed",
+                        "--deck",
+                        "deck-4",
+                        "--path",
+                        "/music/bed.flac",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:32.000",
+                        "--tempo-shift-pct",
+                        "2.5",
+                        "--pitch-shift-semitones",
+                        "-1",
+                    ]
+                ),
+                0,
+            )
+            clip = load_session(path).clips[0]
+
+        self.assertEqual(clip.tempo_shift_pct, 2.5)
+        self.assertEqual(clip.pitch_shift_semitones, -1)
+
     def test_playhead_from_playlist_state_uses_duration_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

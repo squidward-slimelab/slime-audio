@@ -1056,6 +1056,8 @@ def add_clip(
     duration: str | None,
     trim_db: float,
     gain_db: float,
+    tempo_shift_pct: float,
+    pitch_shift_semitones: int,
     fade_in_ms: int,
     fade_out_ms: int,
     lock_before_ms: int | None = None,
@@ -1077,6 +1079,8 @@ def add_clip(
         "trim_start": trim_start,
         "trim_db": trim_db,
         "gain_db": gain_db,
+        "tempo_shift_pct": tempo_shift_pct,
+        "pitch_shift_semitones": pitch_shift_semitones,
         "fade_in_ms": fade_in_ms,
         "fade_out_ms": fade_out_ms,
     }
@@ -1999,6 +2003,8 @@ def main() -> int:
     add_clip_parser.add_argument("--duration")
     add_clip_parser.add_argument("--trim-db", type=float, default=0.0)
     add_clip_parser.add_argument("--gain-db", type=float, default=0.0)
+    add_clip_parser.add_argument("--tempo-shift-pct", type=float, default=0.0)
+    add_clip_parser.add_argument("--pitch-shift-semitones", type=int, default=0)
     add_clip_parser.add_argument("--fade-in-ms", type=int, default=0)
     add_clip_parser.add_argument("--fade-out-ms", type=int, default=0)
     add_live_edit_args(add_clip_parser)
@@ -2159,6 +2165,8 @@ def main() -> int:
             duration=args.duration,
             trim_db=args.trim_db,
             gain_db=args.gain_db,
+            tempo_shift_pct=args.tempo_shift_pct,
+            pitch_shift_semitones=args.pitch_shift_semitones,
             fade_in_ms=args.fade_in_ms,
             fade_out_ms=args.fade_out_ms,
             lock_before_ms=lock_before_ms,

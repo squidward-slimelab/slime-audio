@@ -74,6 +74,8 @@ def add_clip_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--duration")
     parser.add_argument("--trim-db", type=float, default=0.0)
     parser.add_argument("--gain-db", type=float, default=0.0)
+    parser.add_argument("--tempo-shift-pct", type=float, default=0.0)
+    parser.add_argument("--pitch-shift-semitones", type=int, default=0)
     parser.add_argument("--fade-in-ms", type=int, default=0)
     parser.add_argument("--fade-out-ms", type=int, default=0)
 
@@ -223,6 +225,8 @@ def main() -> int:
                 duration=args.duration,
                 trim_db=args.trim_db,
                 gain_db=args.gain_db,
+                tempo_shift_pct=args.tempo_shift_pct,
+                pitch_shift_semitones=args.pitch_shift_semitones,
                 fade_in_ms=args.fade_in_ms,
                 fade_out_ms=args.fade_out_ms,
                 lock_before_ms=lock_ms,
