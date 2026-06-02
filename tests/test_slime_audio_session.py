@@ -1325,9 +1325,12 @@ class SlimeAudioSessionTests(unittest.TestCase):
             scratch_clips = [clip for clip in payload["clips"] if clip.get("routine_id") == "routine-scratch"]
             crossfader = next(automation for automation in payload["automations"] if automation.get("planner_role") == "scratch-transform-cuts")
 
-        self.assertGreaterEqual(len(scratch_clips), 8)
+        self.assertEqual(len(scratch_clips), 4)
         self.assertTrue(any(clip.get("reverse") for clip in scratch_clips))
         self.assertTrue(any(float(clip.get("playback_rate", 1.0)) > 1.0 for clip in scratch_clips))
+        self.assertEqual([clip["duration_ms"] for clip in scratch_clips], [200, 160, 240, 180])
+        self.assertEqual([clip["start_ms"] for clip in scratch_clips], [12_000, 14_000, 16_000, 18_500])
+        self.assertTrue(all(clip["fade_in_ms"] == 18 for clip in scratch_clips))
         self.assertTrue(all(clip["kind"] == "effect-track" for clip in scratch_clips))
         self.assertTrue(all(clip["attached_deck"] == "deck-2" for clip in scratch_clips))
         self.assertEqual(payload["slip_events"][0]["routine_recipe"], "scratch-cuts")

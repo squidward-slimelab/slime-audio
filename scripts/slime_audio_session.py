@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import re
 import sqlite3
 import subprocess
@@ -1766,7 +1767,7 @@ def add_scratch_cut_routine(
     if source_end_ms <= start_ms:
         raise ValueError(f"scratch routine {routine_id} must start before source clip ends")
     beat_ms = 60_000 / bpm
-    routine_duration_ms = int(round(8 * beat_ms))
+    routine_duration_ms = parse_ms(SUPPORTED_INSTANT_DOUBLE_RECIPES[recipe]["duration"], f"{recipe} duration")
     routine_end_ms = min(source_end_ms, start_ms + routine_duration_ms)
     if routine_end_ms <= start_ms:
         raise ValueError(f"scratch routine {routine_id} has no duration")
@@ -1789,26 +1790,23 @@ def add_scratch_cut_routine(
     assignments[scratch_deck] = scratch_side
     next_payload = set_fader_routing(next_payload, assignments)
     cut_points: list[dict[str, int | float]] = [{"at_ms": start_ms, "value": source_position}]
-    # Beat-derived baby/transform scratches: short throws, alternating forward/back,
-    # with the source deck audible between cuts. Keep this sparse; slip-mode tricks
-    # should land and release on beats instead of machine-gunning random slices.
+    # Scratch-cuts use the older continuous scratch vocabulary: short but audible
+    # record-motion pulls spaced across the phrase, with the source deck audible
+    # between cuts. Keep this sparse; dense micro-slices read as glitch stutter.
     pattern = [
-        (0.00, 0.42, False, 0.86, 1.0),
-        (0.50, 0.34, True, 1.02, 0.94),
-        (1.00, 0.36, False, 1.12, 0.98),
-        (1.50, 0.30, True, 0.82, 0.92),
-        (2.00, 0.42, False, 0.94, 1.0),
-        (2.50, 0.30, True, 1.16, 0.92),
-        (3.00, 0.28, False, 1.28, 0.88),
-        (3.50, 0.24, True, 1.20, 0.88),
+        (0, 200, False, 0.72, 1.08),
+        (2_000, 160, True, 0.95, 1.00),
+        (4_000, 240, False, 1.18, 1.16),
+        (6_500, 180, True, 0.82, 0.92),
     ]
-    for index, (offset_beats, duration_beats, reverse, playback_rate, gain) in enumerate(pattern):
-        clip_start = start_ms + int(round(offset_beats * beat_ms))
-        clip_duration = max(45, int(round(duration_beats * beat_ms)))
+    for index, (offset_ms, duration_ms, reverse, playback_rate, gain) in enumerate(pattern):
+        clip_start = start_ms + offset_ms
+        clip_duration = duration_ms
         if clip_start >= routine_end_ms:
             continue
         clip_duration = min(clip_duration, routine_end_ms - clip_start)
-        trim_offset_ms = int(round(offset_beats * beat_ms * clip_tempo_factor(source_payload)))
+        trim_offset_ms = int(round(offset_ms * clip_tempo_factor(source_payload)))
+        scratch_gain_db = 2.0 + (20 * math.log10(gain))
         scratch_clip = {
             "id": f"{routine_id}-scratch-{index + 1:02d}",
             "deck": scratch_deck,
@@ -1817,11 +1815,11 @@ def add_scratch_cut_routine(
             "trim_start_ms": source_trim_at_start + trim_offset_ms,
             "duration_ms": clip_duration,
             "trim_db": float(source_payload.get("trim_db", 0.0)),
-            "gain_db": float(source_payload.get("gain_db", 0.0)) + (-1.5 if reverse else -0.5),
+            "gain_db": float(source_payload.get("gain_db", 0.0)) + scratch_gain_db,
             "tempo_shift_pct": 0.0,
             "pitch_shift_semitones": int(source_payload.get("pitch_shift_semitones", 0)),
-            "fade_in_ms": min(8, clip_duration // 4),
-            "fade_out_ms": min(10, clip_duration // 4),
+            "fade_in_ms": min(18, clip_duration // 4),
+            "fade_out_ms": min(18, clip_duration // 4),
             "reverse": reverse,
             "playback_rate": playback_rate,
             "kind": "effect-track",
