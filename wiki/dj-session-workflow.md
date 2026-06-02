@@ -88,9 +88,15 @@ The planner can add phrase-aware overlays, drop doubles, rendered tempo/key corr
 
 For overlapping transitions, key fit is the default target. Use TuneBat-backed DB metadata where available, prefer exact same-key or relative major/minor compatible overlaps, and use conservative rendered correction only when it makes the overlap better. Unsafe transitions should remain hard cuts.
 
+## Live Buffer
+
+For live DJ requests, start playback from the native session runner once there is a credible first buffer instead of waiting to perfect the whole set. Aim for about 5 minutes (`300_000 ms`) of scheduled future music before starting, then keep roughly that much ahead of the playhead with live edits.
+
+Use indexed/analyzed library tracks first so audio starts quickly. Downloads, elaborate commentary, full proof renders, and deeper crate work can happen while playback continues. If the remaining timeline is near or below the 5 minute buffer, extending the queue is higher priority than polishing already-safe future material.
+
 ## Mixing Pass
 
-After arranging beds, doubles, effects, and vocals, run a dedicated mixing pass before proof render or playback. The pass should classify each clip by role, set `trim_db` for source loudness, then use `gain_db`, EQ, filters, and fader automation to make the intended relationship audible.
+After the first live buffer is playing, keep running dedicated mixing passes on future material. The pass should classify each clip by role, set `trim_db` for source loudness, then use `gain_db`, EQ, filters, and fader automation to make the intended relationship audible.
 
 Rhythm beds that are supposed to change the groove should normally start around `-6` to `-9 dB` under a full lead, then be adjusted by proof render. Dubstep, dnb, bass music, and other drop-forward beds often need to be closer to the lead than soft support textures. A bed at `-12 dB` or lower is a special-case ghost texture, not a normal groove layer. A bass/rhythm bed around `-13 dB` should fail review unless the operator explicitly asked for barely-there texture and the reason is documented.
 

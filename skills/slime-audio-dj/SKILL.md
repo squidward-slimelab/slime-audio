@@ -104,7 +104,7 @@ Use these controls deliberately. They are part of the creative surface, not hidd
 
 ### Mixing Pass
 
-After the creative arrangement exists, do a dedicated mixing pass before proof render or playback. Do not treat this as optional cleanup; it is the step that makes beds, doubles, vocals, and effects actually audible in the final set.
+After the first live buffer is playing, keep doing dedicated mixing passes on future material. Do not treat this as optional cleanup; it is the step that makes beds, doubles, vocals, and effects actually audible in the final set.
 
 Mix in this order:
 
@@ -192,6 +192,16 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
 
 Do not build a straight playlist and call it a DJ set. The default product is an edited arrangement: lead songs plus key/beat-matched EDM beds, visible routines/effects, and recurring TTS drops about the music. `slime_audio_mix_planner.py` is only a helper for beat/key-safe transitions; it is not the creative pass.
 
+### Immediate Playback Rule
+
+For live DJ requests, get music playing quickly. Do not wait to fully design, render, or QA an entire set before starting playback. Build the smallest credible editable session first, start the native runner, then keep improving the future timeline while audio is already playing.
+
+- Target an initial playable buffer of about 5 minutes (`300_000 ms`) before starting. This can be two or three analyzed lead tracks with planner transitions and basic deck filter/EQ carving.
+- Once playback starts, keep at least about 5 minutes of future music ahead of the playhead. If the remaining scheduled timeline is near or below that buffer, extending the queue is the priority.
+- Use known-good indexed library material first. Do not block first playback on downloads, deep crate digging, full proof renders, or elaborate commentary. Those can happen while the set is running.
+- Do not edit audio already under the playhead. Use `slime_audio_live_edit.py` and the state lock to add, move, automate, and decorate future events.
+- Proof renders are for review/debug or high-risk routines. They should not delay starting a normal live set unless the operator explicitly asks for a proof before playback.
+
 ### Creative Baseline
 
 For most requested sets, aim for this shape unless the operator explicitly asks for restraint:
@@ -231,7 +241,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
    python3 scripts/slime_audio_dj.py rank ./lead.flac --playlist runtime/bed-candidates.txt --limit 12
    ```
 
-4. Create or activate a named set and build the base timeline. The base timeline is only scaffolding; do not stop here.
+4. Create or activate a named set and build the first playable buffer. The base timeline is only scaffolding; do not stop here, but also do not delay playback for the whole future set.
 
    ```bash
    python3 scripts/slime_audio_sets.py new --title "Named set"
@@ -241,7 +251,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --decks deck-2,deck-3
    ```
 
-5. Run the mix planner for phrase-aware overlaps and safe transition automation, then make the creative pass through the edit API.
+5. Run the mix planner for phrase-aware overlaps, safe transition automation, automatic routines, and filter/EQ carving on the first buffer.
 
    ```bash
    python3 scripts/slime_audio_mix_planner.py \
@@ -253,7 +263,16 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --apply
    ```
 
-6. Add beds and carve them. Use `deck-1`/`deck-4` as utility lanes for beds, doubles, shadows, and stabs while `deck-2`/`deck-3` carry the main A/B lead flow. Reserve `deck-5` for vocals only.
+6. Start native playback as soon as the first buffer is valid and visible on the dashboard. Normal live sets should become audible before the entire set is finished.
+
+   ```bash
+   python3 scripts/slime_audio_session_runner.py \
+     --session runtime/mix-session.json \
+     --state runtime/mix-session-state.json \
+     --target TARGET
+   ```
+
+7. While playback runs, add beds and carve them into future windows. Use `deck-1`/`deck-4` as utility lanes for beds, doubles, shadows, and stabs while `deck-2`/`deck-3` carry the main A/B lead flow. Reserve `deck-5` for vocals only.
 
    ```bash
    python3 scripts/slime_audio_live_edit.py add-clip \
@@ -281,7 +300,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --points-json '[{"at":"01:16.000","value":-4},{"at":"02:04.000","value":-4}]'
    ```
 
-7. Add routines/effects as audible musical punctuation, not as hidden decorations. Use cue kinds and beatgrid where possible.
+8. Add routines/effects as audible musical punctuation, not as hidden decorations. Use cue kinds and beatgrid where possible.
 
    ```bash
    python3 scripts/slime_audio_live_edit.py instant-double-routine \
@@ -316,7 +335,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
 
    Use `stabs`, `one-beat-trades`, `offbeat-swaps`, `hook-tease`, `echo-stabs`, `echo-drop`, `scratch-cuts`, `slip-brake`, and `brake-drop` as the normal vocabulary. Scratch/brake generated clips must stay attached to the affected deck as `effect-track` child lanes.
 
-8. Add TTS drops through session lean-ins, not side streams. Write drops like a DJ host who is listening to the arrangement: mention the bed, lead texture, incoming key/energy move, or why two records work together. Do not invent artist facts.
+9. Add TTS drops through session lean-ins, not side streams. Write drops like a DJ host who is listening to the arrangement: mention the bed, lead texture, incoming key/energy move, or why two records work together. Do not invent artist facts.
 
    ```bash
    python3 scripts/slime_audio_lean_ins.py \
@@ -332,7 +351,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
 
    For longer sets, use `slime_audio_commentary_planner.py` with `slime_audio_dj.py tension` output, but still review the generated text so it is about the actual songs and mix moves.
 
-9. Audit and mix before rendering. A creative set should fail review if it only contains main song clips and transition automation, and it should also fail if the arranged beds/routines are technically present but functionally inaudible.
+10. Audit and mix the future buffer while playback continues. A creative set should fail review if it only contains main song clips and transition automation, and it should also fail if the arranged beds/routines are technically present but functionally inaudible.
 
    Look for:
 
@@ -355,7 +374,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --verify
    ```
 
-10. Render proof from the actual session and save the set.
+11. Render proof from the actual session and save the set when review is needed, or after a meaningful chunk has been improved live. Do not block normal live playback on a full-set proof render.
 
    ```bash
    python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json \
@@ -368,21 +387,13 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
 
    For Discord review requests, send the MP3 media. Do not paste a path and do not hand-render proof audio outside the session toolchain.
 
-11. Start playback from the native timestamped session runner only after the dashboard shows the arrangement clearly.
-
-   ```bash
-   python3 scripts/slime_audio_session_runner.py \
-     --session runtime/mix-session.json \
-     --state runtime/mix-session-state.json \
-     --target TARGET
-   ```
-
 Do not use legacy slot queues for DJ sets. Do not stream a review render directly as the main set unless the operator explicitly asks for file-only playback and does not need the dashboard.
 
 ## Live Set Rules
 
 - Treat the mix session, playback history, and commentary plan as live state.
 - Extend the future queue while playback continues whenever possible.
+- Keep roughly 5 minutes of future scheduled music ahead of the playhead. If the buffer is low, add/plan music before doing polish work.
 - Add, remove, trim, move, or automate future timestamped clips; do not disturb audio already under the playhead unless explicitly asked.
 - Keep named set artifacts separate from the active live pointers. The active files are for the runner and dashboard; archived set files are for replay, review, and later editing.
 - When extending, re-rank from the current or next track so the transition still makes sense.
@@ -397,7 +408,7 @@ These are part of the normal workflow, not future wishes.
 - Live future editing: use timestamped `mix-session.json` clips, not legacy queue slots. The session runner reloads future render windows and records `session_window_*` history. Future edits should use `slime_audio_live_edit.py` so the active state lock and edit history are applied consistently.
 - Live commentary planning: use `slime_audio_commentary_planner.py` to add future mic lean-ins independently of music selection. It writes normal session lean-ins with ducking/low-pass automation and appends `commentary_planned` logs tying text to timing, track context, and reason.
 - Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
-- Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, deck filter/EQ automation, master duck automation, and automatic real routines such as echo stabs, loop rolls, scratch cuts, and one-beat trades when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
+- Real mix planning: use `slime_audio_mix_planner.py` for the first playable buffer and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, deck filter/EQ automation, master duck automation, and automatic real routines such as echo stabs, loop rolls, scratch cuts, and one-beat trades when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
 - Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
 - Key-fit policy: when more than one track plays at once, aim for exact key fit whenever the rendered correction is tasteful. For major/minor combinations, use the relative major/minor relationship to decide the correct transpose steps. Prefer keeping a compatible key lane for a run of tracks; only change key deliberately when the source song naturally modulates, the transition is short/non-overlapped, or the move is musically justified and documented.
 - Mashup-first planning: DJ sets should be planned as mashups rather than playlists. Prefer one or more compatible rhythm/EDM/dubstep/dnb clips as filtered beds under another lead track or section. Use `slime_audio_session.py mashup-bed` for gain plus low-pass/high-pass bed shaping, and render review files to verify the bed supports the lead instead of fighting it.
@@ -508,12 +519,13 @@ Lean-ins are planned mix-session events, not immediate side streams.
     --lowpass-hz 1400
   ```
 
-- For Snapcast playback, render the planned session first, then stream the rendered file:
+- For normal Snapcast-era DJ playback, use the native timestamped session runner so future edits can keep landing while audio plays:
 
   ```bash
-  python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --output runtime/mix-session-render.wav
-  python3 scripts/slime_audio_stream.py runtime/mix-session-render.wav --target TARGET --mode snapcast
+  python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target TARGET
   ```
+
+  Rendered-file streaming is only for explicit file playback, review, or receiver debugging.
 
 - Do not use packet-mode lean-ins, direct UDP packet audio, or receiver-side packet effect envelopes for live mix commentary.
 - Lean-ins should be editable future events: add, remove, move, and re-render before playback reaches them.
