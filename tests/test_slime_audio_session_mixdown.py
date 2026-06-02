@@ -17,6 +17,7 @@ from slime_audio_session_mixdown import (
     routine_window,
     session_duration_ms,
     shift_session_window,
+    spill_filter_complex_to_script,
 )
 
 
@@ -56,6 +57,72 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         self.assertIn("volume=enable='between(t,2.000,4.000)':volume=0.251189", filters)
         self.assertIn("volume=0.354813,adelay=0:all=1", filters)
+
+    def test_mixdown_filter_renders_reverse_rate_shifted_scratch_clip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "scratch",
+                                "deck": "deck-1",
+                                "path": "/music/scratch.flac",
+                                "start": 1_000,
+                                "trim_start": 2_000,
+                                "duration": 500,
+                                "reverse": True,
+                                "playback_rate": 1.5,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("atrim=start=2.000:duration=0.750,asetpts=PTS-STARTPTS,areverse,asetrate=72000,aresample=48000", filters)
+        self.assertIn("adelay=1000:all=1", filters)
+
+    def test_long_filter_complex_can_spill_to_script_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script = Path(temp_dir) / "filter.ffmpeg"
+            command = ["ffmpeg", "-i", "a.flac", "-filter_complex", "a" * 12, "-map", "[out]", "out.mp3"]
+
+            updated = spill_filter_complex_to_script(command, script, min_length=10)
+
+            self.assertIn("-filter_complex_script", updated)
+            self.assertNotIn("-filter_complex", updated)
+            self.assertEqual(script.read_text(encoding="utf-8"), "a" * 12)
+
+    def test_ffmpeg_command_deduplicates_repeated_clip_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 1_000},
+                            {"id": "b", "deck": "deck-2", "path": "/music/a.flac", "start": 1_000, "duration": 1_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+            command = ffmpeg_command(session, {}, Path("/tmp/out.mp3"), 48_000, 2)
+            filters = command[command.index("-filter_complex") + 1]
+
+        self.assertEqual(command.count("-i"), 1)
+        self.assertIn("[0:a]atrim=start=0.000:duration=1.000", filters)
+        self.assertIn("[0:a]atrim=start=0.000:duration=1.000", filters)
 
     def test_mixdown_filter_includes_lean_in_duck_and_lowpass(self):
         with tempfile.TemporaryDirectory() as temp_dir:

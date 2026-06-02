@@ -76,6 +76,8 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
         "trim_db": clip.get("trim_db", 0.0),
         "tempo_shift_pct": clip.get("tempo_shift_pct", 0.0),
         "pitch_shift_semitones": clip.get("pitch_shift_semitones", 0),
+        "reverse": bool(clip.get("reverse", False)),
+        "playback_rate": clip.get("playback_rate", 1.0),
         "planner_role": clip.get("planner_role"),
         "source_clip_id": clip.get("source_clip_id"),
         "routine_id": clip.get("routine_id"),

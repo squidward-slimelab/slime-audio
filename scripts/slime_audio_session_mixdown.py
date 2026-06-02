@@ -50,6 +50,9 @@ def atempo_filters(factor: float) -> list[str]:
 
 def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
     filters: list[str] = []
+    if clip.playback_rate != 1.0:
+        filters.append(f"asetrate={max(1, int(round(sample_rate * clip.playback_rate)))}")
+        filters.append(f"aresample={sample_rate}")
     if clip.pitch_shift_semitones:
         pitch_factor = 2 ** (clip.pitch_shift_semitones / 12)
         filters.append(f"asetrate={max(1, int(round(sample_rate * pitch_factor)))}")
@@ -63,7 +66,7 @@ def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
 def source_duration_ms(clip: Clip) -> int | None:
     if clip.duration_ms is None:
         return None
-    return max(1, int(round(clip.duration_ms * tempo_factor(clip))))
+    return max(1, int(round(clip.duration_ms * tempo_factor(clip) * clip.playback_rate)))
 
 
 def shift_automation_window(automation: Automation, from_ms: int) -> Automation | None:
@@ -495,12 +498,15 @@ def build_filter_complex(
     sample_rate: int,
     channels: int,
     output_duration_ms: int | None = None,
+    clip_input_indices: dict[int, int] | None = None,
+    first_lean_input_index: int | None = None,
 ) -> str:
     active_lean_in_ids = set(lean_in_audio)
     session = replace(session, mic_lean_ins=[lean_in for lean_in in session.mic_lean_ins if lean_in.id in active_lean_in_ids])
     filters: list[str] = []
     music_labels: list[str] = []
     for index, clip in enumerate(session.clips):
+        input_index = clip_input_indices[index] if clip_input_indices is not None else index
         source_duration = source_duration_ms(clip)
         duration = f":duration={seconds(source_duration)}" if source_duration is not None else ""
         label = f"music{index}"
@@ -515,12 +521,14 @@ def build_filter_complex(
             fade_filters += f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(fade_out_ms)},"
         retime_filters = ",".join(time_pitch_filters(clip, sample_rate))
         retime_filters = f"{retime_filters}," if retime_filters else ""
+        reverse_filter = "areverse," if clip.reverse else ""
         effect_filters = clip_effect_filters(session, clip)
         effect_filters = f"{effect_filters}," if effect_filters else ""
         filters.append(
-            f"[{index}:a]"
+            f"[{input_index}:a]"
             f"atrim=start={seconds(clip.trim_start_ms)}{duration},"
             "asetpts=PTS-STARTPTS,"
+            f"{reverse_filter}"
             f"{retime_filters}"
             f"{fade_filters}"
             f"{effect_filters}"
@@ -534,13 +542,14 @@ def build_filter_complex(
     effect_index = 0
     for effect in session.effects:
         for clip in effect_target_clips(session, effect):
-            input_index = session.clips.index(clip)
+            clip_index = session.clips.index(clip)
+            input_index = clip_input_indices[clip_index] if clip_input_indices is not None else clip_index
             label = f"effect{effect_index}"
             effect_index += 1
             filters.append(effect_stream_filter(effect, clip, input_index, label, sample_rate, channels))
             music_labels.append(f"[{label}]")
 
-    next_input = len(session.clips)
+    next_input = first_lean_input_index if first_lean_input_index is not None else len(session.clips)
     if music_labels:
         filters.append(f"{''.join(music_labels)}amix=inputs={len(music_labels)}:duration=longest:normalize=0[musicmix]")
         current_music = "musicmix"
@@ -601,8 +610,16 @@ def ffmpeg_command(
     mp3_bitrate: str = "192k",
 ) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
-    for clip in session.clips:
-        command.extend(["-i", clip.path])
+    input_paths: list[str] = []
+    clip_input_indices: dict[int, int] = {}
+    for clip_index, clip in enumerate(session.clips):
+        try:
+            input_index = input_paths.index(clip.path)
+        except ValueError:
+            input_index = len(input_paths)
+            input_paths.append(clip.path)
+            command.extend(["-i", clip.path])
+        clip_input_indices[clip_index] = input_index
     for lean_in in session.mic_lean_ins:
         audio_path = lean_in_audio.get(lean_in.id)
         if audio_path is not None:
@@ -610,7 +627,7 @@ def ffmpeg_command(
     command.extend(
         [
             "-filter_complex",
-            build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms),
+            build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms, clip_input_indices, len(input_paths)),
             "-map",
             "[out]",
             *output_codec_args(output, output_format, sample_rate, channels, mp3_bitrate),
@@ -618,6 +635,17 @@ def ffmpeg_command(
         ]
     )
     return command
+
+
+def spill_filter_complex_to_script(command: list[str], script_path: Path, *, min_length: int = 100_000) -> list[str]:
+    if "-filter_complex" not in command:
+        return command
+    index = command.index("-filter_complex")
+    filter_complex = command[index + 1]
+    if len(filter_complex) < min_length:
+        return command
+    script_path.write_text(filter_complex, encoding="utf-8")
+    return [*command[:index], "-filter_complex_script", str(script_path), *command[index + 2:]]
 
 
 def resolved_output_format(output: Path, output_format: str) -> str:
@@ -908,6 +936,7 @@ def main() -> int:
                 args.report_output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(report, indent=2))
             return 0
+        command = spill_filter_complex_to_script(command, Path(temp) / "filter-complex.ffmpeg")
         subprocess.run(command, check=True)
         audio_report = None
         if args.verify:

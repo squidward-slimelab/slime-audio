@@ -26,6 +26,7 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
     "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": True, "effect": "reverb"},
+    "scratch-cuts": {"duration": "00:08.000", "scratch_pattern": True, "cut_source": False},
     "slip-brake": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True, "effect_track": True},
     "brake-drop": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "timing_brake": True, "effect_track": True},
 }
@@ -80,6 +81,8 @@ class Clip:
     pitch_shift_semitones: int = 0
     fade_in_ms: int = 0
     fade_out_ms: int = 0
+    reverse: bool = False
+    playback_rate: float = 1.0
     kind: str = "song"
     attached_deck: str | None = None
     effect_parent_clip_id: str | None = None
@@ -320,6 +323,8 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         pitch_shift_semitones=int(payload.get("pitch_shift_semitones", 0)),
         fade_in_ms=parse_ms(payload.get("fade_in_ms", 0), f"clip {clip_id} fade_in_ms"),
         fade_out_ms=parse_ms(payload.get("fade_out_ms", 0), f"clip {clip_id} fade_out_ms"),
+        reverse=bool(payload.get("reverse", False)),
+        playback_rate=float(payload.get("playback_rate", 1.0)),
         kind=str(payload.get("kind") or "song"),
         attached_deck=str(payload["attached_deck"]) if payload.get("attached_deck") else None,
         effect_parent_clip_id=str(payload["effect_parent_clip_id"]) if payload.get("effect_parent_clip_id") else None,
@@ -636,6 +641,8 @@ def validate_session(session: MixSession) -> None:
             errors.append(f"clip {clip.id} duration must be positive")
         if clip.fade_in_ms < 0 or clip.fade_out_ms < 0:
             errors.append(f"clip {clip.id} fades must be non-negative")
+        if clip.playback_rate <= 0:
+            errors.append(f"clip {clip.id} playback_rate must be positive")
         for automation in clip.automations:
             validate_automation(automation, session.event_ids, errors, prefix=f"clip {clip.id}")
 
@@ -1579,6 +1586,17 @@ def add_instant_double_routine(
         min_confidence=min_confidence,
         force=force,
     )
+    if config.get("scratch_pattern"):
+        return add_scratch_cut_routine(
+            payload,
+            source_id=source_id,
+            routine_id=routine_id,
+            recipe=recipe,
+            start=start,
+            bpm=bpm,
+            lock_before_ms=lock_before_ms,
+            force=force,
+        )
     double_id = f"{routine_id}-double"
     next_payload = add_instant_double(
         payload,
@@ -1724,6 +1742,142 @@ def add_instant_double_routine(
         if automation.get("target") in {double_id, source_id, "crossfader"} and str(automation.get("planner_role", "")).startswith("instant-double"):
             automation["routine_id"] = routine_id
             automation["routine_recipe"] = recipe
+    parse_session(next_payload)
+    return next_payload
+
+
+def add_scratch_cut_routine(
+    payload: dict[str, Any],
+    *,
+    source_id: str,
+    routine_id: str,
+    recipe: str,
+    start: str | None,
+    bpm: float,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    if start is None:
+        raise ValueError(f"{recipe} requires --start")
+    source_payload = next(clip for clip in payload.get("clips", []) if clip.get("id") == source_id)
+    start_ms = parse_ms(start, f"routine {routine_id} start")
+    guard_live_edit(label=f"routine {routine_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+    source_start_ms, source_end_ms = clip_start_end(payload, source_id)
+    if source_end_ms <= start_ms:
+        raise ValueError(f"scratch routine {routine_id} must start before source clip ends")
+    beat_ms = 60_000 / bpm
+    routine_duration_ms = int(round(8 * beat_ms))
+    routine_end_ms = min(source_end_ms, start_ms + routine_duration_ms)
+    if routine_end_ms <= start_ms:
+        raise ValueError(f"scratch routine {routine_id} has no duration")
+    source_deck = str(source_payload.get("deck") or "")
+    source_trim_ms = parse_ms(source_payload.get("trim_start_ms", source_payload.get("trim_start", 0)), f"clip {source_id} trim_start")
+    source_trim_at_start = source_trim_ms + int(round((start_ms - source_start_ms) * clip_tempo_factor(source_payload)))
+    decks = [str(deck) for deck in payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+    scratch_deck = next((deck for deck in decks if deck != source_deck), None)
+    if scratch_deck is None:
+        raise ValueError(f"scratch routine {routine_id} needs a free scratch deck")
+    next_payload = copy.deepcopy(payload)
+    routing = parse_fader_routing(next_payload, decks)
+    source_side = routing.get(source_deck, DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A"))
+    if source_side == "THRU":
+        source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
+    scratch_side = "B" if source_side == "A" else "A"
+    source_position = -1.0 if source_side == "A" else 1.0
+    scratch_position = -1.0 if scratch_side == "A" else 1.0
+    assignments = {deck: source_side for deck in decks}
+    assignments[scratch_deck] = scratch_side
+    next_payload = set_fader_routing(next_payload, assignments)
+    cut_points: list[dict[str, int | float]] = [{"at_ms": start_ms, "value": source_position}]
+    # Beat-derived baby/transform scratches: short throws, alternating forward/back,
+    # with the source deck audible between cuts.
+    pattern = [
+        (0.00, 0.48, False, 0.84, 1.0),
+        (0.56, 0.36, True, 1.08, 0.96),
+        (1.00, 0.30, False, 1.35, 1.0),
+        (1.36, 0.28, True, 0.72, 0.94),
+        (2.00, 0.42, False, 0.95, 1.0),
+        (2.50, 0.32, True, 1.18, 0.96),
+        (3.00, 0.24, False, 1.55, 0.9),
+        (3.28, 0.24, True, 1.28, 0.9),
+        (4.00, 0.52, False, 0.70, 1.0),
+        (4.64, 0.30, True, 1.10, 0.95),
+        (5.00, 0.26, False, 1.42, 0.9),
+        (5.32, 0.22, True, 1.42, 0.9),
+        (6.00, 0.42, False, 0.92, 1.0),
+        (6.52, 0.30, True, 1.20, 0.95),
+        (7.00, 0.24, False, 1.65, 0.86),
+        (7.28, 0.20, True, 1.50, 0.86),
+    ]
+    for index, (offset_beats, duration_beats, reverse, playback_rate, gain) in enumerate(pattern):
+        clip_start = start_ms + int(round(offset_beats * beat_ms))
+        clip_duration = max(45, int(round(duration_beats * beat_ms)))
+        if clip_start >= routine_end_ms:
+            continue
+        clip_duration = min(clip_duration, routine_end_ms - clip_start)
+        trim_offset_ms = int(round(offset_beats * beat_ms * clip_tempo_factor(source_payload)))
+        scratch_clip = {
+            "id": f"{routine_id}-scratch-{index + 1:02d}",
+            "deck": scratch_deck,
+            "path": source_payload.get("path"),
+            "start_ms": clip_start,
+            "trim_start_ms": source_trim_at_start + trim_offset_ms,
+            "duration_ms": clip_duration,
+            "trim_db": float(source_payload.get("trim_db", 0.0)),
+            "gain_db": float(source_payload.get("gain_db", 0.0)) + (-1.5 if reverse else -0.5),
+            "tempo_shift_pct": 0.0,
+            "pitch_shift_semitones": int(source_payload.get("pitch_shift_semitones", 0)),
+            "fade_in_ms": min(8, clip_duration // 4),
+            "fade_out_ms": min(10, clip_duration // 4),
+            "reverse": reverse,
+            "playback_rate": playback_rate,
+            "kind": "effect-track",
+            "attached_deck": source_deck,
+            "effect_parent_clip_id": source_id,
+            "planner_role": "scratch-cut",
+            "source_clip_id": source_id,
+            "routine_id": routine_id,
+            "routine_recipe": recipe,
+            "source_technique": "slip-transform-scratch",
+        }
+        next_payload.setdefault("clips", []).append(scratch_clip)
+        cut_points.extend(
+            [
+                {"at_ms": clip_start, "value": source_position},
+                {"at_ms": clip_start + 1, "value": scratch_position},
+                {"at_ms": clip_start + max(1, clip_duration - 1), "value": scratch_position},
+                {"at_ms": clip_start + clip_duration, "value": source_position},
+            ]
+        )
+    cut_points.append({"at_ms": routine_end_ms, "value": source_position})
+    deduped_points: list[dict[str, int | float]] = []
+    for point in sorted(cut_points, key=lambda item: (int(item["at_ms"]), float(item["value"]))):
+        if deduped_points and deduped_points[-1]["at_ms"] == point["at_ms"] and deduped_points[-1]["value"] == point["value"]:
+            continue
+        deduped_points.append(point)
+    next_payload.setdefault("automations", []).append(
+        {
+            "target": "crossfader",
+            "param": "position",
+            "planner_role": "scratch-transform-cuts",
+            "points": deduped_points,
+            "routine_id": routine_id,
+            "routine_recipe": recipe,
+        }
+    )
+    next_payload.setdefault("slip_events", []).append(
+        {
+            "id": f"{routine_id}-slip",
+            "source_clip_id": source_id,
+            "target_clip_id": f"{routine_id}-scratch-01",
+            "start_ms": start_ms,
+            "duration_ms": routine_end_ms - start_ms,
+            "source_start_ms": source_trim_at_start,
+            "source_resume_ms": source_trim_at_start + int(round((routine_end_ms - start_ms) * clip_tempo_factor(source_payload))),
+            "routine_id": routine_id,
+            "routine_recipe": recipe,
+        }
+    )
     parse_session(next_payload)
     return next_payload
 

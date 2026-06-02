@@ -1279,6 +1279,62 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double["attached_deck"], "deck-2")
         self.assertEqual(payload["effects"][0]["target"], "routine-brake-double")
 
+    def test_cli_scratch_cuts_routine_adds_attached_reverse_scratch_clips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3"],
+                        "fader_routing": {"deck_assignments": {"deck-1": "A", "deck-2": "B", "deck-3": "A"}},
+                        "clips": [
+                            {"id": "source", "deck": "deck-2", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000},
+                            {"id": "bed", "deck": "deck-3", "path": track, "start": 0, "trim_start": 20_000, "duration": 40_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-scratch",
+                        "--recipe",
+                        "scratch-cuts",
+                        "--start",
+                        "00:12.000",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            scratch_clips = [clip for clip in payload["clips"] if clip.get("routine_id") == "routine-scratch"]
+            crossfader = next(automation for automation in payload["automations"] if automation.get("planner_role") == "scratch-transform-cuts")
+
+        self.assertGreaterEqual(len(scratch_clips), 8)
+        self.assertTrue(any(clip.get("reverse") for clip in scratch_clips))
+        self.assertTrue(any(float(clip.get("playback_rate", 1.0)) > 1.0 for clip in scratch_clips))
+        self.assertTrue(all(clip["kind"] == "effect-track" for clip in scratch_clips))
+        self.assertTrue(all(clip["attached_deck"] == "deck-2" for clip in scratch_clips))
+        self.assertEqual(payload["slip_events"][0]["routine_recipe"], "scratch-cuts")
+        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "A", "deck-2": "B", "deck-3": "B"})
+        self.assertEqual(crossfader["target"], "crossfader")
+        self.assertIn({"at_ms": 12_001, "value": -1.0}, crossfader["points"])
+
     def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
