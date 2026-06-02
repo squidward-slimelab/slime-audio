@@ -269,39 +269,77 @@ def split_crossfader_segment(start_ms: int, end_ms: int, start_position: float, 
     return [(start_ms, crossing, start_position, 0.0), (crossing, end_ms, 0.0, end_position)]
 
 
+def interpolate_crossfader_position(segment: tuple[int, int, float, float, int], at_ms: int) -> float:
+    start_ms, end_ms, start_position, end_position, _order = segment
+    if end_ms <= start_ms:
+        return end_position
+    ratio = max(0.0, min(1.0, (at_ms - start_ms) / (end_ms - start_ms)))
+    return start_position + ((end_position - start_position) * ratio)
+
+
+def crossfader_position_segments(session: MixSession) -> list[tuple[int, int, float, float]]:
+    source_segments: list[tuple[int, int, float, float, int]] = []
+    for order, automation in enumerate(session.automations):
+        if automation.target != "crossfader" or automation.param != "position" or len(automation.points) < 2:
+            continue
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        for left, right in zip(points, points[1:]):
+            if right.at_ms <= left.at_ms:
+                continue
+            source_segments.append((left.at_ms, right.at_ms, float(left.value), float(right.value), order))
+    if not source_segments:
+        return []
+    breakpoints = sorted({point for segment in source_segments for point in (segment[0], segment[1])})
+    resolved: list[tuple[int, int, float, float]] = []
+    for start_ms, end_ms in zip(breakpoints, breakpoints[1:]):
+        active = [
+            segment
+            for segment in source_segments
+            if segment[0] <= start_ms and end_ms <= segment[1]
+        ]
+        if not active:
+            continue
+        segment = max(active, key=lambda item: item[4])
+        resolved.append(
+            (
+                start_ms,
+                end_ms,
+                interpolate_crossfader_position(segment, start_ms),
+                interpolate_crossfader_position(segment, end_ms),
+            )
+        )
+    return resolved
+
+
 def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, int, float, float]]:
     side = session.fader_routing.get(clip.deck, "THRU").upper()
     if side == "THRU":
         return []
     windows: list[tuple[int, int, float, float]] = []
-    automations = [
-        automation
-        for automation in session.automations
-        if automation.target == "crossfader" and automation.param == "position" and len(automation.points) >= 2
-    ]
-    for automation in automations:
-        points = sorted(automation.points, key=lambda point: point.at_ms)
-        for left, right in zip(points, points[1:]):
-            if right.at_ms <= left.at_ms:
-                continue
-            start_ms = max(0, left.at_ms - clip.start_ms)
-            end_ms = max(0, right.at_ms - clip.start_ms)
-            if end_ms <= start_ms:
-                continue
-            for split_start, split_end, split_left, split_right in split_crossfader_segment(
-                start_ms,
-                end_ms,
-                float(left.value),
-                float(right.value),
-            ):
-                windows.append(
-                    (
-                        split_start,
-                        split_end,
-                        crossfader_gain(split_left, side),
-                        crossfader_gain(split_right, side),
-                    )
+    for absolute_start_ms, absolute_end_ms, start_position, end_position in crossfader_position_segments(session):
+        overlap_start_ms = max(absolute_start_ms, clip.start_ms)
+        overlap_end_ms = absolute_end_ms if clip.end_ms is None else min(absolute_end_ms, clip.end_ms)
+        if overlap_end_ms <= overlap_start_ms:
+            continue
+        absolute_segment = (absolute_start_ms, absolute_end_ms, start_position, end_position, 0)
+        overlap_start_position = interpolate_crossfader_position(absolute_segment, overlap_start_ms)
+        overlap_end_position = interpolate_crossfader_position(absolute_segment, overlap_end_ms)
+        start_ms = max(0, overlap_start_ms - clip.start_ms)
+        end_ms = max(0, overlap_end_ms - clip.start_ms)
+        for split_start, split_end, split_left, split_right in split_crossfader_segment(
+            start_ms,
+            end_ms,
+            overlap_start_position,
+            overlap_end_position,
+        ):
+            windows.append(
+                (
+                    split_start,
+                    split_end,
+                    crossfader_gain(split_left, side),
+                    crossfader_gain(split_right, side),
                 )
+            )
     return sorted(windows, key=lambda item: item[0])
 
 
