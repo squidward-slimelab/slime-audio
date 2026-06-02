@@ -1,13 +1,87 @@
 {
   "version": 1,
   "decks": ["deck-1", "deck-2", "deck-3", "deck-4"],
+  "fader_routing": {
+    "deck_assignments": {
+      "deck-1": "A",
+      "deck-2": "B",
+      "deck-3": "A",
+      "deck-4": "B"
+    }
+  },
   "clips": [
     {
       "id": "clip-a",
       "deck": "deck-3",
       "path": "/music/Ninajirachi/I Love My Computer/01 - London Song.flac",
       "start_ms": 0,
-      "duration_ms": 90000
+      "duration_ms": 90000,
+      "trim_db": -2,
+      "gain_db": -4,
+      "automations": [
+        {
+          "target": "clip-a",
+          "param": "eq_low_db",
+          "points": [
+            {"at_ms": 0, "value": -3},
+            {"at_ms": 90000, "value": -3}
+          ]
+        },
+        {
+          "target": "clip-a",
+          "param": "gain_db",
+          "points": [
+            {"at_ms": 15000, "value": -4},
+            {"at_ms": 15300, "value": -96},
+            {"at_ms": 15550, "value": -4}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "clip-a-scratch",
+      "kind": "effect-track",
+      "deck": "deck-3",
+      "attached_deck": "deck-3",
+      "effect_parent_clip_id": "clip-a",
+      "source_clip_id": "clip-a",
+      "routine_id": "scratch-routine",
+      "routine_recipe": "scratch-cuts",
+      "path": "/music/Ninajirachi/I Love My Computer/01 - London Song.flac",
+      "start_ms": 15080,
+      "trim_start_ms": 15100,
+      "duration_ms": 240,
+      "trim_db": -2,
+      "gain_db": -5,
+      "reverse": true,
+      "playback_rate": 0.78
+    },
+    {
+      "id": "bed-a",
+      "deck": "deck-4",
+      "path": "/music/Techno Beds/Steady Tool/01 - Steady Tool.flac",
+      "start_ms": 12000,
+      "duration_ms": 130000,
+      "trim_db": -5,
+      "gain_db": -12,
+      "automations": [
+        {
+          "target": "bed-a",
+          "param": "lowpass_hz",
+          "points": [
+            {"at_ms": 12000, "value": 1200},
+            {"at_ms": 60000, "value": 2400}
+          ]
+        },
+        {
+          "target": "bed-a",
+          "param": "eq_high_db",
+          "points": [
+            {"at_ms": 12000, "value": -4},
+            {"at_ms": 142000, "value": -4}
+          ]
+        }
+      ]
     },
     {
       "id": "clip-b",
@@ -48,7 +122,73 @@
       }
     }
   ],
+  "effects": [
+    {
+      "id": "clip-a-echo",
+      "type": "echo",
+      "target": "clip-a",
+      "start_ms": 30000,
+      "duration_ms": 700,
+      "tail_ms": 2500,
+      "wet": 0.45,
+      "gain_db": -5,
+      "delay_ms": 330,
+      "feedback": 0.42,
+      "lowpass_hz": 4200,
+      "routine_id": "echo-routine",
+      "routine_recipe": "echo-stabs"
+    },
+    {
+      "id": "clip-a-brake",
+      "type": "vinyl_brake",
+      "target": "clip-a",
+      "start_ms": 60000,
+      "duration_ms": 500,
+      "tail_ms": 0,
+      "wet": 1,
+      "gain_db": -1,
+      "delay_ms": 1,
+      "feedback": 0
+    },
+    {
+      "id": "bed-reverb",
+      "type": "reverb",
+      "preset": "medium-room",
+      "target": "bed-a",
+      "start_ms": 76000,
+      "duration_ms": 900,
+      "tail_ms": 4000,
+      "wet": 0.5,
+      "gain_db": -6,
+      "delay_ms": 10,
+      "feedback": 0.4,
+      "room_size": 0.75,
+      "damping": 0.5
+    }
+  ],
+  "slip_events": [
+    {
+      "id": "clip-a-slip",
+      "source_clip_id": "clip-a",
+      "target_clip_id": "clip-a-scratch",
+      "start_ms": 15080,
+      "duration_ms": 240,
+      "source_start_ms": 15080,
+      "source_resume_ms": 15320,
+      "routine_id": "scratch-routine",
+      "routine_recipe": "scratch-cuts"
+    }
+  ],
   "automations": [
+    {
+      "target": "crossfader",
+      "param": "position",
+      "points": [
+        {"at_ms": 30000, "value": -1},
+        {"at_ms": 31000, "value": 1},
+        {"at_ms": 32000, "value": 0}
+      ]
+    },
     {
       "target": "clip-b",
       "param": "gain_db",

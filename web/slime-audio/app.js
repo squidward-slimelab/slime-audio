@@ -106,9 +106,12 @@ function eventSignature(dashboard) {
       event.id,
       event.kind,
       event.lane,
+      event.status,
       event.start_ms,
       event.end_ms,
       event.display_title,
+      event.display_meta,
+      event.style_flags,
     ])
   );
 }
@@ -195,13 +198,21 @@ function renderSummary() {
   const session = dashboard.session || {};
   const counts = session.counts || {};
   const setInfo = dashboard.viewed_set || dashboard.active_set || {};
+  const assignments = session.fader_assignments || {};
+  const faderText = Object.keys(assignments).length
+    ? Object.entries(assignments).map(([deck, side]) => `${deck}:${side}`).join(" ")
+    : "default";
   const rows = [
     ["set", setInfo.title || setInfo.slug || "unassigned"],
     ["mode", session.timeline_mode || "native"],
     ["duration", fmtMs(session.duration_ms)],
     ["songs", counts.song || 0],
+    ["fx clips", counts["effect-track"] || 0],
+    ["effects", counts.effect || 0],
+    ["slip", counts.slip || 0],
     ["vocal", counts.vocal || 0],
     ["automation", counts.automation || 0],
+    ["fader", faderText],
     ["session", dashboard.session_path || ""],
   ];
   els.sessionSummary.replaceChildren();
@@ -274,6 +285,18 @@ function laneNumber(laneId) {
   return match ? match[1] : "";
 }
 
+function fxLaneNumber(laneId) {
+  const match = /^deck-(\d+)-fx$/.exec(laneId || "");
+  return match ? match[1] : "";
+}
+
+function cssToken(value) {
+  return String(value || "")
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
 function renderTimeline() {
   const dashboard = dashboardState.dashboard;
   const scale = timelineScale(dashboard?.session?.duration_ms);
@@ -288,10 +311,15 @@ function renderTimeline() {
     const label = document.createElement("div");
     label.className = "lane-label";
     const number = laneNumber(lane.id);
-    const utilityLabel = lane.id === "voice" ? "mic" : lane.id === "automation" ? "auto" : lane.label || lane.id;
-    label.innerHTML = number
-      ? `<strong>${number}</strong><span>deck</span>`
-      : `<strong>${utilityLabel}</strong><span>${lane.label || lane.id}</span>`;
+    const fxNumber = fxLaneNumber(lane.id);
+    const utilityLabel = lane.id === "voice" ? "mic" : lane.id === "automation" ? "auto" : lane.id === "fader" ? "xfade" : lane.label || lane.id;
+    if (number) {
+      label.innerHTML = `<strong>${number}</strong><span>deck</span>`;
+    } else if (fxNumber) {
+      label.innerHTML = `<strong>${fxNumber}</strong><span>fx lane</span>`;
+    } else {
+      label.innerHTML = `<strong>${utilityLabel}</strong><span>${lane.label || lane.id}</span>`;
+    }
     const track = document.createElement("div");
     track.className = "lane-track";
     if (!lane.events.length) {
@@ -306,8 +334,8 @@ function renderTimeline() {
       const end = Math.max(start + 1000, event.end_ms || start + 1000);
       const el = document.createElement("button");
       el.type = "button";
-      const effectClass = event.kind === "effect" && event.effect_type ? `effect-${event.effect_type}` : "";
-      el.className = `timeline-event ${event.kind || "event"} ${effectClass} ${event.status || ""}`;
+      const flagClasses = (event.style_flags || []).map(cssToken).filter(Boolean).join(" ");
+      el.className = `timeline-event ${cssToken(event.kind || "event")} ${flagClasses} ${cssToken(event.status || "")}`;
       el.style.left = `${(start / scale.duration) * scale.stageWidth}px`;
       el.style.width = `${Math.max(18, ((end - start) / scale.duration) * scale.stageWidth)}px`;
       el.title = `${event.display_title}\n${fmtMs(start)} - ${fmtMs(end)}\n${event.display_meta || shortPath(event.path)}`;

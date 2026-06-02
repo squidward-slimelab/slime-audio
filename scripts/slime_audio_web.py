@@ -129,6 +129,14 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "target": effect.get("target"),
                 "effect_type": effect.get("type"),
                 "tail_ms": tail_ms,
+                "wet": effect.get("wet"),
+                "gain_db": effect.get("gain_db"),
+                "delay_ms": effect.get("delay_ms"),
+                "feedback": effect.get("feedback"),
+                "room_size": effect.get("room_size"),
+                "damping": effect.get("damping"),
+                "lowpass_hz": effect.get("lowpass_hz"),
+                "preset": effect.get("preset"),
                 "start_ms": start_ms,
                 "duration_ms": duration_ms + tail_ms,
                 "end_ms": start_ms + duration_ms + tail_ms,
@@ -231,7 +239,13 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         if event.get("target") == "crossfader":
             return "crossfader motion"
         target = event.get("target") or event.get("owner") or "master"
-        return f"{target} | {event.get('param') or 'automation'}"
+        points = event.get("points") or []
+        value_text = ""
+        if isinstance(points, list) and points:
+            values = [point.get("value") for point in points if isinstance(point, dict)]
+            if values:
+                value_text = f" | {values[0]} -> {values[-1]}" if len(values) > 1 else f" | {values[0]}"
+        return f"{target} | {event.get('param') or 'automation'}{value_text}"
     if event.get("kind") == "vocal":
         return "mic lean-in"
     if event.get("kind") == "effect":
@@ -239,11 +253,21 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
         tail_ms = int(event.get("tail_ms") or 0)
         tail = f" | tail {tail_ms / 1000:.1f}s" if tail_ms else ""
-        return f"{target}{tail}{recipe}"
+        params = []
+        for key, label in (("wet", "wet"), ("gain_db", "gain"), ("feedback", "fb"), ("delay_ms", "delay"), ("preset", "preset")):
+            value = event.get(key)
+            if value is not None:
+                suffix = "ms" if key == "delay_ms" else " dB" if key == "gain_db" else ""
+                params.append(f"{label} {value}{suffix}")
+        param_text = f" | {', '.join(params)}" if params else ""
+        return f"{target}{tail}{param_text}{recipe}"
     if event.get("kind") == "effect-track":
         parent = event.get("effect_parent_clip_id") or event.get("source_clip_id") or event.get("attached_deck") or "deck"
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
-        return f"attached to {parent}{recipe}"
+        rate = event.get("playback_rate")
+        reverse = "reverse | " if event.get("reverse") else ""
+        rate_text = f" | {reverse}rate {rate}" if rate not in {None, 1, 1.0} or reverse else ""
+        return f"attached to {parent}{rate_text}{recipe}"
     if event.get("kind") == "slip":
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
         return f"{event.get('target_clip_id')} over {event.get('source_clip_id')}{recipe}"
@@ -251,8 +275,24 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":
         return f"instant double of {event.get('source_clip_id')}"
+    mix_bits: list[str] = []
+    for key, label, suffix in (
+        ("trim_db", "trim", " dB"),
+        ("gain_db", "gain", " dB"),
+        ("tempo_shift_pct", "tempo", "%"),
+        ("pitch_shift_semitones", "pitch", " st"),
+    ):
+        value = event.get(key)
+        if isinstance(value, (int, float)) and value:
+            mix_bits.append(f"{label} {value:g}{suffix}")
+    if event.get("reverse"):
+        mix_bits.append("reverse")
+    rate = event.get("playback_rate")
+    if isinstance(rate, (int, float)) and rate != 1:
+        mix_bits.append(f"rate {rate:g}")
     artist_album = " - ".join(str(value) for value in (event.get("artist"), event.get("album")) if value)
-    return artist_album or str(event.get("path") or "")
+    source = artist_album or str(event.get("path") or "")
+    return " | ".join([part for part in (source, ", ".join(mix_bits)) if part])
 
 
 def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str, Any]:
@@ -276,10 +316,30 @@ def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str,
             "status": status,
             "display_title": display_title_for_event(event),
             "display_meta": display_meta_for_event(event),
+            "style_flags": event_style_flags(event),
             "is_timed": start is not None and end is not None,
         }
     )
     return normalized
+
+
+def event_style_flags(event: dict[str, Any]) -> list[str]:
+    flags: list[str] = []
+    kind = str(event.get("kind") or "")
+    if kind:
+        flags.append(kind)
+    effect_type = event.get("effect_type")
+    if effect_type:
+        flags.append(f"effect-{effect_type}")
+    recipe = event.get("routine_recipe")
+    if recipe:
+        flags.append(f"routine-{recipe}")
+    param = event.get("param")
+    if param:
+        flags.append(f"param-{param}")
+    if event.get("attached_deck"):
+        flags.append("attached")
+    return [flag.replace("_", "-") for flag in flags]
 
 
 def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -301,6 +361,7 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "id": lane,
             "label": lane.replace("-", " "),
             "kind": "effect-lane" if lane.endswith("-fx") else "deck" if lane.startswith("deck-") else lane,
+            "attached_deck": lane[:-3] if lane.endswith("-fx") else None,
             "events": [event for event in events if event.get("lane") == lane],
         }
         for lane in ordered_lanes
@@ -378,6 +439,8 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
     counts: dict[str, int] = {}
     for event in events:
         counts[str(event.get("kind") or "event")] = counts.get(str(event.get("kind") or "event"), 0) + 1
+    fader_routing = session_payload.get("fader_routing", session_payload.get("faderRouting", {}))
+    assignments = fader_routing.get("deck_assignments") if isinstance(fader_routing, dict) else {}
     return {
         "schema_version": 1,
         "state_path": str(state_path),
@@ -388,7 +451,8 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
             "duration_ms": duration_ms,
             "counts": counts,
             "decks": session_payload.get("decks", []),
-            "fader_routing": session_payload.get("fader_routing", session_payload.get("faderRouting", {})),
+            "fader_routing": fader_routing,
+            "fader_assignments": assignments if isinstance(assignments, dict) else {},
         },
         "now": current,
         "lanes": lane_rows(events),
