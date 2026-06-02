@@ -102,6 +102,36 @@ Use these controls deliberately. They are part of the creative surface, not hidd
 - `crossfader.position` plus `fader_routing.deck_assignments`: controller-style cuts and blends between deck sides.
 - `deck-5`: dedicated vocal channel for `add-mic`/TTS lean-ins. Keep it `THRU` in fader routing and do not use it for beds, doubles, scratches, or normal music clips.
 
+### Mixing Pass
+
+After the creative arrangement exists, do a dedicated mixing pass before proof render or playback. Do not treat this as optional cleanup; it is the step that makes beds, doubles, vocals, and effects actually audible in the final set.
+
+Mix in this order:
+
+1. Set `trim_db` per source for loudness matching before touching fader balance. If a source is already quiet, raise or normalize its trim instead of compensating with strange automation later.
+2. Classify each clip as lead, rhythm bed, ghost texture, double/routine, effect, or vocal. The intended role determines its level.
+3. Balance with `gain_db`/fader automation, then carve with EQ and filters. For rhythm beds, prefer EQ and high-pass/low-pass carving over burying the whole deck.
+4. Render and listen to the overlap windows where beds matter. A dashboard that shows a bed is not proof that the bed is audible.
+5. Fix failed windows, then render again.
+
+Practical level guidance:
+
+- Lead clips usually sit near the reference level after trim, with performance fader moves doing the transitions.
+- Rhythm beds that are supposed to change the groove should normally start around `-6` to `-9 dB` fader/gain under a full lead, then be adjusted by ear. Dubstep, dnb, bass music, and other drop-forward beds often need to be closer to the lead than a soft pad would be.
+- `-10 dB` can work for a supportive bed only when the proof still clearly shows the groove.
+- `-12 dB` or lower is a special-case ghost texture, not a normal EDM/dubstep/dnb bed level. If a bass/rhythm bed sits around `-13 dB`, fail the mix review unless the operator explicitly asked for barely-there texture and the reason is documented.
+- TTS/vocal drops on `deck-5` should be plainly intelligible over the music. Use deliberate vocal volume plus temporary duck/low-pass automation instead of hoping the vocal cuts through.
+- Effects and doubles should read as musical gestures. If they disappear in the full mix, raise the gesture or create space; if they create a volume hole, inspect ducks and fader routing.
+
+Mix review should fail when:
+
+- every bed is hidden below roughly `-12 dB`
+- a rhythm/bass bed is described as important but is inaudible in the proof
+- low-pass/high-pass settings remove the identity of the bed and the fader is also low
+- TTS is unintelligible or routed through a music deck instead of `deck-5`
+- hard ducks are present without a replacement move like scratch/brake
+- the render report is clean but the musical proof still sounds like a straight playlist
+
 ### Creative Moves
 
 Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
@@ -206,14 +236,14 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
      --trim-start 00:32.000 \
      --duration 00:48.000 \
      --trim-db -4 \
-     --gain-db -10 \
+     --gain-db -7 \
      --reason "key and beat matched rhythm bed under lead"
 
    python3 scripts/slime_audio_live_edit.py mashup-bed \
      --bed-id lead-bed-a \
      --start 01:16.000 \
      --end 02:04.000 \
-     --gain-db -10 \
+     --gain-db -7 \
      --lowpass-hz 1800 \
      --highpass-hz 100
 
@@ -274,7 +304,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
 
    For longer sets, use `slime_audio_commentary_planner.py` with `slime_audio_dj.py tension` output, but still review the generated text so it is about the actual songs and mix moves.
 
-9. Audit before rendering. A creative set should fail review if it only contains main song clips and transition automation.
+9. Audit and mix before rendering. A creative set should fail review if it only contains main song clips and transition automation, and it should also fail if the arranged beds/routines are technically present but functionally inaudible.
 
    Look for:
 
@@ -283,6 +313,8 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
    - nonzero `effects`, `slip_events`, routines, or attached `effect-track` child lanes
    - TTS lean-ins present and placed around musically sensible moments
    - fader/filter/EQ automation that makes the bed/lead relationship clear
+   - rhythm beds normally balanced around `-6` to `-9 dB`, not buried at `-13 dB`
+   - any `-12 dB` or lower bed explicitly justified as a ghost texture
    - no hard lead ducks unless tied to a named replacement move with a proof
 
    ```bash

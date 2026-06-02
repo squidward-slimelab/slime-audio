@@ -65,6 +65,8 @@ Use the real mixer surface:
 
 Hard lead ducks are risky. They are correct for replacement moves like scratches and brakes, but they can sound like a broken volume drop around echo stabs or bed flourishes. If an effect is too loud, lower the effect clip/send first.
 
+Run a mixing pass after the creative edit pass. Beds and routines must be audible in the proof render, not merely present in session JSON. Rhythm/bass beds meant to drive the groove should usually sit around `-6` to `-9 dB` under a full lead after source trim and EQ carving; `-12 dB` or lower is a ghost-texture choice that needs a reason. A dubstep/dnb/bass bed at roughly `-13 dB` should fail review unless the operator explicitly asked for barely audible texture.
+
 ## Routines
 
 Use named routines when they fit:
