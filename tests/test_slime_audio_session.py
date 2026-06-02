@@ -1156,7 +1156,72 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(session.slip_events[0].source_resume_ms, 20_000)
         self.assertEqual(payload["slip_events"][0]["target_clip_id"], "scratch")
 
-    def test_cli_brake_drop_routine_adds_slip_and_one_beat_vinyl_brake(self):
+    def test_cli_slip_brake_routine_adds_slip_and_one_beat_vinyl_brake(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2", "deck-3"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-2", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000},
+                            {"id": "bed", "deck": "deck-3", "path": track, "start": 0, "trim_start": 20_000, "duration": 40_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-slip-brake",
+                        "--recipe",
+                        "slip-brake",
+                        "--start",
+                        "00:12.000",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            session = load_session(path)
+            double = next(clip for clip in payload["clips"] if clip["id"] == "routine-slip-brake-double")
+            brake_cut = next(automation for automation in payload["automations"] if automation.get("planner_role") == "vinyl-brake-crossfader-cut")
+
+        self.assertEqual(payload["effects"][0]["type"], "vinyl_brake")
+        self.assertEqual(payload["effects"][0]["duration_ms"], 500)
+        self.assertEqual(payload["effects"][0]["target"], "routine-slip-brake-double")
+        self.assertEqual(double["gain_db"], -96.0)
+        self.assertEqual(double["kind"], "effect-track")
+        self.assertEqual(double["attached_deck"], "deck-2")
+        self.assertEqual(double["effect_parent_clip_id"], "source")
+        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "B", "deck-2": "B", "deck-3": "B"})
+        self.assertEqual(brake_cut["target"], "crossfader")
+        self.assertEqual(brake_cut["param"], "position")
+        self.assertEqual(brake_cut["points"], [{"at_ms": 12_000, "value": -1.0}, {"at_ms": 12_500, "value": -1.0}])
+        self.assertFalse(any(automation.get("planner_role") == "vinyl-brake-source-duck" for automation in payload["automations"]))
+        self.assertFalse(any(automation.get("planner_role") == "instant-double-gate" for automation in payload["automations"]))
+        self.assertEqual(payload["slip_events"][0]["source_clip_id"], "source")
+        self.assertEqual(payload["slip_events"][0]["target_clip_id"], "routine-slip-brake-double")
+        self.assertEqual(payload["slip_events"][0]["source_start_ms"], 20_000)
+        self.assertEqual(payload["slip_events"][0]["source_resume_ms"], 20_500)
+        self.assertEqual(session.effects[0].type, "vinyl_brake")
+
+    def test_cli_brake_drop_routine_delays_source_resume_without_slip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             path = temp / "session.json"
@@ -1198,25 +1263,21 @@ class SlimeAudioSessionTests(unittest.TestCase):
                 0,
             )
             payload = json.loads(path.read_text(encoding="utf-8"))
-            session = load_session(path)
+            source = next(clip for clip in payload["clips"] if clip["id"] == "source")
+            resume = next(clip for clip in payload["clips"] if clip["id"] == "routine-brake-resume")
             double = next(clip for clip in payload["clips"] if clip["id"] == "routine-brake-double")
-            brake_cut = next(automation for automation in payload["automations"] if automation.get("planner_role") == "vinyl-brake-crossfader-cut")
 
-        self.assertEqual(payload["effects"][0]["type"], "vinyl_brake")
-        self.assertEqual(payload["effects"][0]["duration_ms"], 500)
+        self.assertEqual(payload.get("slip_events", []), [])
+        self.assertEqual(source["duration_ms"], 12_000)
+        self.assertEqual(source["fade_out_ms"], 0)
+        self.assertEqual(resume["start_ms"], 12_500)
+        self.assertEqual(resume["trim_start_ms"], 20_000)
+        self.assertEqual(resume["duration_ms"], 28_000)
+        self.assertEqual(resume["fade_out_ms"], 0)
+        self.assertEqual(resume["planner_role"], "timing-brake-resume")
+        self.assertEqual(double["kind"], "effect-track")
+        self.assertEqual(double["attached_deck"], "deck-2")
         self.assertEqual(payload["effects"][0]["target"], "routine-brake-double")
-        self.assertEqual(double["gain_db"], -96.0)
-        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "A", "deck-2": "B", "deck-3": "B"})
-        self.assertEqual(brake_cut["target"], "crossfader")
-        self.assertEqual(brake_cut["param"], "position")
-        self.assertEqual(brake_cut["points"], [{"at_ms": 12_000, "value": -1.0}, {"at_ms": 12_500, "value": -1.0}])
-        self.assertFalse(any(automation.get("planner_role") == "vinyl-brake-source-duck" for automation in payload["automations"]))
-        self.assertFalse(any(automation.get("planner_role") == "instant-double-gate" for automation in payload["automations"]))
-        self.assertEqual(payload["slip_events"][0]["source_clip_id"], "source")
-        self.assertEqual(payload["slip_events"][0]["target_clip_id"], "routine-brake-double")
-        self.assertEqual(payload["slip_events"][0]["source_start_ms"], 20_000)
-        self.assertEqual(payload["slip_events"][0]["source_resume_ms"], 20_500)
-        self.assertEqual(session.effects[0].type, "vinyl_brake")
 
     def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:

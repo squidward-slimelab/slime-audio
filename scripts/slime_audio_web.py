@@ -62,8 +62,10 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
     duration_ms = parse_ms(duration, "clip duration") if duration is not None else None
     return {
         "id": clip.get("id"),
-        "kind": "song",
+        "kind": clip.get("kind") or "song",
         "deck": clip.get("deck"),
+        "attached_deck": clip.get("attached_deck"),
+        "effect_parent_clip_id": clip.get("effect_parent_clip_id"),
         "index": clip.get("index"),
         "start_ms": start_ms,
         "trim_start_ms": parse_ms(clip.get("trim_start_ms", clip.get("trim_start", 0)), "clip trim_start"),
@@ -215,6 +217,8 @@ def display_title_for_event(event: dict[str, Any]) -> str:
         return str(event.get("text") or event.get("id") or "vocal")
     if event.get("kind") == "effect":
         return str(event.get("effect_type") or event.get("id") or "effect")
+    if event.get("kind") == "effect-track":
+        return str(event.get("routine_recipe") or event.get("planner_role") or event.get("id") or "effect track")
     if event.get("kind") == "slip":
         return "slip/flux"
     return str(event.get("title") or event.get("id") or "untitled")
@@ -234,6 +238,10 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
         tail_ms = int(event.get("tail_ms") or 0)
         tail = f" | tail {tail_ms / 1000:.1f}s" if tail_ms else ""
         return f"{target}{tail}{recipe}"
+    if event.get("kind") == "effect-track":
+        parent = event.get("effect_parent_clip_id") or event.get("source_clip_id") or event.get("attached_deck") or "deck"
+        recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
+        return f"attached to {parent}{recipe}"
     if event.get("kind") == "slip":
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
         return f"{event.get('target_clip_id')} over {event.get('source_clip_id')}{recipe}"
@@ -249,7 +257,12 @@ def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str,
     start = event_start(event)
     end = event_end(event)
     duration = None if start is None or end is None else max(0, end - start)
-    lane = "fader" if event.get("kind") == "automation" and event.get("target") == "crossfader" else str(event.get("deck") or event.get("kind") or "timeline")
+    if event.get("kind") == "automation" and event.get("target") == "crossfader":
+        lane = "fader"
+    elif event.get("kind") == "effect-track":
+        lane = f"{event.get('attached_deck') or event.get('deck')}-fx"
+    else:
+        lane = str(event.get("deck") or event.get("kind") or "timeline")
     status = classify_status(event, playhead_ms)
     normalized = dict(event)
     normalized.update(
@@ -268,9 +281,13 @@ def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str,
 
 
 def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    active_lanes = {str(event.get("lane")) for event in events if event.get("lane") is not None}
     ordered_lanes: list[str] = []
     for lane in DECK_ORDER:
         ordered_lanes.append(lane)
+        fx_lane = f"{lane}-fx"
+        if fx_lane in active_lanes:
+            ordered_lanes.append(fx_lane)
     for lane in ("voice", "effects", "fader", "automation"):
         ordered_lanes.append(lane)
     for event in events:
@@ -281,7 +298,7 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "id": lane,
             "label": lane.replace("-", " "),
-            "kind": "deck" if lane.startswith("deck-") else lane,
+            "kind": "effect-lane" if lane.endswith("-fx") else "deck" if lane.startswith("deck-") else lane,
             "events": [event for event in events if event.get("lane") == lane],
         }
         for lane in ordered_lanes

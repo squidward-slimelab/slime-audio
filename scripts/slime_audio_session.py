@@ -26,7 +26,8 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
     "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": True, "effect": "reverb"},
-    "brake-drop": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True},
+    "slip-brake": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True, "effect_track": True},
+    "brake-drop": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "timing_brake": True, "effect_track": True},
 }
 DEFERRED_ROUTINE_RECIPES = {
 }
@@ -79,6 +80,9 @@ class Clip:
     pitch_shift_semitones: int = 0
     fade_in_ms: int = 0
     fade_out_ms: int = 0
+    kind: str = "song"
+    attached_deck: str | None = None
+    effect_parent_clip_id: str | None = None
     automations: list[Automation] = field(default_factory=list)
 
     @property
@@ -316,6 +320,9 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         pitch_shift_semitones=int(payload.get("pitch_shift_semitones", 0)),
         fade_in_ms=parse_ms(payload.get("fade_in_ms", 0), f"clip {clip_id} fade_in_ms"),
         fade_out_ms=parse_ms(payload.get("fade_out_ms", 0), f"clip {clip_id} fade_out_ms"),
+        kind=str(payload.get("kind") or "song"),
+        attached_deck=str(payload["attached_deck"]) if payload.get("attached_deck") else None,
+        effect_parent_clip_id=str(payload["effect_parent_clip_id"]) if payload.get("effect_parent_clip_id") else None,
         automations=[
             parse_automation(item, default_target=clip_id)
             for item in payload.get("automations", [])
@@ -617,6 +624,10 @@ def validate_session(session: MixSession) -> None:
     for clip in session.clips:
         if clip.deck not in deck_set:
             errors.append(f"clip {clip.id} uses unknown deck {clip.deck}")
+        if clip.attached_deck is not None and clip.attached_deck not in deck_set:
+            errors.append(f"clip {clip.id} attaches to unknown deck {clip.attached_deck}")
+        if clip.effect_parent_clip_id is not None and clip.effect_parent_clip_id not in {item.id for item in session.clips}:
+            errors.append(f"clip {clip.id} effect parent does not exist: {clip.effect_parent_clip_id}")
         if clip.start_ms < 0:
             errors.append(f"clip {clip.id} starts before zero")
         if clip.trim_start_ms < 0:
@@ -630,7 +641,7 @@ def validate_session(session: MixSession) -> None:
 
     for deck in session.decks:
         clips = sorted(
-            [clip for clip in session.clips if clip.deck == deck and clip.end_ms is not None],
+            [clip for clip in session.clips if clip.deck == deck and clip.end_ms is not None and clip.kind != "effect-track"],
             key=lambda clip: clip.start_ms,
         )
         for left, right in zip(clips, clips[1:]):
@@ -1617,11 +1628,49 @@ def add_instant_double_routine(
         double_clip = next(clip for clip in next_payload.get("clips", []) if clip.get("id") == double_id)
         effect_type = str(config["effect"])
         if effect_type == "vinyl_brake":
+            source_payload = next(clip for clip in next_payload.get("clips", []) if clip.get("id") == source_id)
             double_clip["gain_db"] = -96.0
+            if config.get("effect_track"):
+                double_clip["kind"] = "effect-track"
+                double_clip["attached_deck"] = str(source_payload.get("deck") or "")
+                double_clip["effect_parent_clip_id"] = source_id
             brake_start = int(double_clip["start_ms"])
             brake_duration = max(1, int(round(float(Fraction(str(config.get("effect_beats", "1")))) * (60_000 / bpm))))
-            source_deck = str(source.get("deck") or "")
-            target_deck = str(double_clip.get("deck") or "")
+            if config.get("timing_brake"):
+                source_start_ms, source_end_ms = clip_start_end(next_payload, source_id)
+                if source_end_ms <= brake_start:
+                    raise ValueError(f"timing brake {routine_id} must start before source clip ends")
+                resume_id = f"{routine_id}-resume"
+                require_unique_event_id(next_payload, resume_id)
+                source_trim_ms = parse_ms(source_payload.get("trim_start_ms", source_payload.get("trim_start", 0)), f"clip {source_id} trim_start")
+                source_trim_at_brake = source_trim_ms + int(round((brake_start - source_start_ms) * clip_tempo_factor(source_payload)))
+                remaining_ms = max(1, source_end_ms - brake_start)
+                resume_fade_out_ms = source_payload.get("fade_out_ms", 0)
+                source_payload.pop("duration", None)
+                source_payload["duration_ms"] = max(1, brake_start - source_start_ms)
+                source_payload["fade_out_ms"] = 0
+                resume_clip = {
+                    "id": resume_id,
+                    "deck": source_payload.get("deck"),
+                    "path": source_payload.get("path"),
+                    "start_ms": brake_start + brake_duration,
+                    "trim_start_ms": source_trim_at_brake,
+                    "duration_ms": remaining_ms,
+                    "trim_db": float(source_payload.get("trim_db", 0.0)),
+                    "gain_db": float(source_payload.get("gain_db", 0.0)),
+                    "tempo_shift_pct": float(source_payload.get("tempo_shift_pct", 0.0)),
+                    "pitch_shift_semitones": int(source_payload.get("pitch_shift_semitones", 0)),
+                    "fade_in_ms": 0,
+                    "fade_out_ms": resume_fade_out_ms,
+                    "kind": "song",
+                    "planner_role": "timing-brake-resume",
+                    "source_clip_id": source_id,
+                    "routine_id": routine_id,
+                    "routine_recipe": recipe,
+                    "source_technique": "timing-brake",
+                }
+                next_payload.setdefault("clips", []).append(resume_clip)
+            source_deck = str(source_payload.get("deck") or "")
             routing = parse_fader_routing(
                 next_payload,
                 [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)],
@@ -1633,7 +1682,6 @@ def add_instant_double_routine(
             on_position = -1.0 if target_side == "A" else 1.0
             decks = [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
             brake_assignments = {deck: source_side for deck in decks}
-            brake_assignments[target_deck] = target_side
             next_payload = set_fader_routing(next_payload, brake_assignments)
             next_payload.setdefault("automations", []).append(
                 {

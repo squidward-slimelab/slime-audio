@@ -189,6 +189,35 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(event["planner_role"], "instant-double")
         self.assertEqual(event["display_meta"], "stabs routine of a")
 
+    def test_dashboard_places_attached_effect_tracks_under_source_deck(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1", "deck-2"],
+            "clips": [
+                {"id": "lead", "deck": "deck-2", "path": "/music/A/B/a.flac", "start": 0, "duration": 20_000},
+                {
+                    "id": "lead-brake",
+                    "kind": "effect-track",
+                    "deck": "deck-1",
+                    "attached_deck": "deck-2",
+                    "effect_parent_clip_id": "lead",
+                    "path": "/music/A/B/a.flac",
+                    "start": 8_000,
+                    "duration": 500,
+                    "routine_recipe": "brake-drop",
+                },
+            ],
+        }
+
+        events = [web.normalize_event(event, None) for event in web.session_events(payload)]
+        effect_track = next(event for event in events if event["kind"] == "effect-track")
+        lanes = web.lane_rows(events)
+
+        self.assertEqual(effect_track["lane"], "deck-2-fx")
+        self.assertEqual(effect_track["display_title"], "brake-drop")
+        self.assertEqual(effect_track["display_meta"], "attached to lead | brake-drop")
+        self.assertIn("deck-2-fx", [lane["id"] for lane in lanes])
+
     def test_dashboard_shows_effect_events_on_effects_lane(self):
         payload = {
             "version": 1,
