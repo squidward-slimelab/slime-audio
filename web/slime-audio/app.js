@@ -398,11 +398,27 @@ function render() {
   }
 }
 
+async function readJsonResponse(response) {
+  const text = await response.text();
+  let payload = null;
+  if (text.trim()) {
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      const preview = text.trim().slice(0, 180);
+      throw new Error(`expected JSON from ${response.url}, got ${response.status} ${response.statusText}: ${preview || error.message}`);
+    }
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error || `${response.status} ${response.statusText}`);
+  }
+  return payload || {};
+}
+
 async function refresh() {
   const stateUrl = dashboardState.selectedSet ? `/api/state?set=${encodeURIComponent(dashboardState.selectedSet)}` : "/api/state";
   const response = await fetch(stateUrl, { cache: "no-store" });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  const payload = await readJsonResponse(response);
   dashboardState.payload = payload;
   dashboardState.dashboard = payload.dashboard;
   render();
@@ -410,8 +426,7 @@ async function refresh() {
 
 async function refreshSets() {
   const response = await fetch("/api/sets", { cache: "no-store" });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
+  const payload = await readJsonResponse(response);
   dashboardState.sets = payload.sets || [];
   dashboardState.activeSet = payload.active || null;
   renderArchive();
@@ -423,9 +438,7 @@ async function postJson(url, body = {}) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || response.statusText);
-  return payload;
+  return readJsonResponse(response);
 }
 
 function animatePlayhead() {

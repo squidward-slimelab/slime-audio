@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import socket
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +38,22 @@ def wait_for(url: str, timeout_s: float = 8.0) -> None:
             last_error = ex
         time.sleep(0.1)
     raise RuntimeError(f"server did not become ready: {last_error}")
+
+
+def assert_json_error(url: str) -> None:
+    request = urllib.request.Request(url)
+    try:
+        urllib.request.urlopen(request, timeout=2.0)
+    except urllib.error.HTTPError as ex:
+        body = ex.read().decode("utf-8")
+        content_type = ex.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            raise AssertionError(f"api error was not JSON: {content_type}") from ex
+        payload = json.loads(body)
+        if not payload.get("error"):
+            raise AssertionError(f"api error payload missing error field: {payload}")
+        return
+    raise AssertionError(f"expected api error from {url}")
 
 
 def chrome_binary() -> str:
@@ -108,6 +126,7 @@ def main() -> int:
     try:
         url = f"http://127.0.0.1:{port}/"
         wait_for(f"http://127.0.0.1:{port}/api/state")
+        assert_json_error(f"http://127.0.0.1:{port}/api/not-a-real-endpoint")
         args.out_dir.mkdir(parents=True, exist_ok=True)
         chrome = chrome_binary()
         desktop = run_chrome(chrome, url, args.out_dir, "desktop", "1440,1000")

@@ -620,6 +620,9 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/sets":
             self.send_json({"sets": list_sets(DEFAULT_SETS_DIR), "active": load_json(DEFAULT_ACTIVE_SET, {})})
             return
+        if parsed.path.startswith("/api/"):
+            self.send_json({"error": f"unknown endpoint: {parsed.path}"}, status=HTTPStatus.NOT_FOUND)
+            return
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
