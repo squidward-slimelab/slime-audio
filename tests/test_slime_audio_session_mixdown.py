@@ -88,42 +88,6 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("atrim=start=2.000:duration=0.750,asetpts=PTS-STARTPTS,areverse,asetrate=72000,aresample=48000", filters)
         self.assertIn("adelay=1000:all=1", filters)
 
-    def test_mixdown_filter_renders_scratch_motion_as_micro_slices(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.json"
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "decks": ["deck-1"],
-                        "clips": [
-                            {
-                                "id": "scratch",
-                                "deck": "deck-1",
-                                "path": "/music/scratch.flac",
-                                "start": 1_000,
-                                "trim_start": 2_000,
-                                "duration": 240,
-                                "reverse": True,
-                                "playback_rate": 1.5,
-                                "scratch_motion": True,
-                                "fade_in_ms": 4,
-                                "fade_out_ms": 4,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
-
-        self.assertIn("concat=n=", filters)
-        self.assertIn("areverse,asetrate=72000,aresample=48000", filters)
-        self.assertIn("atrim=duration=0.240,asetpts=PTS-STARTPTS", filters)
-        self.assertNotIn("duration=0.360,asetpts=PTS-STARTPTS,areverse,asetrate=72000,aresample=48000,afade", filters)
-        self.assertIn("adelay=1000:all=1", filters)
-
     def test_long_filter_complex_can_spill_to_script_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             script = Path(temp_dir) / "filter.ffmpeg"

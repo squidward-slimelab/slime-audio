@@ -69,16 +69,6 @@ def source_duration_ms(clip: Clip) -> int | None:
     return max(1, int(round(clip.duration_ms * tempo_factor(clip) * clip.playback_rate)))
 
 
-def clip_fade_filters(clip: Clip) -> str:
-    filters = ""
-    if clip.fade_in_ms:
-        filters += f"afade=t=in:st=0:d={seconds(clip.fade_in_ms)},"
-    if clip.fade_out_ms and clip.duration_ms is not None:
-        fade_start_ms = max(0, clip.duration_ms - clip.fade_out_ms)
-        filters += f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(clip.fade_out_ms)},"
-    return filters
-
-
 def shift_automation_window(automation: Automation, from_ms: int) -> Automation | None:
     points = sorted(automation.points, key=lambda point: point.at_ms)
     shifted: list[AutomationPoint] = []
@@ -386,66 +376,6 @@ def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     return ",".join(filters)
 
 
-def scratch_motion_filter(session: MixSession, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
-    if clip.duration_ms is None:
-        raise ValueError(f"scratch motion clip {clip.id} requires duration_ms")
-    source_step_factor = tempo_factor(clip) * clip.playback_rate
-    duration_ms = max(1, clip.duration_ms)
-    slice_ms = max(14, min(28, duration_ms // 8 or duration_ms))
-    slices: list[tuple[int, int, bool]] = []
-    remaining_ms = duration_ms
-    while remaining_ms > 0:
-        out_ms = min(slice_ms, remaining_ms)
-        source_ms = max(1, int(round(out_ms * source_step_factor)))
-        is_reverse = clip.reverse if len(slices) % 2 == 0 else not clip.reverse
-        slices.append((out_ms, source_ms, is_reverse))
-        remaining_ms -= out_ms
-    source_cursor_ms = clip.trim_start_ms
-    filters: list[str] = []
-    slice_labels: list[str] = []
-    for index, (out_ms, source_ms, is_reverse) in enumerate(slices):
-        if is_reverse:
-            source_start_ms = max(0, source_cursor_ms - source_ms)
-            source_cursor_ms = source_start_ms
-        else:
-            source_start_ms = max(0, source_cursor_ms)
-            source_cursor_ms += source_ms
-        slice_label = f"{label}s{index}"
-        motion_filters = ["areverse"] if is_reverse else []
-        motion_filters.extend(time_pitch_filters(clip, sample_rate))
-        motion = ",".join(motion_filters)
-        motion = f"{motion}," if motion else ""
-        micro_fade_ms = min(3, max(1, out_ms // 6))
-        filters.append(
-            f"[{input_index}:a]"
-            f"atrim=start={seconds(source_start_ms)}:duration={seconds(source_ms)},"
-            "asetpts=PTS-STARTPTS,"
-            f"{motion}"
-            f"atrim=duration={seconds(out_ms)},"
-            f"afade=t=in:st=0:d={seconds(micro_fade_ms)},"
-            f"afade=t=out:st={seconds(max(0, out_ms - micro_fade_ms))}:d={seconds(micro_fade_ms)}"
-            f"[{slice_label}]"
-        )
-        slice_labels.append(f"[{slice_label}]")
-    volume = gain_multiplier(clip.trim_db) * gain_multiplier(clip.gain_db)
-    fade_filters = clip_fade_filters(clip)
-    effect_filters = clip_effect_filters(session, clip)
-    effect_filters = f"{effect_filters}," if effect_filters else ""
-    filters.append(
-        f"{''.join(slice_labels)}"
-        f"concat=n={len(slice_labels)}:v=0:a=1,"
-        f"atrim=duration={seconds(duration_ms)},"
-        "asetpts=PTS-STARTPTS,"
-        f"{fade_filters}"
-        f"{effect_filters}"
-        f"volume={volume:.6f},"
-        f"adelay={clip.start_ms}:all=1,"
-        f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
-        f"[{label}]"
-    )
-    return ";".join(filters)
-
-
 def effect_target_clips(session: MixSession, effect: EffectEvent) -> list[Clip]:
     if effect.target.startswith("deck:"):
         deck = effect.target.split(":", 1)[1]
@@ -615,15 +545,18 @@ def build_filter_complex(
     music_labels: list[str] = []
     for index, clip in enumerate(session.clips):
         input_index = clip_input_indices[index] if clip_input_indices is not None else index
-        label = f"music{index}"
-        if clip.scratch_motion:
-            filters.append(scratch_motion_filter(session, clip, input_index, label, sample_rate, channels))
-            music_labels.append(f"[{label}]")
-            continue
         source_duration = source_duration_ms(clip)
         duration = f":duration={seconds(source_duration)}" if source_duration is not None else ""
+        label = f"music{index}"
         volume = gain_multiplier(clip.trim_db) * gain_multiplier(clip.gain_db)
-        fade_filters = clip_fade_filters(clip)
+        fade_in_ms = clip.fade_in_ms
+        fade_out_ms = clip.fade_out_ms
+        fade_filters = ""
+        if fade_in_ms:
+            fade_filters += f"afade=t=in:st=0:d={seconds(fade_in_ms)},"
+        if fade_out_ms and clip.duration_ms is not None:
+            fade_start_ms = max(0, clip.duration_ms - fade_out_ms)
+            fade_filters += f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(fade_out_ms)},"
         retime_filters = ",".join(time_pitch_filters(clip, sample_rate))
         retime_filters = f"{retime_filters}," if retime_filters else ""
         reverse_filter = "areverse," if clip.reverse else ""

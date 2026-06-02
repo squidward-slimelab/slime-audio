@@ -83,7 +83,6 @@ class Clip:
     fade_out_ms: int = 0
     reverse: bool = False
     playback_rate: float = 1.0
-    scratch_motion: bool = False
     kind: str = "song"
     attached_deck: str | None = None
     effect_parent_clip_id: str | None = None
@@ -326,7 +325,6 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         fade_out_ms=parse_ms(payload.get("fade_out_ms", 0), f"clip {clip_id} fade_out_ms"),
         reverse=bool(payload.get("reverse", False)),
         playback_rate=float(payload.get("playback_rate", 1.0)),
-        scratch_motion=bool(payload.get("scratch_motion", False)),
         kind=str(payload.get("kind") or "song"),
         attached_deck=str(payload["attached_deck"]) if payload.get("attached_deck") else None,
         effect_parent_clip_id=str(payload["effect_parent_clip_id"]) if payload.get("effect_parent_clip_id") else None,
@@ -1826,7 +1824,6 @@ def add_scratch_cut_routine(
             "fade_out_ms": min(10, clip_duration // 4),
             "reverse": reverse,
             "playback_rate": playback_rate,
-            "scratch_motion": True,
             "kind": "effect-track",
             "attached_deck": source_deck,
             "effect_parent_clip_id": source_id,
