@@ -281,16 +281,26 @@ function showAutomationTooltip(pointerEvent, lane, automations, scale) {
   if (!automations.length) return;
   const rect = pointerEvent.currentTarget.getBoundingClientRect();
   const atMs = clamp(((pointerEvent.clientX - rect.left) / scale.stageWidth) * scale.duration, 0, scale.duration);
+  const activeAutomations = automations.filter((event) => {
+    const start = numericValue(event.start_ms, null);
+    const end = numericValue(event.end_ms, null);
+    return start !== null && end !== null && atMs >= start && atMs <= end;
+  });
+  if (!activeAutomations.length) {
+    hideAutomationTooltip();
+    return;
+  }
   const tooltip = automationTooltip();
   const head = document.createElement("div");
   head.className = "automation-tooltip-head";
   head.innerHTML = `<strong>${lane.label || lane.id}</strong><span>${fmtMs(atMs)}</span>`;
-  const rows = automations.map((event, index) => {
+  const rows = activeAutomations.map((event, index) => {
     const meta = automationMeta(event, index);
     const value = automationValue(event.points, atMs, null);
+    const target = event.target && event.target !== "crossfader" ? `${event.target} ` : "";
     const row = document.createElement("div");
     row.className = "automation-tooltip-row";
-    row.innerHTML = `<i style="background:${meta.color}"></i><span>${meta.label}</span><strong>${automationValueText(event.param, value)}</strong>`;
+    row.innerHTML = `<i style="background:${meta.color}"></i><span>${target}${meta.label}</span><strong>${automationValueText(event.param, value)}</strong>`;
     return row;
   });
   tooltip.replaceChildren(head, ...rows);
