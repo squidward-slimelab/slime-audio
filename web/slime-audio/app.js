@@ -9,6 +9,7 @@ const dashboardState = {
   sets: [],
   activeSet: null,
   selectedSet: null,
+  waveformCache: new Map(),
 };
 
 const els = {
@@ -44,7 +45,7 @@ const els = {
 
 const MIN_STAGE_WIDTH = 1600;
 const LANE_LABEL_WIDTH = 104;
-const MIXER_DECK_ORDER = ["deck-1", "deck-5", "deck-2", "deck-3", "deck-4"];
+const MIXER_DECK_ORDER = ["deck-3", "deck-1", "deck-5", "deck-2", "deck-4"];
 const DECK_LABELS = { "deck-5": "MIC" };
 const KNOB_DEFS = [
   { key: "trim", label: "trim", min: -12, max: 12, neutral: 0, unit: "dB" },
@@ -55,6 +56,19 @@ const KNOB_DEFS = [
 ];
 const KNOB_MIN_DEG = -135;
 const KNOB_MAX_DEG = 135;
+const AUTOMATION_GRAPH_HEIGHT = 64;
+const AUTOMATION_PARAM_META = {
+  gain_db: { label: "gain", min: -24, max: 6, unit: "dB", color: "#6fb8e8" },
+  trim_db: { label: "trim", min: -12, max: 12, unit: "dB", color: "#82c66f" },
+  eq_low_db: { label: "low", min: -12, max: 12, unit: "dB", color: "#e0b85a" },
+  eq_mid_db: { label: "mid", min: -12, max: 12, unit: "dB", color: "#b79cf5" },
+  eq_high_db: { label: "hi", min: -12, max: 12, unit: "dB", color: "#df7070" },
+  lowpass_hz: { label: "lowpass", min: 40, max: 22050, unit: "Hz", color: "#82c66f", scale: "log" },
+  highpass_hz: { label: "highpass", min: 20, max: 6000, unit: "Hz", color: "#e0b85a", scale: "log" },
+  duck_volume: { label: "duck", min: 0, max: 1, unit: "", color: "#df7070" },
+  position: { label: "xfader", min: -1, max: 1, unit: "", color: "#6fb8e8" },
+};
+const AUTOMATION_FALLBACK_COLORS = ["#6fb8e8", "#82c66f", "#e0b85a", "#b79cf5", "#df7070"];
 
 function fmtMs(ms) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "--:--";
@@ -125,6 +139,13 @@ function eventSignature(dashboard) {
       event.display_title,
       event.display_meta,
       event.style_flags,
+      event.path,
+      event.trim_start_ms,
+      event.duration_ms,
+      event.target,
+      event.owner,
+      event.param,
+      event.points,
     ])
   );
 }
@@ -177,6 +198,223 @@ function automationFor(targetId, param, atMs, fallback = null) {
     if (atMs >= start && atMs <= end) value = automationValue(event.points, atMs, value);
   }
   return value;
+}
+
+function automationPoints(event) {
+  return (event?.points || [])
+    .map((point) => ({ at: numericValue(point.at_ms, null), value: numericValue(point.value, null) }))
+    .filter((point) => point.at !== null && point.value !== null)
+    .sort((a, b) => a.at - b.at);
+}
+
+function eventIds(events) {
+  return new Set((events || []).map((event) => event.id).filter(Boolean).map(String));
+}
+
+function laneAutomationEvents(lane) {
+  const automations = (dashboardState.dashboard?.events || []).filter((event) => event.kind === "automation" && automationPoints(event).length);
+  const laneIds = eventIds((lane.events || []).filter((event) => event.kind !== "automation"));
+  const allTimelineIds = eventIds((dashboardState.dashboard?.events || []).filter((event) => event.kind !== "automation"));
+  if (lane.id === "fader") return automations.filter((event) => event.target === "crossfader");
+  if (lane.id === "automation") {
+    return automations.filter((event) => event.target !== "crossfader" && !allTimelineIds.has(String(event.target || event.owner || "")));
+  }
+  return automations.filter((event) => laneIds.has(String(event.target || "")) || laneIds.has(String(event.owner || "")));
+}
+
+function automationMeta(event, index = 0) {
+  const param = event?.param || "automation";
+  const configured = AUTOMATION_PARAM_META[param] || {};
+  return {
+    label: configured.label || param.replace(/_/g, " "),
+    min: configured.min,
+    max: configured.max,
+    unit: configured.unit || "",
+    color: configured.color || AUTOMATION_FALLBACK_COLORS[index % AUTOMATION_FALLBACK_COLORS.length],
+    scale: configured.scale || "linear",
+  };
+}
+
+function automationRange(event, points, meta) {
+  if (Number.isFinite(meta.min) && Number.isFinite(meta.max)) return [meta.min, meta.max];
+  const values = points.map((point) => point.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  if (min === max) return [min - 1, max + 1];
+  return [min, max];
+}
+
+function automationPct(value, range, meta) {
+  const [min, max] = range;
+  if (meta.scale === "log") {
+    const safeMin = Math.max(1, min);
+    const safeMax = Math.max(safeMin + 1, max);
+    const safeValue = clamp(value, safeMin, safeMax);
+    return clamp((Math.log(safeValue) - Math.log(safeMin)) / (Math.log(safeMax) - Math.log(safeMin)), 0, 1);
+  }
+  return clamp((value - min) / (max - min), 0, 1);
+}
+
+function automationValueText(param, value) {
+  if (!Number.isFinite(value)) return "--";
+  if (param === "position") {
+    if (Math.abs(value) < 0.02) return "center 0.00";
+    return `${value < 0 ? "A" : "B"} ${Math.abs(value).toFixed(2)}`;
+  }
+  if (param === "duck_volume") return `${Math.round(value * 100)}%`;
+  if (param?.endsWith("_hz")) return value >= 1000 ? `${(value / 1000).toFixed(2)} kHz` : `${Math.round(value)} Hz`;
+  if (param?.endsWith("_db")) return `${value.toFixed(1)} dB`;
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function automationTooltip() {
+  let tooltip = document.querySelector(".automation-tooltip");
+  if (!tooltip) {
+    tooltip = document.createElement("div");
+    tooltip.className = "automation-tooltip";
+    document.body.append(tooltip);
+  }
+  return tooltip;
+}
+
+function showAutomationTooltip(pointerEvent, lane, automations, scale) {
+  if (!automations.length) return;
+  const rect = pointerEvent.currentTarget.getBoundingClientRect();
+  const atMs = clamp(((pointerEvent.clientX - rect.left) / scale.stageWidth) * scale.duration, 0, scale.duration);
+  const tooltip = automationTooltip();
+  const head = document.createElement("div");
+  head.className = "automation-tooltip-head";
+  head.innerHTML = `<strong>${lane.label || lane.id}</strong><span>${fmtMs(atMs)}</span>`;
+  const rows = automations.map((event, index) => {
+    const meta = automationMeta(event, index);
+    const value = automationValue(event.points, atMs, null);
+    const row = document.createElement("div");
+    row.className = "automation-tooltip-row";
+    row.innerHTML = `<i style="background:${meta.color}"></i><span>${meta.label}</span><strong>${automationValueText(event.param, value)}</strong>`;
+    return row;
+  });
+  tooltip.replaceChildren(head, ...rows);
+  tooltip.hidden = false;
+  const margin = 14;
+  const maxLeft = window.innerWidth - tooltip.offsetWidth - margin;
+  const maxTop = window.innerHeight - tooltip.offsetHeight - margin;
+  tooltip.style.left = `${clamp(pointerEvent.clientX + margin, margin, Math.max(margin, maxLeft))}px`;
+  tooltip.style.top = `${clamp(pointerEvent.clientY + margin, margin, Math.max(margin, maxTop))}px`;
+}
+
+function hideAutomationTooltip() {
+  const tooltip = document.querySelector(".automation-tooltip");
+  if (tooltip) tooltip.hidden = true;
+}
+
+function renderAutomationGraph(track, lane, scale) {
+  const automations = laneAutomationEvents(lane);
+  if (!automations.length) return;
+  const graph = document.createElement("div");
+  graph.className = "automation-graph";
+  graph.style.width = `${scale.stageWidth}px`;
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${scale.stageWidth} ${AUTOMATION_GRAPH_HEIGHT}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  automations.forEach((event, index) => {
+    const points = automationPoints(event);
+    if (points.length < 2) return;
+    const meta = automationMeta(event, index);
+    const range = automationRange(event, points, meta);
+    const coordinates = points
+      .map((point) => {
+        const x = clamp((point.at / scale.duration) * scale.stageWidth, 0, scale.stageWidth);
+        const y = AUTOMATION_GRAPH_HEIGHT - automationPct(point.value, range, meta) * (AUTOMATION_GRAPH_HEIGHT - 8) - 4;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    line.setAttribute("points", coordinates);
+    line.setAttribute("fill", "none");
+    line.setAttribute("stroke", meta.color);
+    line.setAttribute("stroke-width", "2.2");
+    line.setAttribute("stroke-linecap", "round");
+    line.setAttribute("stroke-linejoin", "round");
+    line.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(line);
+  });
+  graph.append(svg);
+  track.append(graph);
+  track.addEventListener("mousemove", (event) => showAutomationTooltip(event, lane, automations, scale));
+  track.addEventListener("mouseleave", hideAutomationTooltip);
+}
+
+function waveformKey(event) {
+  if (!event?.path || !["song", "effect-track"].includes(event.kind)) return "";
+  return JSON.stringify({
+    path: event.path,
+    trim_start_ms: numericValue(event.trim_start_ms, 0),
+    duration_ms: numericValue(event.duration_ms, 0),
+  });
+}
+
+function waveformUrl(event) {
+  const params = new URLSearchParams({
+    path: event.path,
+    trim_start_ms: String(numericValue(event.trim_start_ms, 0)),
+    bins: "180",
+  });
+  const duration = numericValue(event.duration_ms, 0);
+  if (duration > 0) params.set("duration_ms", String(duration));
+  return `/api/waveform?${params.toString()}`;
+}
+
+function drawWaveform(peaks) {
+  const wrap = document.createElement("div");
+  wrap.className = "timeline-waveform-drawing";
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 100 36");
+  svg.setAttribute("preserveAspectRatio", "none");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  const values = (peaks || []).map((value) => clamp(numericValue(value, 0), 0, 1));
+  const commands = values
+    .map((value, index) => {
+      const x = values.length <= 1 ? 0 : (index / (values.length - 1)) * 100;
+      const height = Math.max(1.2, value * 16);
+      return `M${x.toFixed(2)} ${(18 - height).toFixed(2)}V${(18 + height).toFixed(2)}`;
+    })
+    .join("");
+  path.setAttribute("d", commands);
+  svg.append(path);
+  wrap.append(svg);
+  return wrap;
+}
+
+function renderEventWaveform(container, event) {
+  const key = waveformKey(event);
+  if (!key) return;
+  const waveform = document.createElement("div");
+  waveform.className = "timeline-waveform";
+  waveform.dataset.waveformKey = key;
+  waveform.dataset.waveformUrl = waveformUrl(event);
+  const cached = dashboardState.waveformCache.get(key);
+  if (cached?.available && cached.peaks?.length) waveform.append(drawWaveform(cached.peaks));
+  container.append(waveform);
+}
+
+async function hydrateWaveforms() {
+  const placeholders = [...els.timeline.querySelectorAll(".timeline-waveform[data-waveform-key]")];
+  const missing = placeholders.filter((item) => !dashboardState.waveformCache.has(item.dataset.waveformKey));
+  await Promise.all(
+    missing.slice(0, 12).map(async (item) => {
+      try {
+        const response = await fetch(item.dataset.waveformUrl, { cache: "no-store" });
+        const payload = await readJsonResponse(response);
+        dashboardState.waveformCache.set(item.dataset.waveformKey, payload);
+      } catch (error) {
+        dashboardState.waveformCache.set(item.dataset.waveformKey, { available: false, peaks: [], error: error.message });
+      }
+    })
+  );
+  for (const item of placeholders) {
+    const payload = dashboardState.waveformCache.get(item.dataset.waveformKey);
+    if (payload?.available && payload.peaks?.length && !item.firstChild) item.append(drawWaveform(payload.peaks));
+  }
 }
 
 function pickDeckEvent(deckId, playhead) {
@@ -505,6 +743,7 @@ function renderTimeline() {
     }
     const track = document.createElement("div");
     track.className = "lane-track";
+    renderAutomationGraph(track, lane, scale);
     if (!lane.events.length) {
       const empty = document.createElement("span");
       empty.className = "lane-empty";
@@ -522,7 +761,12 @@ function renderTimeline() {
       el.style.left = `${(start / scale.duration) * scale.stageWidth}px`;
       el.style.width = `${Math.max(18, ((end - start) / scale.duration) * scale.stageWidth)}px`;
       el.title = `${event.display_title}\n${fmtMs(start)} - ${fmtMs(end)}\n${event.display_meta || shortPath(event.path)}`;
-      el.innerHTML = `<span>${event.display_title || "event"}</span><small>${event.display_meta || ""}</small>`;
+      renderEventWaveform(el, event);
+      const eventTitle = document.createElement("span");
+      eventTitle.textContent = event.display_title || "event";
+      const eventMeta = document.createElement("small");
+      eventMeta.textContent = event.display_meta || "";
+      el.append(eventTitle, eventMeta);
       track.append(el);
     }
     row.append(label, track);
@@ -534,6 +778,7 @@ function renderTimeline() {
   dashboardState.playheadEl = playhead;
   els.timeline.append(playhead);
   updatePlayhead();
+  hydrateWaveforms();
 }
 
 function syncAxis() {

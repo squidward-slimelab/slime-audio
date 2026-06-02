@@ -61,8 +61,8 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(data["dashboard"]["transport"]["status"], "playing")
         self.assertEqual(data["dashboard"]["transport"]["playhead_ms"], 70_000)
         self.assertEqual(data["dashboard"]["now"]["id"], "c")
-        self.assertEqual([lane["id"] for lane in data["dashboard"]["lanes"][:5]], ["deck-1", "deck-5", "deck-2", "deck-3", "deck-4"])
-        self.assertEqual(data["dashboard"]["lanes"][1]["label"], "MIC")
+        self.assertEqual([lane["id"] for lane in data["dashboard"]["lanes"][:5]], ["deck-3", "deck-1", "deck-5", "deck-2", "deck-4"])
+        self.assertEqual(data["dashboard"]["lanes"][2]["label"], "MIC")
         self.assertEqual(data["dashboard"]["session"]["counts"]["song"], 3)
         self.assertEqual([event["status"] for event in data["dashboard"]["events"] if event["kind"] == "song"], ["done", "done", "current"])
 
@@ -263,6 +263,13 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(effect["display_title"], "echo")
         self.assertEqual(effect["display_meta"], "lead | tail 3.0s | echo-stabs")
         self.assertIn("effects", [lane["id"] for lane in lanes])
+
+    def test_waveform_payload_handles_missing_files(self):
+        payload = web.waveform_payload(Path("/tmp/slime-audio-missing-waveform-file.flac"))
+
+        self.assertFalse(payload["available"])
+        self.assertEqual(payload["peaks"], [])
+        self.assertIn("not found", payload["error"])
 
     def test_dashboard_shows_slip_events_on_effects_lane(self):
         payload = {

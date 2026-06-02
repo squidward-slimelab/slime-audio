@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
+import subprocess
 import time
+from array import array
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,9 +33,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
-DECK_ORDER = ["deck-1", VOCAL_DECK, "deck-2", "deck-3", "deck-4"]
+DEFAULT_WAVEFORM_CACHE = REPO_ROOT / "runtime" / "waveform-cache.json"
+DECK_ORDER = ["deck-3", "deck-1", VOCAL_DECK, "deck-2", "deck-4"]
 LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
+WAVEFORM_BINS = 240
 
 
 def parse_timestamp(value: str | None) -> float | None:
@@ -595,6 +600,88 @@ def automation_payload(automation: dict[str, Any], owner: str | None = None) -> 
     }
 
 
+def waveform_cache_key(path: Path, trim_start_ms: int, duration_ms: int | None, bins: int) -> str:
+    stat = path.stat()
+    identity = "|".join(
+        [
+            str(path.resolve()),
+            str(stat.st_size),
+            str(stat.st_mtime_ns),
+            str(trim_start_ms),
+            str(duration_ms or 0),
+            str(bins),
+        ]
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def load_waveform_cache() -> dict[str, Any]:
+    try:
+        payload = json.loads(DEFAULT_WAVEFORM_CACHE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def save_waveform_cache(cache: dict[str, Any]) -> None:
+    DEFAULT_WAVEFORM_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    DEFAULT_WAVEFORM_CACHE.write_text(json.dumps(cache, sort_keys=True), encoding="utf-8")
+
+
+def waveform_payload(path: Path, trim_start_ms: int = 0, duration_ms: int | None = None, bins: int = WAVEFORM_BINS) -> dict[str, Any]:
+    resolved = path.expanduser()
+    if not resolved.exists() or not resolved.is_file():
+        return {"available": False, "path": str(path), "peaks": [], "error": "audio file not found"}
+    safe_bins = max(32, min(800, int(bins)))
+    safe_trim = max(0, int(trim_start_ms))
+    safe_duration = max(1, int(duration_ms)) if duration_ms is not None and int(duration_ms) > 0 else None
+    cache = load_waveform_cache()
+    key = waveform_cache_key(resolved, safe_trim, safe_duration, safe_bins)
+    cached = cache.get(key)
+    if isinstance(cached, dict) and isinstance(cached.get("peaks"), list):
+        return {**cached, "cache": "hit"}
+
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if safe_trim:
+        command.extend(["-ss", f"{safe_trim / 1000:.3f}"])
+    command.extend(["-i", str(resolved)])
+    if safe_duration:
+        command.extend(["-t", f"{safe_duration / 1000:.3f}"])
+    command.extend(["-vn", "-ac", "1", "-ar", "8000", "-f", "s16le", "pipe:1"])
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, timeout=20)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as ex:
+        return {"available": False, "path": str(path), "peaks": [], "error": str(ex)}
+
+    samples = array("h")
+    samples.frombytes(result.stdout)
+    if not samples:
+        return {"available": False, "path": str(path), "peaks": [], "error": "no decoded samples"}
+    bin_size = max(1, len(samples) // safe_bins)
+    raw_peaks: list[int] = []
+    for index in range(safe_bins):
+        start = index * bin_size
+        end = len(samples) if index == safe_bins - 1 else min(len(samples), start + bin_size)
+        if start >= len(samples):
+            raw_peaks.append(0)
+            continue
+        raw_peaks.append(max(abs(sample) for sample in samples[start:end]))
+    peak_max = max(raw_peaks) or 1
+    payload = {
+        "available": True,
+        "path": str(resolved),
+        "trim_start_ms": safe_trim,
+        "duration_ms": safe_duration,
+        "bins": safe_bins,
+        "peaks": [round(value / peak_max, 4) for value in raw_peaks],
+    }
+    cache[key] = payload
+    if len(cache) > 500:
+        cache = dict(list(cache.items())[-500:])
+    save_waveform_cache(cache)
+    return {**payload, "cache": "miss"}
+
+
 class SlimeAudioHandler(BaseHTTPRequestHandler):
     server: "SlimeAudioServer"
 
@@ -621,6 +708,21 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/sets":
             self.send_json({"sets": list_sets(DEFAULT_SETS_DIR), "active": load_json(DEFAULT_ACTIVE_SET, {})})
+            return
+        if parsed.path == "/api/waveform":
+            params = parse_qs(parsed.query)
+            path_text = params.get("path", [""])[0]
+            if not path_text:
+                self.send_json({"available": False, "peaks": [], "error": "missing path"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                trim_start_ms = parse_ms(params.get("trim_start_ms", ["0"])[0], "trim_start_ms")
+                duration_values = params.get("duration_ms", [])
+                duration_ms = parse_ms(duration_values[0], "duration_ms") if duration_values else None
+                bins = int(params.get("bins", [str(WAVEFORM_BINS)])[0])
+                self.send_json(waveform_payload(Path(path_text), trim_start_ms, duration_ms, bins))
+            except Exception as ex:
+                self.send_json({"available": False, "peaks": [], "error": str(ex)}, status=HTTPStatus.BAD_REQUEST)
             return
         if parsed.path.startswith("/api/"):
             self.send_json({"error": f"unknown endpoint: {parsed.path}"}, status=HTTPStatus.NOT_FOUND)

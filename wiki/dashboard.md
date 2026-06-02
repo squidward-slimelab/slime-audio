@@ -6,6 +6,9 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 
 - Show active runner state and stale/playback status.
 - Render the canonical DJ session timeline, including normal decks, attached effect lanes, the dedicated `deck-5` vocal lane, fader assignments, automation, effects, slip events, and mic lean-ins.
+- Order deck lanes and the mixer mirror as `deck-3`, `deck-1`, `MIC`, `deck-2`, `deck-4`, matching the physical/operator view.
+- Overlay per-track automation curves on timeline rows. Clip-owned automation is remapped from the generic automation events back onto the target clip lane, while crossfader automation remains on the fader lane. Hovering a curve shows every automation value on that row at the hovered timestamp.
+- Draw clip waveforms in timeline blocks through the lazy `/api/waveform` endpoint. The endpoint decodes a trimmed clip segment with `ffmpeg`, returns normalized peaks, and caches results under `runtime/waveform-cache.json` keyed by file identity plus trim/duration.
 - Expose named set archive browsing without loading archived sets into playback.
 - Provide a compact operational view of what the native session runner is about to play.
 
@@ -39,6 +42,8 @@ The frontend consumes the server view model from `/api/state`. Keep this contrac
 - summary counts
 
 Unknown `/api/*` routes must return JSON errors, not static HTML. The frontend should parse responses defensively and report endpoint/status details when a response is not JSON.
+
+`/api/waveform?path=...&trim_start_ms=...&duration_ms=...&bins=...` returns `{available, peaks}` JSON. Missing files or decode failures should return a JSON payload with `available: false`, not break the timeline.
 
 ## Verification
 

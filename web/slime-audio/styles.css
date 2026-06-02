@@ -517,17 +517,35 @@ h2 {
   position: absolute;
   top: 29px;
   left: 14px;
+  z-index: 1;
   color: rgba(154, 166, 160, 0.42);
   text-transform: uppercase;
   font-size: 11px;
   font-weight: 800;
 }
 
+.automation-graph {
+  position: absolute;
+  inset: 6px 0 6px 0;
+  z-index: 1;
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+.automation-graph svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.55));
+}
+
 .timeline-event {
   position: absolute;
   top: 10px;
+  z-index: 2;
   display: grid;
-  gap: 2px;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: 1px;
   height: 58px;
   min-width: 28px;
   padding: 7px 9px;
@@ -538,6 +556,24 @@ h2 {
   background: #15201f;
   color: var(--text);
   text-align: left;
+}
+
+.timeline-waveform {
+  min-height: 17px;
+  margin: -2px -3px 1px;
+  opacity: 0.82;
+}
+
+.timeline-waveform-drawing,
+.timeline-waveform-drawing svg {
+  width: 100%;
+  height: 100%;
+}
+
+.timeline-waveform-drawing path {
+  stroke: rgba(238, 243, 239, 0.78);
+  stroke-width: 0.42;
+  vector-effect: non-scaling-stroke;
 }
 
 .timeline-event.current {
@@ -619,6 +655,8 @@ h2 {
 
 .timeline-event span,
 .timeline-event small {
+  position: relative;
+  z-index: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -655,6 +693,73 @@ h2 {
   height: 12px;
   background: var(--blue);
   transform: rotate(45deg);
+}
+
+.automation-tooltip {
+  position: fixed;
+  z-index: 100;
+  min-width: 190px;
+  padding: 10px 11px;
+  border: 1px solid #52636c;
+  border-radius: 6px;
+  background: rgba(8, 10, 12, 0.96);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48);
+  color: var(--text);
+  pointer-events: none;
+}
+
+.automation-tooltip[hidden] {
+  display: none;
+}
+
+.automation-tooltip-head,
+.automation-tooltip-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.automation-tooltip-head {
+  margin-bottom: 7px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.automation-tooltip-head strong,
+.automation-tooltip-row strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.automation-tooltip-head span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.automation-tooltip-row {
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  min-height: 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.automation-tooltip-row i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.automation-tooltip-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-tooltip-row strong {
+  color: var(--text);
 }
 
 .mixer-note {
