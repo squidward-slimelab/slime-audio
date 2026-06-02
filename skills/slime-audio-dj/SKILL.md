@@ -31,6 +31,65 @@ Keep this skill generic and portable.
 - `scripts/slime_audio_session_runner.py`: run the native timestamped session in live-editable render windows.
 - `scripts/slime_audio_tts.py` and `scripts/slime_audio_drops.py`: legacy Spotify/drop helpers; do not use them for Snapcast-era mix lean-ins unless explicitly working on legacy Spotify playback.
 
+## Edit API Mix-Building Playbook
+
+When the operator asks for a mix, proof, routine, or revision, build it through the session edit API. The job is not to make an external audio collage; the job is to express the mix as editable session data so the runner, dashboard, review renders, and future agents all see the same thing.
+
+Use `scripts/slime_audio_live_edit.py` for active or future edits against the live session. Use `scripts/slime_audio_session.py` for offline setup against a named session file. These commands expose the same mix primitives: `add-clip`, `move`, `remove`, `automate`, `add-effect`, `slip`, `fader-routing`, `crossfader`, `beat-jump`, `instant-double`, `instant-double-routine`, and `mashup-bed`.
+
+The normal agent sequence is:
+
+1. Select database-backed tracks, analyze cues/structure, and create or activate a named set.
+2. Build the base timeline with `import-playlist` or `add-clip` on the middle decks.
+3. Use the edit API to add trims, faders, EQ, beds, doubles, routines, effects, lean-ins, and crossfader motion.
+4. Audit the session data before rendering: deck layout, attached effect lanes, clip trims, gain automation, EQ, effect targets, and unexplained hard ducks.
+5. Render the actual session with `slime_audio_session_mixdown.py --verify`, inspect the report or levels, then send the MP3 if the operator asked for proof.
+6. Save the named set after live edits with `slime_audio_sets.py save-loaded`.
+
+Never render a QA sample by directly hand-writing an ffmpeg filter graph that bypasses the SlimeAudio session/edit tools. That can prove DSP in isolation, but it does not prove the product. If the edit API cannot express the move, add or fix the API first, then make the proof through the session renderer.
+
+### Mix Knobs
+
+Use these controls deliberately. They are part of the creative surface, not hidden implementation details.
+
+- `trim_db`: input trim for loudness matching. Set this once per clip/source so tracks enter the mixer at comparable level.
+- `gain_db`: channel fader/performance level. Use static gain for placement and `gain_db` automation for fades, cuts, trades, and source replacement.
+- `trim_start_ms` / `duration_ms`: source window. Use these for cueing hooks, drops, loops, and phrase-safe sections.
+- `fade_in_ms` / `fade_out_ms`: click protection and short musical fades. Do not use them to fake an effect tail.
+- `tempo_shift_pct` / `pitch_shift_semitones`: rendered beat/key correction. Keep it conservative and explain why it helps the overlap.
+- `playback_rate` / `reverse`: record-motion scratch material where speed and pitch move together.
+- `lowpass_hz` / `highpass_hz`: filter moves and bed carving.
+- `eq_low_db` / `eq_mid_db` / `eq_high_db`: per-track EQ. Use this before burying a bed with extreme filters.
+- `send_reverb`, `duck_volume`, and effect `wet` / `gain_db`: send-style effect balance. If an effect is too loud, lower the send/effect first instead of ducking the lead into a weird hole.
+- `crossfader.position` plus `fader_routing.deck_assignments`: controller-style cuts and blends between deck sides.
+
+### Creative Moves
+
+Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
+
+- `mashup-bed`: keep a compatible rhythm track under a lead with gain, low-pass, high-pass, and EQ carving.
+- `instant-double`: clone a source onto another deck at the same musical position for trades, cuts, and layered emphasis.
+- `stabs` / `one-beat-trades` / `offbeat-swaps`: quantized double routines for audible DJ-style motion.
+- `hook-tease`: briefly reveal a hook or cue as a future hint.
+- `echo-stabs`: gated double plus echo tail. Echo is a wet send; the dry source should usually keep playing unless the routine intentionally trades it.
+- `echo-drop`: gated double plus reverb tail for a larger moment.
+- `scratch-cuts`: sparse source-replacing transform scratches. Scratch child clips must stay attached to the deck being scratched, not become independent music decks.
+- `slip-brake`: phrase-safe brake color that returns exactly on time.
+- `brake-drop`: real timing brake that mutes/replaces the source during the slowdown and resumes late from the pre-brake source position.
+- `add-effect`: custom `echo`, `reverb`, or `vinyl_brake` events on a clip, deck, master, or all.
+- `add-mic` / commentary planner: short hosted lean-ins with explicit ducking and low-pass automation.
+
+### Effect Semantics
+
+Treat each effect according to what it is supposed to do in the mix.
+
+- `echo`: a delayed wet copy that decays by feedback. It should sound like repeats, not garbled volume wobble. Validate suspect echo with a simple arpeggio session.
+- `reverb`: a spatial wet copy with Audacity-style preset starting points. Pick presets for color, then tune wet level, tail, gain, room size, damping, and low-pass.
+- `vinyl_brake`: a replacement effect. During the brake window, the dry target should be muted while the slowed record-motion render plays.
+- Scratches: replacement performance gestures. The source deck timeline should keep moving underneath, but the local dry source should be ducked only during the scratch clips.
+
+Hard source ducks are dangerous. They are correct for replacement moves like scratches and vinyl brakes, but they sound broken when placed after an echo stab or bed flourish with no obvious reason. If there is an audible volume cliff, inspect `gain_db` automation before blaming the effect DSP.
+
 ## Default Workflow
 
 1. Check current state before acting:
