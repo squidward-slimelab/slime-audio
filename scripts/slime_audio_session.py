@@ -73,6 +73,7 @@ class Clip:
     start_ms: int
     trim_start_ms: int = 0
     duration_ms: int | None = None
+    trim_db: float = 0.0
     gain_db: float = 0.0
     tempo_shift_pct: float = 0.0
     pitch_shift_semitones: int = 0
@@ -309,6 +310,7 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         start_ms=parse_ms(payload.get("start_ms", payload.get("start", 0)), f"clip {clip_id} start"),
         trim_start_ms=parse_ms(payload.get("trim_start_ms", payload.get("trim_start", 0)), f"clip {clip_id} trim_start"),
         duration_ms=parse_ms(duration, f"clip {clip_id} duration") if duration is not None else None,
+        trim_db=float(payload.get("trim_db", 0.0)),
         gain_db=float(payload.get("gain_db", 0.0)),
         tempo_shift_pct=float(payload.get("tempo_shift_pct", 0.0)),
         pitch_shift_semitones=int(payload.get("pitch_shift_semitones", 0)),
@@ -986,6 +988,7 @@ def add_clip(
     start: str,
     trim_start: str,
     duration: str | None,
+    trim_db: float,
     gain_db: float,
     fade_in_ms: int,
     fade_out_ms: int,
@@ -1006,6 +1009,7 @@ def add_clip(
         "path": path,
         "start": start,
         "trim_start": trim_start,
+        "trim_db": trim_db,
         "gain_db": gain_db,
         "fade_in_ms": fade_in_ms,
         "fade_out_ms": fade_out_ms,
@@ -1425,6 +1429,7 @@ def add_instant_double(
         "start_ms": start_ms,
         "trim_start_ms": trim_start_ms,
         "duration_ms": duration_ms,
+        "trim_db": float(source.get("trim_db", 0.0)),
         "gain_db": float(source.get("gain_db", 0.0)) if gain_db is None else gain_db,
         "tempo_shift_pct": float(source.get("tempo_shift_pct", 0.0)),
         "pitch_shift_semitones": int(source.get("pitch_shift_semitones", 0)),
@@ -1757,6 +1762,7 @@ def main() -> int:
     add_clip_parser.add_argument("--start", required=True)
     add_clip_parser.add_argument("--trim-start", default="0")
     add_clip_parser.add_argument("--duration")
+    add_clip_parser.add_argument("--trim-db", type=float, default=0.0)
     add_clip_parser.add_argument("--gain-db", type=float, default=0.0)
     add_clip_parser.add_argument("--fade-in-ms", type=int, default=0)
     add_clip_parser.add_argument("--fade-out-ms", type=int, default=0)
@@ -1915,6 +1921,7 @@ def main() -> int:
             start=args.start,
             trim_start=args.trim_start,
             duration=args.duration,
+            trim_db=args.trim_db,
             gain_db=args.gain_db,
             fade_in_ms=args.fade_in_ms,
             fade_out_ms=args.fade_out_ms,

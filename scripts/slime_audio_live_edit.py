@@ -72,6 +72,7 @@ def add_clip_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--start", required=True)
     parser.add_argument("--trim-start", default="0")
     parser.add_argument("--duration")
+    parser.add_argument("--trim-db", type=float, default=0.0)
     parser.add_argument("--gain-db", type=float, default=0.0)
     parser.add_argument("--fade-in-ms", type=int, default=0)
     parser.add_argument("--fade-out-ms", type=int, default=0)
@@ -219,6 +220,7 @@ def main() -> int:
                 start=args.start,
                 trim_start=args.trim_start,
                 duration=args.duration,
+                trim_db=args.trim_db,
                 gain_db=args.gain_db,
                 fade_in_ms=args.fade_in_ms,
                 fade_out_ms=args.fade_out_ms,

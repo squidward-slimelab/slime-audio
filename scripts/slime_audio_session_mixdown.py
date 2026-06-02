@@ -504,7 +504,7 @@ def build_filter_complex(
         source_duration = source_duration_ms(clip)
         duration = f":duration={seconds(source_duration)}" if source_duration is not None else ""
         label = f"music{index}"
-        volume = gain_multiplier(clip.gain_db)
+        volume = gain_multiplier(clip.trim_db) * gain_multiplier(clip.gain_db)
         fade_in_ms = clip.fade_in_ms
         fade_out_ms = clip.fade_out_ms
         fade_filters = ""

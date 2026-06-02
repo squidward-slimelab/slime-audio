@@ -257,6 +257,10 @@ class SlimeAudioSessionTests(unittest.TestCase):
                     "00:32.000",
                     "--duration",
                     "00:16.000",
+                    "--trim-db",
+                    "-4",
+                    "--gain-db",
+                    "-2",
                     ]
                 ),
                 0,
@@ -318,6 +322,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(summary["clip_count"], 1)
         self.assertEqual(summary["mic_lean_in_count"], 1)
         self.assertEqual(summary["automation_count"], 3)
+        self.assertEqual(session.clips[0].trim_db, -4.0)
+        self.assertEqual(session.clips[0].gain_db, -2.0)
         self.assertEqual(summary["clips_by_deck"]["deck-1"][0]["start_ms"], 4_000)
         lean_in = session.mic_lean_ins[0]
         self.assertEqual([effect.param for effect in lean_in.effects], ["duck_volume", "lowpass_hz"])
@@ -584,6 +590,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
                                 "duration": 60_000,
                                 "tempo_shift_pct": 5,
                                 "pitch_shift_semitones": 1,
+                                "trim_db": -4,
                                 "gain_db": -3,
                             }
                         ],
@@ -624,6 +631,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(double.trim_start_ms, 12_500)
         self.assertEqual(double.tempo_shift_pct, 5)
         self.assertEqual(double.pitch_shift_semitones, 1)
+        self.assertEqual(double.trim_db, -4)
         self.assertEqual(double.gain_db, -3)
         self.assertEqual(len([automation for automation in session.automations if automation.target == "crossfader"]), 32)
         self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-1"], "A")

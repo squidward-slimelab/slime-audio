@@ -71,6 +71,7 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
         "end_ms": start_ms + duration_ms if duration_ms is not None else None,
         "status": clip.get("status"),
         "gain_db": clip.get("gain_db", 0.0),
+        "trim_db": clip.get("trim_db", 0.0),
         "tempo_shift_pct": clip.get("tempo_shift_pct", 0.0),
         "pitch_shift_semitones": clip.get("pitch_shift_semitones", 0),
         "planner_role": clip.get("planner_role"),

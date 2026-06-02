@@ -21,6 +21,42 @@ from slime_audio_session_mixdown import (
 
 
 class SlimeAudioSessionMixdownTests(unittest.TestCase):
+    def test_mixdown_filter_combines_static_trim_and_fader_gain(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-1",
+                                "path": "/music/lead.flac",
+                                "start": 0,
+                                "duration": 10_000,
+                                "trim_db": -3,
+                                "gain_db": -6,
+                            }
+                        ],
+                        "automations": [
+                            {
+                                "target": "lead",
+                                "param": "gain_db",
+                                "points": [{"at": 2_000, "value": -12}, {"at": 4_000, "value": -12}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
+
+        self.assertIn("volume=enable='between(t,2.000,4.000)':volume=0.251189", filters)
+        self.assertIn("volume=0.354813,adelay=0:all=1", filters)
+
     def test_mixdown_filter_includes_lean_in_duck_and_lowpass(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
