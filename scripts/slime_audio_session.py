@@ -1631,7 +1631,10 @@ def add_instant_double_routine(
                 source_side = DEFAULT_FADER_ASSIGNMENTS.get(source_deck, "A")
             target_side = "B" if source_side == "A" else "A"
             on_position = -1.0 if target_side == "A" else 1.0
-            next_payload = set_fader_routing(next_payload, {source_deck: source_side, target_deck: target_side})
+            decks = [str(deck) for deck in next_payload.get("decks", [])] or [f"deck-{index + 1}" for index in range(MAX_DECKS)]
+            brake_assignments = {deck: source_side for deck in decks}
+            brake_assignments[target_deck] = target_side
+            next_payload = set_fader_routing(next_payload, brake_assignments)
             next_payload.setdefault("automations", []).append(
                 {
                     "target": "crossfader",

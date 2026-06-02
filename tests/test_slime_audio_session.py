@@ -1167,9 +1167,10 @@ class SlimeAudioSessionTests(unittest.TestCase):
                 json.dumps(
                     {
                         "version": 1,
-                        "decks": ["deck-1", "deck-2"],
+                        "decks": ["deck-1", "deck-2", "deck-3"],
                         "clips": [
-                            {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000}
+                            {"id": "source", "deck": "deck-2", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000},
+                            {"id": "bed", "deck": "deck-3", "path": track, "start": 0, "trim_start": 20_000, "duration": 40_000},
                         ],
                     }
                 ),
@@ -1205,10 +1206,10 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["duration_ms"], 500)
         self.assertEqual(payload["effects"][0]["target"], "routine-brake-double")
         self.assertEqual(double["gain_db"], -96.0)
-        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "A", "deck-2": "B"})
+        self.assertEqual(payload["fader_routing"]["deck_assignments"], {"deck-1": "A", "deck-2": "B", "deck-3": "B"})
         self.assertEqual(brake_cut["target"], "crossfader")
         self.assertEqual(brake_cut["param"], "position")
-        self.assertEqual(brake_cut["points"], [{"at_ms": 12_000, "value": 1.0}, {"at_ms": 12_500, "value": 1.0}])
+        self.assertEqual(brake_cut["points"], [{"at_ms": 12_000, "value": -1.0}, {"at_ms": 12_500, "value": -1.0}])
         self.assertFalse(any(automation.get("planner_role") == "vinyl-brake-source-duck" for automation in payload["automations"]))
         self.assertFalse(any(automation.get("planner_role") == "instant-double-gate" for automation in payload["automations"]))
         self.assertEqual(payload["slip_events"][0]["source_clip_id"], "source")
