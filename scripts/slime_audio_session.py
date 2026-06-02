@@ -30,6 +30,7 @@ SUPPORTED_INSTANT_DOUBLE_RECIPES = {
     "offbeat-swaps": {"duration": "00:08.000", "gate_beats": "1/2", "gate_offset_beats": "1/2", "cut_source": True},
     "echo-stabs": {"duration": "00:08.000", "gate_beats": "1/2", "cut_source": True, "effect": "echo"},
     "echo-drop": {"duration": "00:08.000", "gate_beats": "1", "cut_source": True, "effect": "reverb"},
+    "loop-roll": {"duration": "00:04.000", "loop_pattern": True, "loop_beats": "1", "cut_source": False},
     "scratch-cuts": {"duration": "00:08.000", "scratch_pattern": True, "cut_source": False},
     "slip-brake": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "slip": True, "effect_track": True},
     "brake-drop": {"duration": "00:04.000", "cut_source": False, "effect": "vinyl_brake", "effect_beats": "1", "timing_brake": True, "effect_track": True},
@@ -1660,6 +1661,17 @@ def add_instant_double_routine(
             lock_before_ms=lock_before_ms,
             force=force,
         )
+    if config.get("loop_pattern"):
+        return add_loop_roll_routine(
+            payload,
+            source_id=source_id,
+            routine_id=routine_id,
+            recipe=recipe,
+            start=start,
+            bpm=bpm,
+            lock_before_ms=lock_before_ms,
+            force=force,
+        )
     double_id = f"{routine_id}-double"
     next_payload = add_instant_double(
         payload,
@@ -1805,6 +1817,98 @@ def add_instant_double_routine(
         if automation.get("target") in {double_id, source_id, "crossfader"} and str(automation.get("planner_role", "")).startswith("instant-double"):
             automation["routine_id"] = routine_id
             automation["routine_recipe"] = recipe
+    parse_session(next_payload)
+    return next_payload
+
+
+def add_loop_roll_routine(
+    payload: dict[str, Any],
+    *,
+    source_id: str,
+    routine_id: str,
+    recipe: str,
+    start: str | None,
+    bpm: float,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    if start is None:
+        raise ValueError(f"{recipe} requires --start")
+    source_payload = next(clip for clip in payload.get("clips", []) if clip.get("id") == source_id)
+    start_ms = parse_ms(start, f"routine {routine_id} start")
+    guard_live_edit(label=f"routine {routine_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+    source_start_ms, source_end_ms = clip_start_end(payload, source_id)
+    if source_end_ms <= start_ms:
+        raise ValueError(f"loop routine {routine_id} must start before source clip ends")
+    beat_ms = 60_000 / bpm
+    config = SUPPORTED_INSTANT_DOUBLE_RECIPES[recipe]
+    loop_ms = max(80, int(round(float(Fraction(str(config.get("loop_beats", "1")))) * beat_ms)))
+    routine_duration_ms = parse_ms(config["duration"], f"{recipe} duration")
+    routine_end_ms = min(source_end_ms, start_ms + routine_duration_ms)
+    if routine_end_ms <= start_ms:
+        raise ValueError(f"loop routine {routine_id} has no duration")
+    source_deck = str(source_payload.get("deck") or "")
+    source_trim_ms = parse_ms(source_payload.get("trim_start_ms", source_payload.get("trim_start", 0)), f"clip {source_id} trim_start")
+    source_trim_at_start = source_trim_ms + int(round((start_ms - source_start_ms) * clip_tempo_factor(source_payload)))
+    next_payload = copy.deepcopy(payload)
+    index = 1
+    clip_start = start_ms
+    while clip_start < routine_end_ms:
+        duration_ms = min(loop_ms, routine_end_ms - clip_start)
+        if duration_ms <= 0:
+            break
+        next_payload.setdefault("clips", []).append(
+            {
+                "id": f"{routine_id}-loop-{index:02d}",
+                "deck": source_deck,
+                "path": source_payload.get("path"),
+                "start_ms": clip_start,
+                "trim_start_ms": source_trim_at_start,
+                "duration_ms": duration_ms,
+                "trim_db": float(source_payload.get("trim_db", 0.0)),
+                "gain_db": float(source_payload.get("gain_db", 0.0)) + 1.0,
+                "tempo_shift_pct": float(source_payload.get("tempo_shift_pct", 0.0)),
+                "pitch_shift_semitones": int(source_payload.get("pitch_shift_semitones", 0)),
+                "fade_in_ms": min(12, duration_ms // 4),
+                "fade_out_ms": min(12, duration_ms // 4),
+                "kind": "effect-track",
+                "attached_deck": source_deck,
+                "effect_parent_clip_id": source_id,
+                "planner_role": "loop-roll",
+                "source_clip_id": source_id,
+                "routine_id": routine_id,
+                "routine_recipe": recipe,
+                "source_technique": "slip-loop-roll",
+            }
+        )
+        index += 1
+        clip_start += loop_ms
+    next_payload.setdefault("automations", []).append(
+        {
+            "target": source_id,
+            "param": "gain_db",
+            "planner_role": "loop-roll-source-duck",
+            "points": [
+                {"at_ms": start_ms, "value": -96.0},
+                {"at_ms": routine_end_ms, "value": -96.0},
+            ],
+            "routine_id": routine_id,
+            "routine_recipe": recipe,
+        }
+    )
+    next_payload.setdefault("slip_events", []).append(
+        {
+            "id": f"{routine_id}-slip",
+            "source_clip_id": source_id,
+            "target_clip_id": f"{routine_id}-loop-01",
+            "start_ms": start_ms,
+            "duration_ms": routine_end_ms - start_ms,
+            "source_start_ms": source_trim_at_start,
+            "source_resume_ms": source_trim_at_start + int(round((routine_end_ms - start_ms) * clip_tempo_factor(source_payload))),
+            "routine_id": routine_id,
+            "routine_recipe": recipe,
+        }
+    )
     parse_session(next_payload)
     return next_payload
 

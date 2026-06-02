@@ -1398,6 +1398,60 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertTrue(all(automation["target"] == "source" for automation in source_ducks))
         self.assertEqual(source_ducks[0]["points"], [{"at_ms": 12_000, "value": -96.0}, {"at_ms": 12_200, "value": -96.0}])
 
+    def test_cli_loop_roll_routine_adds_slip_loop_effect_tracks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            track = "/music/routine.flac"
+            write_analysis_cache(cache, track, bpm=120)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "source", "deck": "deck-1", "path": track, "start": 0, "trim_start": 8_000, "duration": 40_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "instant-double-routine",
+                        str(path),
+                        "--source-id",
+                        "source",
+                        "--id",
+                        "routine-loop",
+                        "--recipe",
+                        "loop-roll",
+                        "--start",
+                        "00:12.000",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            loop_clips = [clip for clip in payload["clips"] if clip.get("routine_id") == "routine-loop"]
+            source_duck = next(automation for automation in payload["automations"] if automation.get("planner_role") == "loop-roll-source-duck")
+
+        self.assertEqual(len(loop_clips), 8)
+        self.assertEqual([clip["start_ms"] for clip in loop_clips], [12_000, 12_500, 13_000, 13_500, 14_000, 14_500, 15_000, 15_500])
+        self.assertEqual([clip["trim_start_ms"] for clip in loop_clips], [20_000] * 8)
+        self.assertTrue(all(clip["kind"] == "effect-track" for clip in loop_clips))
+        self.assertTrue(all(clip["attached_deck"] == "deck-1" for clip in loop_clips))
+        self.assertEqual(source_duck["target"], "source")
+        self.assertEqual(source_duck["points"], [{"at_ms": 12_000, "value": -96.0}, {"at_ms": 16_000, "value": -96.0}])
+        self.assertEqual(payload["slip_events"][0]["routine_recipe"], "loop-roll")
+        self.assertEqual(payload["slip_events"][0]["source_resume_ms"], 24_000)
+
     def test_cli_instant_double_routine_can_start_from_persisted_cue_kind(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

@@ -104,6 +104,7 @@ Use the session tools for effects and proofs. Important primitives:
 - `reverb` renders a wet effect copy, typically through LADSPA `zita-reverb`.
 - `vinyl_brake` renders deterministic speed/pitch slowdown.
 - `scratch-cuts` uses attached effect-track clips on the scratched deck and locally ducks the parent.
+- `loop-roll` repeats a one-beat source slice as attached effect-track clips and records a slip event so the source resumes in time.
 - `slip-brake` is phrase-safe color that resumes where the source would have been.
 - `brake-drop` is a timing-changing brake that resumes late.
 

@@ -78,6 +78,7 @@ Use named routines when they fit:
 - `hook-tease`: cue-backed future hook reveal.
 - `echo-stabs`: gated double with echo tail.
 - `echo-drop`: doubled moment with a larger tail/color.
+- `loop-roll`: phrase-safe one-beat loop repeats attached to the source deck while the source keeps advancing underneath.
 - `scratch-cuts`: sparse source-replacing transform scratches attached to the scratched deck.
 - `slip-brake`: phrase-safe brake color that returns on time.
 - `brake-drop`: timing-changing brake that splits the source and resumes late.
@@ -100,7 +101,7 @@ A DJ set should not be a straight playlist with tiny decorations. Use:
 
 - compatible EDM/techno/house rhythm beds under leads
 - EQ/filter carving to make beds audible without fighting the lead
-- doubles, stabs, fader cuts, echoes, reverb throws, brakes, scratches, and lean-ins
+- doubles, beat jumps, loop rolls, stabs, fader cuts, echoes, reverb throws, brakes, scratches, and lean-ins
 - proof renders to confirm the moves sound intentional
 
 For showpiece requests, long vanilla stretches need a musical reason.
