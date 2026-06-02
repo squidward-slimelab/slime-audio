@@ -19,6 +19,7 @@ For DJ, render, live playback, or music acquisition work, read [skills/slime-aud
 - Never run parallel writes against the same active session JSON.
 - Keep runtime artifacts small.
 - Update `wiki/` in the same change when behavior, commands, file formats, workflows, tests, or operational expectations change.
+- When the operator says something sounds wrong, inspect the session data and engine behavior first. Do not defend the artifact or paper over it with manual ffmpeg.
 
 ## Before Calling Done
 
@@ -38,6 +39,8 @@ find wiki -type f | sort
 ```
 
 Confirm that any newly touched subsystem has a matching wiki update or is already accurately documented.
+
+For DJ/audio work, also confirm the [DJ capabilities](dj-capabilities.md), [DJ session workflow](dj-session-workflow.md), and [testing/QA](testing-and-qa.md) pages still match the code and the skill.
 
 ## Commit Hygiene
 

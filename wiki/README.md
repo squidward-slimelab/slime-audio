@@ -7,6 +7,7 @@ This wiki is the durable documentation home for the SlimeAudio repo. Keep it upd
 - [Repo map](repo-map.md) - top-level directories and what each owns.
 - [DJ session workflow](dj-session-workflow.md) - session JSON, live edits, mix planning, effects, renders, and playback.
 - [Music library and analysis](music-library-and-analysis.md) - mounted shares, SQLite indexing, candidates, TuneBat, and DJ metadata.
+- [DJ capabilities](dj-capabilities.md) - shipped mix controls, routines, effects, and operating semantics.
 - [Dashboard](dashboard.md) - local web dashboard, API contract, archive browsing, and smoke testing.
 - [SlimeAudio Windows app](windows-app.md) - tray receiver, sender CLI, protocol, installer, and release workflow.
 - [Spotify Brain](spotify-brain.md) - Python wrapper around `spogo` for Spotify experiments.

@@ -19,6 +19,8 @@ df -h /mnt/*
 
 Put new DJ material in a clear folder under the selected music root, commonly `_Slime Incoming/<purpose-or-genre>/`.
 
+Do not build sets from temporary download folders. Download or move material into a mounted music share first, then scan it into the library.
+
 ## Library Index
 
 `scripts/slime_music_library.py` indexes mounted shares into `runtime/slime-music-library.sqlite3`, combines duplicates, and picks the strongest server copy. After adding files, rescan before planning a set:
@@ -28,6 +30,14 @@ python3 scripts/slime_music_library.py scan
 ```
 
 Verify tracks are searchable before using them in a mix.
+
+If new music is needed, use the local `sldl-slimelab` wrapper named in local operator notes, choose a mounted share by free space/writeability, download into a clearly labeled folder under `Music`, then rescan:
+
+```bash
+sldl-slimelab "artist title or playlist url" --path "/mnt/SHARE/Music/_Slime Incoming/Purpose or Genre" --write-playlist
+python3 scripts/slime_music_library.py scan
+python3 scripts/slime_music_library.py search "new track or artist"
+```
 
 ## DJ Analysis
 
@@ -45,6 +55,8 @@ python3 scripts/slime_audio_dj.py tension --session runtime/mix-session.json --s
 
 Analysis rows are reused from SQLite when files have not changed. File size or mtime changes force recomputation.
 
+Persistent DJ analysis currently includes beatgrid, phrase-grid, structure, drop candidates, and named cue rows. `runtime/dj-analysis-cache.json` remains a compatibility mirror for older live-edit commands.
+
 ## TuneBat Metadata
 
 TuneBat-backed database facts are the authority for beat/key planning when available. Fill missing local metadata with:
@@ -58,6 +70,15 @@ Filename tags are not authoritative for BPM/key planning.
 ## Candidate Selection
 
 `scripts/slime_audio_candidates.py` keeps live set constraints and ranks database-backed candidate tracks. Use it to avoid stale/recent material and to select tracks that fit the current set instead of repeating the same easy choices.
+
+Use constraints to preserve operator steering across restarts:
+
+```bash
+python3 scripts/slime_audio_candidates.py constraints --init
+python3 scripts/slime_audio_candidates.py set-constraints --vibe "fresh daytime" --direction "brighter but not corny" --energy-target 0.65 --exclude-artist "Artist Name" --reason "operator steering"
+```
+
+Candidate output should carry reasons the DJ can explain. If the list is too narrow after exclusions, change the query/vibe and search again instead of reusing stale tracks.
 
 ## Agent Playbook
 

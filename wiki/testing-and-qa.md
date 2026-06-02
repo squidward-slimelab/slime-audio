@@ -44,6 +44,15 @@ python3 scripts/slime_audio_sets.py render --slug late-night-draft --format mp3 
 
 If a desired DJ move cannot be represented by the current session model, update the tools and [DJ skill](../skills/slime-audio-dj/SKILL.md) first, then render through the real engine.
 
+Proofs should test the product behavior, not just DSP fragments:
+
+- Echo bugs: validate with a simple arpeggio session and session `echo` event. Echo should produce discrete repeats, not recursive wobble.
+- Brake bugs: validate with a simple tone or obvious source and a session `vinyl_brake`/brake routine. The dry source must mute during a replacement brake.
+- Scratch bugs: validate with an attached effect lane on the source deck. Scratches should be source-replacing, sparse, and continuous.
+- Volume cliffs: inspect `gain_db` automation before blaming effect DSP. A misplaced hard duck can sound like a broken effect.
+
+When the operator asks for an audio proof, send the actual MP3/media attachment, not only a local path.
+
 ## Dashboard QA
 
 Update dashboard fixtures when the web API/session view model changes:
@@ -57,6 +66,14 @@ Run:
 PYTHONPATH=src:scripts python3 -m unittest tests.test_slime_audio_web -v
 python3 scripts/slime_audio_web_smoke.py
 ```
+
+The web smoke should exercise current schema features: trim, gain, EQ automation, EDM beds, attached effect lanes, echo/reverb/brake effects, slip events, crossfader routing, and API JSON error responses.
+
+## Lean-In QA
+
+Lean-in TTS failure must fail the render/playback pipeline unless `--skip-tts` was explicitly requested for command validation. Do not silently skip missing or silent TTS in live/review proofs.
+
+Render at least one proof window with real TTS enabled before starting a hosted set, and reject unexplained music ducking without voice.
 
 ## Artifact Cleanup
 

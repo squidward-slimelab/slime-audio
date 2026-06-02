@@ -19,6 +19,8 @@ python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json
 
 Future live edits take effect on the next render window; audio already under the playhead is not interrupted.
 
+Skips exactly on render-window boundaries usually point at the session runner or Snapcast FIFO handoff, not necessarily the Windows receiver. Compare sender/session logs with `session_window_*` history before blaming the tray.
+
 ## Streaming Local Files
 
 Use `scripts/slime_audio_stream.py` for local file streaming:
@@ -32,6 +34,8 @@ python3 scripts/slime_audio_stream.py --target all --stop-listeners
 
 Use `--dry-run` to resolve targets without sending audio.
 
+For persistent Snapcast playback, keep one parent FIFO writer open across render windows and swap only the ffmpeg child input. Closing the FIFO between windows can make snapserver emit EOF and create audible gaps even when receiver clients remain healthy.
+
 ## Timed Drops
 
 `scripts/slime_audio_drops.py` watches Spotify playback and sends timed phrase drops from a JSON plan. It polls `spogo status`, matches the active track, and avoids firing over paused or unknown-progress playback.
@@ -43,6 +47,17 @@ python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
 ## Services
 
 Systemd service files live in `deploy/systemd/`. Keep service docs here updated when units, paths, environment variables, or runtime expectations change.
+
+After code changes to long-running services, verify the service process actually restarted. A correct commit can still look broken if the service is stale.
+
+For the local web dashboard:
+
+```bash
+curl -i http://DASHBOARD_HOST:8765/api/sets
+curl -i http://DASHBOARD_HOST:8765/api/not-a-real-endpoint
+```
+
+Both should return JSON content types for API paths.
 
 ## Disk Hygiene
 
