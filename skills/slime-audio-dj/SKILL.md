@@ -48,6 +48,44 @@ The normal agent sequence is:
 
 Never render a QA sample by directly hand-writing an ffmpeg filter graph that bypasses the SlimeAudio session/edit tools. That can prove DSP in isolation, but it does not prove the product. If the edit API cannot express the move, add or fix the API first, then make the proof through the session renderer.
 
+### Music Acquisition
+
+If the requested mix needs material that is not already in the database, acquire it first, put it on a mounted music share, then load it into the library before using it in a session. Do not build sets from temporary download folders.
+
+Use the local Soulseek/sldl wrapper named in operator notes. Pick a destination from the mounted music roots by checking free space and writeability, not by habit:
+
+```bash
+df -h /mnt/* 2>/dev/null
+find /mnt -maxdepth 3 -type d -name Music 2>/dev/null
+```
+
+Prefer the mounted `Music` root with enough free space for the full download plus render headroom. If several roots are healthy, prefer the one that the music library would route as the strongest source. Put new material under a clearly labeled incoming/library folder inside that `Music` root, grouped by purpose, genre, artist, or project so future scans are readable:
+
+```bash
+mkdir -p "/mnt/SHARE/Music/_Slime Incoming/Purpose or Genre"
+sldl-slimelab "artist title or playlist url" \
+  --path "/mnt/SHARE/Music/_Slime Incoming/Purpose or Genre" \
+  --write-playlist
+```
+
+After downloading, verify files exist, then scan the library and confirm the new tracks are queryable before building the mix:
+
+```bash
+python3 scripts/slime_music_library.py scan
+python3 scripts/slime_music_library.py search "new track or artist"
+python3 scripts/slime_audio_candidates.py candidates "new track or artist" --limit 12
+```
+
+Run TuneBat/local DJ analysis on selected downloads before using them for overlays, beat jumps, doubles, or beds:
+
+```bash
+python3 scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY
+python3 scripts/slime_audio_dj.py structure "/mnt/SHARE/Music/path/to/file.flac"
+python3 scripts/slime_audio_dj.py cues "/mnt/SHARE/Music/path/to/file.flac"
+```
+
+If a network share is nearly full, mounted read-only, or missing, choose another share and document the reason in the runtime notes or set notes. Clean up failed partial downloads before rescanning so the database does not index junk.
+
 ### Mix Knobs
 
 Use these controls deliberately. They are part of the creative surface, not hidden implementation details.
@@ -68,6 +106,7 @@ Use these controls deliberately. They are part of the creative surface, not hidd
 Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
 
 - `mashup-bed`: keep a compatible rhythm track under a lead with gain, low-pass, high-pass, and EQ carving.
+- EDM beds: make heavy use of rhythmically stable electronic/techno/house/club tracks underneath lead songs, vocals, hooks, and pop material. Keep the bed audible enough to change the groove, not so buried that the mix reads as vanilla. Use EQ/filter carving, trim, and fader automation to leave room for the lead.
 - `instant-double`: clone a source onto another deck at the same musical position for trades, cuts, and layered emphasis.
 - `stabs` / `one-beat-trades` / `offbeat-swaps`: quantized double routines for audible DJ-style motion.
 - `hook-tease`: briefly reveal a hook or cue as a future hint.
