@@ -148,6 +148,17 @@ Important lessons to encode in the session:
 
 Session review should fail when EQ/filter use is only token automation: identical static high-pass/low-pass points on every bed, no mid/high decisions, no phrase-timed bass handoffs, no filter rides, or no audible difference in the proof.
 
+### Beatmatching Acceptance Bar
+
+For any session with layered songs, doubles, beds, or long overlaps, beatmatching is a hard requirement. Do not accept a mix because the clips merely start near plausible timestamps.
+
+- Analyze every overlapped source with `slime_audio_dj.py structure` or equivalent cached analysis so BPM, beat offset, and phrase length are known before arranging.
+- Choose a target tempo for the layered section and document it. Apply `tempo_shift_pct` to clips that need rendered correction, staying within the conservative render range unless the operator explicitly wants an obvious tempo effect.
+- Align clip starts to the same beat grid: start overlays on downbeats or phrase boundaries, not arbitrary seconds. Use the detected beat offset and phrase length to compute starts.
+- Verify drift across the overlap. A bed that is aligned on bar 1 but audibly flams by bar 16 is not beatmatched. Shorten the layer, change the target tempo, or choose a better bed.
+- For house/club beds under non-house leads, prefer loopable intro/outro/drop sections with stable drums. If the lead has loose live timing, use shorter phrase windows and re-cue at phrase boundaries instead of forcing a long fake sync.
+- Render a proof window that includes the overlap start, middle, and exit. If the report is clean but kicks/snares drift or phase badly, fail the session and rebuild.
+
 ### Creative Moves
 
 Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
