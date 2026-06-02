@@ -106,7 +106,7 @@ Use these controls deliberately. They are part of the creative surface, not hidd
 Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
 
 - `mashup-bed`: keep a compatible rhythm track under a lead with gain, low-pass, high-pass, and EQ carving.
-- EDM beds: make heavy use of rhythmically stable electronic/techno/house/club tracks underneath lead songs, vocals, hooks, and pop material. Keep the bed audible enough to change the groove, not so buried that the mix reads as vanilla. Use EQ/filter carving, trim, and fader automation to leave room for the lead.
+- EDM beds: make heavy use of rhythmically stable electronic/techno/house/dubstep/dnb/bass music/club tracks underneath lead songs, vocals, hooks, and pop material. Keep the bed audible enough to change the groove, not so buried that the mix reads as vanilla. Use EQ/filter carving, trim, and fader automation to leave room for the lead.
 - `instant-double`: clone a source onto another deck at the same musical position for trades, cuts, and layered emphasis.
 - `stabs` / `one-beat-trades` / `offbeat-swaps`: quantized double routines for audible DJ-style motion.
 - `hook-tease`: briefly reveal a hook or cue as a future hint.
@@ -137,7 +137,7 @@ Do not build a straight playlist and call it a DJ set. The default product is an
 
 For most requested sets, aim for this shape unless the operator explicitly asks for restraint:
 
-- Every lead song should have a compatible EDM/techno/house/club bed for a meaningful section of its runtime. Use `mashup-bed`, `add-clip`, filter/EQ automation, and clip trim/gain to make the bed audible without fighting the lead.
+- Every lead song should have a compatible EDM/techno/house/dubstep/dnb/bass music/club bed for a meaningful section of its runtime. Use `mashup-bed`, `add-clip`, filter/EQ automation, and clip trim/gain to make the bed audible without fighting the lead.
 - Use BPM/key/Camelot analysis to construct overlays, not just to sort songs. Prefer exact or corrected key-fit for layered vocals/hooks and rhythm beds.
 - Add visible edit-api moves throughout the set: filter rides, EQ carving, echo/reverb throws, instant doubles, stabs, offbeat swaps, hook teases, scratches, slip brakes, or brake drops.
 - Add a healthy amount of TTS vocal drops. They should be short, spaced out, and about what is happening in the songs: texture, groove, genre lineage, energy, transition intent, a hook, or why the next layer fits.
@@ -158,7 +158,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
    ```bash
    python3 scripts/slime_music_library.py stats
    python3 scripts/slime_audio_candidates.py candidates "lead vibe" --recent-limit 40 --limit 20
-   python3 scripts/slime_audio_candidates.py candidates "edm techno house bed" --recent-limit 40 --limit 30
+   python3 scripts/slime_audio_candidates.py candidates "edm techno house dubstep dnb bass bed" --recent-limit 40 --limit 30
    ```
 
    If the material is missing, use the Music Acquisition workflow first. Download to a mounted music share, rescan, confirm search/candidates, then analyze.
@@ -277,7 +277,7 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
    Look for:
 
    - lead clips primarily on `deck-2`/`deck-3`
-   - EDM/club bed clips on utility decks across most lead songs
+   - EDM/dubstep/dnb/club bed clips on utility decks across most lead songs
    - nonzero `effects`, `slip_events`, routines, or attached `effect-track` child lanes
    - TTS lean-ins present and placed around musically sensible moments
    - fader/filter/EQ automation that makes the bed/lead relationship clear
@@ -338,7 +338,7 @@ These are part of the normal workflow, not future wishes.
 - Real mix planning: use `slime_audio_mix_planner.py` before playback and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, and master duck automation only when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
 - Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
 - Key-fit policy: when more than one track plays at once, aim for exact key fit whenever the rendered correction is tasteful. For major/minor combinations, use the relative major/minor relationship to decide the correct transpose steps. Prefer keeping a compatible key lane for a run of tracks; only change key deliberately when the source song naturally modulates, the transition is short/non-overlapped, or the move is musically justified and documented.
-- Mashup-first planning: DJ sets should be planned as mashups rather than playlists. Prefer one or more compatible rhythm/EDM clips as filtered beds under another lead track or section. Use `slime_audio_session.py mashup-bed` for gain plus low-pass/high-pass bed shaping, and render review files to verify the bed supports the lead instead of fighting it.
+- Mashup-first planning: DJ sets should be planned as mashups rather than playlists. Prefer one or more compatible rhythm/EDM/dubstep/dnb clips as filtered beds under another lead track or section. Use `slime_audio_session.py mashup-bed` for gain plus low-pass/high-pass bed shaping, and render review files to verify the bed supports the lead instead of fighting it.
 - True instant doubles: use `slime_audio_session.py instant-double-routine` for named recipes, or raw `instant-double` when hand-building. These commands preserve source path, derived musical position, tempo/pitch settings, gain, and label the dashboard event as an instant double/routine. Optional `--gate-beats` adds quantized on/off gain automation for simple routines; pair it with `--cut-source` when the double should trade against the original instead of phasing on top of it. Use `scratch-cuts` or attached effect tracks for generated scratch/brake/audio artifacts instead of treating them as normal music clips.
 - Persisted cues: use `slime_audio_dj.py cues` and routine `--cue-kind` starts so hooks, drops, builds, stabs, clean intros/outros, vocal pockets, and safe loops come from DB-backed phrase/beat quantized facts instead of raw timestamps.
 - DDJ-style fader routing: use `fader_routing.deck_assignments` plus `crossfader.position` automation for side A/B cuts and gradual fades. Mixdown renders crossfader motion into deterministic deck/clip gains, and the dashboard shows fader motion separately from normal gain automation.
