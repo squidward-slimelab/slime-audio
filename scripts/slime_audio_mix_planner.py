@@ -29,6 +29,7 @@ MIN_OVERLAY_SCORE = 0.72
 MAX_RENDER_TEMPO_SHIFT_PCT = 4.0
 MAX_RENDER_PITCH_SHIFT_SEMITONES = 2
 AUTO_ROUTINE_RECIPES = ["echo-stabs", "loop-roll", "scratch-cuts", "one-beat-trades"]
+FILTER_OPEN_HZ = 22_050
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,97 @@ def auto_routine_start_ms(clip: dict[str, Any], analysis: TrackAnalysis | None, 
     return routine_start
 
 
+def add_deck_automation(
+    payload: dict[str, Any],
+    *,
+    target: str,
+    param: str,
+    points: list[dict[str, float | int]],
+    role: str,
+    related_clip_id: str,
+) -> None:
+    payload.setdefault("deck_automations", []).append(
+        {
+            "target": target,
+            "param": param,
+            "planner_role": role,
+            "related_clip_id": related_clip_id,
+            "points": points,
+        }
+    )
+
+
+def add_transition_filter_automation(payload: dict[str, Any], outgoing: dict[str, Any], incoming: dict[str, Any], overlap_ms: int) -> None:
+    if overlap_ms <= 0:
+        return
+    start_ms = int(incoming["start_ms"])
+    end_ms = start_ms + overlap_ms
+    if end_ms <= start_ms:
+        return
+    middle_ms = start_ms + max(1, overlap_ms // 2)
+    outgoing_deck = str(outgoing.get("deck") or "")
+    incoming_deck = str(incoming.get("deck") or "")
+    if not outgoing_deck or not incoming_deck or outgoing_deck == incoming_deck:
+        return
+    add_deck_automation(
+        payload,
+        target=outgoing_deck,
+        param="lowpass_hz",
+        role="mix-planner-filter-carve",
+        related_clip_id=str(incoming.get("id")),
+        points=[
+            {"at_ms": start_ms, "value": FILTER_OPEN_HZ},
+            {"at_ms": middle_ms, "value": 6_500},
+            {"at_ms": end_ms, "value": 2_200},
+        ],
+    )
+    add_deck_automation(
+        payload,
+        target=outgoing_deck,
+        param="eq_low_db",
+        role="mix-planner-eq-carve",
+        related_clip_id=str(incoming.get("id")),
+        points=[
+            {"at_ms": start_ms, "value": 0.0},
+            {"at_ms": end_ms, "value": -4.0},
+        ],
+    )
+    add_deck_automation(
+        payload,
+        target=outgoing_deck,
+        param="eq_high_db",
+        role="mix-planner-eq-carve",
+        related_clip_id=str(incoming.get("id")),
+        points=[
+            {"at_ms": start_ms, "value": 0.0},
+            {"at_ms": end_ms, "value": -2.0},
+        ],
+    )
+    add_deck_automation(
+        payload,
+        target=incoming_deck,
+        param="highpass_hz",
+        role="mix-planner-filter-carve",
+        related_clip_id=str(outgoing.get("id")),
+        points=[
+            {"at_ms": start_ms, "value": 420},
+            {"at_ms": middle_ms, "value": 180},
+            {"at_ms": end_ms, "value": 20},
+        ],
+    )
+    add_deck_automation(
+        payload,
+        target=incoming_deck,
+        param="eq_low_db",
+        role="mix-planner-eq-carve",
+        related_clip_id=str(outgoing.get("id")),
+        points=[
+            {"at_ms": start_ms, "value": -5.0},
+            {"at_ms": end_ms, "value": 0.0},
+        ],
+    )
+
+
 def plan_future_mix(
     payload: dict[str, Any],
     analyses_by_path: dict[str, TrackAnalysis | dict],
@@ -176,6 +268,11 @@ def plan_future_mix(
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
     next_payload = copy.deepcopy(payload)
     normalize_clip_times(next_payload)
+    next_payload["deck_automations"] = [
+        automation
+        for automation in next_payload.get("deck_automations", [])
+        if automation.get("planner_role") not in {"mix-planner-filter-carve", "mix-planner-eq-carve"}
+    ]
     analyses = {path: coerce_analysis(analysis) for path, analysis in analyses_by_path.items()}
     original_clips = sorted(next_payload.get("clips", []), key=lambda clip: (int(clip.get("start_ms", 0)), str(clip.get("deck")), str(clip.get("id"))))
     protected = [clip for clip in original_clips if int(clip.get("start_ms", 0)) < lock_before_ms]
@@ -231,6 +328,9 @@ def plan_future_mix(
             reason = f"cut; {overlay_reason}"
         rebuilt.append(clip)
         planned.append(PlannedMove("blend", str(clip.get("id")), start_ms, reason, str(previous.get("id")) if previous else None))
+        if previous is not None and overlap and plan is not None:
+            actual_overlap_ms = max(0, min(overlap, clip_end(previous) - start_ms))
+            add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms)
 
         if previous is not None and overlap and plan is not None and index % max(1, double_every) == 0:
             cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=150_000, after_ms=8_000)

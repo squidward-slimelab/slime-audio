@@ -100,6 +100,11 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertTrue(any(move.kind == "blend" for move in moves))
         self.assertTrue(any(move.kind == "double" for move in moves))
         self.assertTrue(any(item.get("planner_role") == "mix-planner" for item in planned["automations"]))
+        deck_automations = planned["deck_automations"]
+        self.assertTrue(any(item["param"] == "lowpass_hz" and item["related_clip_id"] == "after" for item in deck_automations))
+        self.assertTrue(any(item["param"] == "highpass_hz" and item["related_clip_id"] == "next" for item in deck_automations))
+        self.assertTrue(any(item["param"] == "eq_low_db" for item in deck_automations))
+        self.assertTrue(all(item.get("planner_role") in {"mix-planner-filter-carve", "mix-planner-eq-carve"} for item in deck_automations))
 
     def test_incompatible_tracks_do_not_overlap_or_double(self):
         payload = {
@@ -127,6 +132,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(clips["bad"]["start_ms"], clips["current"]["start_ms"] + clips["current"]["duration_ms"])
         self.assertEqual(clips["bad"]["fade_in_ms"], 0)
         self.assertFalse(any(clip.get("planner_role") == "drop-double" for clip in planned["clips"]))
+        self.assertEqual(planned.get("deck_automations", []), [])
         self.assertIn("cut", moves[-1].reason)
 
     def test_small_rendered_tempo_and_pitch_shift_can_enable_overlay(self):

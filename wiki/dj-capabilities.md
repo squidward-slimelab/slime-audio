@@ -104,4 +104,6 @@ A DJ set should not be a straight playlist with tiny decorations. Use:
 - doubles, beat jumps, loop rolls, stabs, fader cuts, echoes, reverb throws, brakes, scratches, and lean-ins
 - proof renders to confirm the moves sound intentional
 
+Overlapped blends should have deck-level filter/EQ automation by default. Raw full-band song-on-song overlap is only acceptable for very short stabs or a deliberately tested mashup.
+
 For showpiece requests, long vanilla stretches need a musical reason.
