@@ -11,7 +11,15 @@ const dashboardState = {
   selectedSet: null,
   waveformCache: new Map(),
   lastMixerFrame: 0,
+  lastSetsRefresh: 0,
+  tickInFlight: false,
+  waveformHydrating: false,
 };
+
+const DASHBOARD_POLL_MS = 10000;
+const SETS_POLL_MS = 30000;
+const WAVEFORM_FETCH_LIMIT = 2;
+const MIXER_FRAME_MS = 300;
 
 const els = {
   nowTitle: document.querySelector("#now-title"),
@@ -589,22 +597,28 @@ function renderEventWaveform(container, event) {
 }
 
 async function hydrateWaveforms() {
+  if (dashboardState.waveformHydrating) return;
   const placeholders = [...els.timeline.querySelectorAll(".timeline-waveform[data-waveform-key]")];
   const missing = placeholders.filter((item) => !dashboardState.waveformCache.has(item.dataset.waveformKey));
-  await Promise.all(
-    missing.slice(0, 12).map(async (item) => {
-      try {
-        const response = await fetch(item.dataset.waveformUrl, { cache: "no-store" });
-        const payload = await readJsonResponse(response);
-        dashboardState.waveformCache.set(item.dataset.waveformKey, payload);
-      } catch (error) {
-        dashboardState.waveformCache.set(item.dataset.waveformKey, { available: false, peaks: [], error: error.message });
-      }
-    })
-  );
-  for (const item of placeholders) {
-    const payload = dashboardState.waveformCache.get(item.dataset.waveformKey);
-    if (waveformAvailable(payload) && !item.firstChild) appendWaveformDrawing(item, payload);
+  dashboardState.waveformHydrating = true;
+  try {
+    await Promise.all(
+      missing.slice(0, WAVEFORM_FETCH_LIMIT).map(async (item) => {
+        try {
+          const response = await fetch(item.dataset.waveformUrl, { cache: "no-store" });
+          const payload = await readJsonResponse(response);
+          dashboardState.waveformCache.set(item.dataset.waveformKey, payload);
+        } catch (error) {
+          dashboardState.waveformCache.set(item.dataset.waveformKey, { available: false, peaks: [], error: error.message });
+        }
+      })
+    );
+    for (const item of placeholders) {
+      const payload = dashboardState.waveformCache.get(item.dataset.waveformKey);
+      if (waveformAvailable(payload) && !item.firstChild) appendWaveformDrawing(item, payload);
+    }
+  } finally {
+    dashboardState.waveformHydrating = false;
   }
 }
 
@@ -1077,21 +1091,29 @@ async function postJson(url, body = {}) {
 function animatePlayhead() {
   updatePlayhead();
   const now = performance.now();
-  if (dashboardState.dashboard && now - dashboardState.lastMixerFrame > 180) {
+  if (dashboardState.dashboard && now - dashboardState.lastMixerFrame > MIXER_FRAME_MS) {
     dashboardState.lastMixerFrame = now;
     renderMixer();
   }
   requestAnimationFrame(animatePlayhead);
 }
 
-async function tick() {
+async function tick(options = {}) {
+  if (dashboardState.tickInFlight) return;
+  dashboardState.tickInFlight = true;
   try {
-    await refreshSets();
+    const now = Date.now();
+    if (options.forceSets || !dashboardState.lastSetsRefresh || now - dashboardState.lastSetsRefresh > SETS_POLL_MS) {
+      await refreshSets();
+      dashboardState.lastSetsRefresh = now;
+    }
     await refresh();
   } catch (error) {
     els.nowTitle.textContent = "dashboard error";
     els.nowMeta.textContent = error.message;
     els.transportStatus.textContent = "error";
+  } finally {
+    dashboardState.tickInFlight = false;
   }
 }
 
@@ -1116,7 +1138,7 @@ els.archiveList.addEventListener("click", async (event) => {
     } else if (action === "render") {
       await postJson("/api/sets/render", { slug, format: "mp3", mp3_bitrate: "128k", keep: 3, max_total_mb: 256 });
     }
-    await tick();
+    await tick({ forceSets: true });
   } catch (error) {
     els.archiveStatus.textContent = error.message;
   }
@@ -1125,7 +1147,7 @@ els.archiveList.addEventListener("click", async (event) => {
 els.viewActiveSet.addEventListener("click", async () => {
   dashboardState.selectedSet = null;
   dashboardState.signature = "";
-  await tick();
+  await tick({ forceSets: true });
 });
 
 els.newSet.addEventListener("click", async () => {
@@ -1134,13 +1156,13 @@ els.newSet.addEventListener("click", async () => {
   await postJson("/api/sets/new", { title });
   dashboardState.selectedSet = null;
   dashboardState.signature = "";
-  await tick();
+  await tick({ forceSets: true });
 });
 
 els.saveLoadedSet.addEventListener("click", async () => {
   try {
     await postJson("/api/sets/save-loaded", {});
-    await tick();
+    await tick({ forceSets: true });
   } catch (error) {
     els.archiveStatus.textContent = error.message;
   }
@@ -1152,6 +1174,6 @@ els.followPlayhead.addEventListener("change", (event) => {
 });
 els.timelineScroll.addEventListener("scroll", syncAxis, { passive: true });
 
-tick();
-setInterval(tick, 3000);
+tick({ forceSets: true });
+setInterval(tick, DASHBOARD_POLL_MS);
 requestAnimationFrame(animatePlayhead);

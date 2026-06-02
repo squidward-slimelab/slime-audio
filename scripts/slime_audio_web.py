@@ -863,7 +863,10 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
-        print(f"{self.address_string()} - {format % args}")
+        message = format % args
+        if " /api/state " in message or " /api/sets" in message or " /api/waveform" in message:
+            return
+        print(f"{self.address_string()} - {message}")
 
 
 class SlimeAudioServer(ThreadingHTTPServer):
