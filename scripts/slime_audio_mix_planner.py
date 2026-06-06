@@ -16,6 +16,7 @@ from slime_audio_dj import (
     analyze_with_cache,
     coerce_analysis,
     coerce_structure,
+    load_analysis_from_db,
     select_cue,
     transition_plan,
 )
@@ -57,6 +58,33 @@ def normalize_clip_times(payload: dict[str, Any]) -> None:
             clip["duration_ms"] = clip.pop("duration")
         if "trim_start" in clip and "trim_start_ms" not in clip:
             clip["trim_start_ms"] = clip.pop("trim_start")
+
+
+def analyzed_remaining_ms(clip: dict[str, Any], analysis: TrackAnalysis | None) -> int | None:
+    if analysis is None or analysis.duration_s <= 0:
+        return None
+    trim_start_ms = int(clip.get("trim_start_ms") or 0)
+    remaining_ms = int(round(analysis.duration_s * 1000)) - trim_start_ms
+    return max(1, remaining_ms)
+
+
+def sync_placeholder_duration_to_analysis(clip: dict[str, Any], analysis: TrackAnalysis | None) -> bool:
+    remaining_ms = analyzed_remaining_ms(clip, analysis)
+    if remaining_ms is None:
+        return False
+    current_ms = int(clip.get("duration_ms") or 0)
+    if current_ms <= 0:
+        return False
+    if abs(current_ms - remaining_ms) <= 5_000:
+        return False
+    # Base imported/live playlists often use a generic 240s placeholder.
+    # Correct those from analysis so songs neither fade/cut too early nor
+    # leave dead scheduled tails. Intentional short clips, doubles, beds, and
+    # cue gestures keep their authored durations.
+    if current_ms != 240_000 or clip.get("planner_role"):
+        return False
+    clip["duration_ms"] = remaining_ms
+    return True
 
 
 def phrase_ms(analysis: TrackAnalysis | None) -> int:
@@ -254,6 +282,43 @@ def add_transition_filter_automation(payload: dict[str, Any], outgoing: dict[str
     )
 
 
+def transition_plan_record(
+    *,
+    outgoing: dict[str, Any] | None,
+    incoming: dict[str, Any],
+    incoming_analysis: TrackAnalysis | None,
+    plan: Any | None,
+    overlap_ms: int,
+    reason: str,
+) -> dict[str, Any]:
+    decision = "blend" if plan is not None and overlap_ms > 0 else "cut"
+    record: dict[str, Any] = {
+        "id": f"transition-{incoming.get('id')}",
+        "planner_role": "mix-planner-transition-plan",
+        "from_clip_id": str(outgoing.get("id")) if outgoing else None,
+        "to_clip_id": str(incoming.get("id")),
+        "start_ms": int(incoming.get("start_ms") or 0),
+        "end_ms": int(incoming.get("start_ms") or 0) + max(0, int(overlap_ms)),
+        "overlap_ms": max(0, int(overlap_ms)),
+        "decision": decision,
+        "reason": reason,
+        "tempo_shift_pct": float(incoming.get("tempo_shift_pct") or 0.0),
+        "pitch_shift_semitones": int(incoming.get("pitch_shift_semitones") or 0),
+        "analysis_path": str(incoming_analysis.path) if incoming_analysis is not None else str(incoming.get("path") or ""),
+    }
+    if plan is not None:
+        record.update(
+            {
+                "score": plan.score,
+                "bpm_ratio": plan.bpm_ratio,
+                "key_relation": plan.key_relation,
+                "phrase_wait_beats": plan.phrase_wait_beats,
+                "notes": plan.notes,
+            }
+        )
+    return record
+
+
 def plan_future_mix(
     payload: dict[str, Any],
     analyses_by_path: dict[str, TrackAnalysis | dict],
@@ -265,6 +330,7 @@ def plan_future_mix(
     routine_db_path: Path = DEFAULT_LIBRARY_DB,
     max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
     max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
+    plan_until_ms: int | None = None,
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
     next_payload = copy.deepcopy(payload)
     normalize_clip_times(next_payload)
@@ -273,10 +339,31 @@ def plan_future_mix(
         for automation in next_payload.get("deck_automations", [])
         if automation.get("planner_role") not in {"mix-planner-filter-carve", "mix-planner-eq-carve"}
     ]
+    next_payload["transition_plans"] = [
+        plan
+        for plan in next_payload.get("transition_plans", [])
+        if not (
+            plan.get("planner_role") == "mix-planner-transition-plan"
+            and int(plan.get("start_ms") or 0) >= lock_before_ms
+            and (plan_until_ms is None or int(plan.get("start_ms") or 0) < plan_until_ms)
+        )
+    ]
     analyses = {path: coerce_analysis(analysis) for path, analysis in analyses_by_path.items()}
     original_clips = sorted(next_payload.get("clips", []), key=lambda clip: (int(clip.get("start_ms", 0)), str(clip.get("deck")), str(clip.get("id"))))
-    protected = [clip for clip in original_clips if int(clip.get("start_ms", 0)) < lock_before_ms]
-    future = [clip for clip in original_clips if int(clip.get("start_ms", 0)) >= lock_before_ms and clip.get("kind") != "planner-double"]
+    locked = [clip for clip in original_clips if int(clip.get("start_ms", 0)) < lock_before_ms]
+    after_horizon = [
+        clip
+        for clip in original_clips
+        if plan_until_ms is not None and int(clip.get("start_ms", 0)) >= plan_until_ms
+    ]
+    protected = [*locked, *after_horizon]
+    future = [
+        clip
+        for clip in original_clips
+        if int(clip.get("start_ms", 0)) >= lock_before_ms
+        and (plan_until_ms is None or int(clip.get("start_ms", 0)) < plan_until_ms)
+        and clip.get("kind") != "planner-double"
+    ]
     if not future:
         return next_payload, []
     declared_decks = [str(deck) for deck in next_payload.get("decks", [])]
@@ -286,7 +373,7 @@ def plan_future_mix(
 
     planned: list[PlannedMove] = []
     rebuilt: list[dict[str, Any]] = protected[:]
-    previous = max(protected, key=clip_end, default=None)
+    previous = max(locked, key=clip_end, default=None)
     cursor = max(lock_before_ms, clip_end(previous) - 12_000 if previous else lock_before_ms)
     previous_analysis = analyses.get(str(previous.get("path"))) if previous else None
     previous_deck = str(previous.get("deck")) if previous else ""
@@ -296,6 +383,8 @@ def plan_future_mix(
         if duration_ms <= 0:
             continue
         analysis = analyses.get(str(clip.get("path")))
+        if sync_placeholder_duration_to_analysis(clip, analysis):
+            duration_ms = int(clip.get("duration_ms") or 0)
         shorter = min(duration_ms, int(previous.get("duration_ms") or duration_ms) if previous else duration_ms)
         overlap = transition_overlap_ms(
             previous_analysis,
@@ -310,8 +399,11 @@ def plan_future_mix(
 
         clip["start_ms"] = start_ms
         clip["deck"] = deck
-        clip["fade_in_ms"] = min(overlap, 24_000) if overlap else 0
-        clip["fade_out_ms"] = min(overlap, 24_000) if overlap else 0
+        # Keep clip fades as click/entry protection. Long automatic fade-outs
+        # make the lead record audibly sag even when no replacement move is
+        # obvious; transition shape belongs in EQ/filter/crossfader automation.
+        clip["fade_in_ms"] = min(overlap, 8_000) if overlap else 0
+        clip["fade_out_ms"] = 0
         plan, overlay_reason = safe_overlay_plan(
             previous_analysis,
             analysis,
@@ -328,6 +420,16 @@ def plan_future_mix(
             reason = f"cut; {overlay_reason}"
         rebuilt.append(clip)
         planned.append(PlannedMove("blend", str(clip.get("id")), start_ms, reason, str(previous.get("id")) if previous else None))
+        next_payload.setdefault("transition_plans", []).append(
+            transition_plan_record(
+                outgoing=previous,
+                incoming=clip,
+                incoming_analysis=analysis,
+                plan=plan,
+                overlap_ms=overlap if previous is not None else 0,
+                reason=reason,
+            )
+        )
         if previous is not None and overlap and plan is not None:
             actual_overlap_ms = max(0, min(overlap, clip_end(previous) - start_ms))
             add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms)
@@ -372,20 +474,6 @@ def plan_future_mix(
         for automation in next_payload.get("automations", [])
         if not (automation.get("target") == "master" and automation.get("param") == "duck_volume" and automation.get("planner_role") == "mix-planner")
     ]
-    for move in planned:
-        if move.kind != "blend" or not move.reason.startswith("overlap "):
-            continue
-        next_payload.setdefault("automations", []).append(
-            {
-                "target": "master",
-                "param": "duck_volume",
-                "planner_role": "mix-planner",
-                "points": [
-                    {"at": max(0, move.start_ms - 500), "value": 0.94},
-                    {"at": move.start_ms + 8_000, "value": 1.0},
-                ],
-            }
-        )
     if routine_cache_path is not None and routine_every > 0:
         routine_targets = [
             (clip, analyses.get(str(clip.get("path"))))
@@ -433,17 +521,30 @@ def analyze_session_paths(
     lock_before_ms: int,
     db_path: Path = DEFAULT_LIBRARY_DB,
     tunebat_analyzer: Path = DEFAULT_TUNEBAT_LOCAL_ANALYZER,
+    analyze_missing: bool = True,
+    plan_until_ms: int | None = None,
 ) -> dict[str, TrackAnalysis]:
     paths = []
     seen = set()
     for clip in payload.get("clips", []):
-        if int(clip.get("start_ms", clip.get("start", 0))) + int(clip.get("duration_ms", clip.get("duration", 0)) or 0) < lock_before_ms:
+        start_ms = int(clip.get("start_ms", clip.get("start", 0)))
+        duration_ms = int(clip.get("duration_ms", clip.get("duration", 0)) or 0)
+        if start_ms + duration_ms < lock_before_ms:
+            continue
+        if plan_until_ms is not None and start_ms >= plan_until_ms:
             continue
         path = str(clip.get("path") or "")
         if path and path not in seen:
             seen.add(path)
             paths.append(Path(path))
-    return {analysis.path: analysis for analysis in analyze_with_cache(paths, cache, backend, sample_rate, db_path, tunebat_analyzer)}
+    if analyze_missing:
+        return {analysis.path: analysis for analysis in analyze_with_cache(paths, cache, backend, sample_rate, db_path, tunebat_analyzer)}
+    analyses: dict[str, TrackAnalysis] = {}
+    for path in paths:
+        stored = load_analysis_from_db(db_path, path)
+        if stored is not None:
+            analyses[stored.path] = stored
+    return analyses
 
 
 def state_lock_ms(state_path: Path | None, lead_ms: int) -> int:
@@ -473,12 +574,15 @@ def main() -> int:
     parser.add_argument("--no-routines", action="store_true")
     parser.add_argument("--max-render-tempo-shift-pct", type=float, default=MAX_RENDER_TEMPO_SHIFT_PCT)
     parser.add_argument("--max-render-pitch-shift-semitones", type=int, default=MAX_RENDER_PITCH_SHIFT_SEMITONES)
+    parser.add_argument("--cached-analysis-only", action="store_true", help="Use only cached DB analysis; missing tracks become explicit cut decisions.")
+    parser.add_argument("--horizon-ms", type=int, help="Only rewrite future clips that begin before lock-before plus this horizon.")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
     payload = load_payload(args.session)
     normalize_clip_times(payload)
     lock_before_ms = args.lock_before_ms if args.lock_before_ms is not None else state_lock_ms(args.state, args.lock_lead_ms)
+    plan_until_ms = lock_before_ms + args.horizon_ms if args.horizon_ms is not None else None
     analyses = analyze_session_paths(
         payload,
         args.cache,
@@ -487,6 +591,8 @@ def main() -> int:
         lock_before_ms=lock_before_ms,
         db_path=args.db,
         tunebat_analyzer=args.tunebat_analyzer,
+        analyze_missing=not args.cached_analysis_only,
+        plan_until_ms=plan_until_ms,
     )
     planned_payload, moves = plan_future_mix(
         payload,
@@ -498,8 +604,16 @@ def main() -> int:
         routine_db_path=args.db,
         max_tempo_shift_pct=args.max_render_tempo_shift_pct,
         max_pitch_shift_semitones=args.max_render_pitch_shift_semitones,
+        plan_until_ms=plan_until_ms,
     )
-    result = {"lock_before_ms": lock_before_ms, "moves": [asdict(move) for move in moves], "clip_count": len(planned_payload.get("clips", []))}
+    result = {
+        "lock_before_ms": lock_before_ms,
+        "moves": [asdict(move) for move in moves],
+        "clip_count": len(planned_payload.get("clips", [])),
+        "transition_plan_count": len(planned_payload.get("transition_plans", [])),
+        "cached_analysis_only": args.cached_analysis_only,
+        "plan_until_ms": plan_until_ms,
+    }
     if args.apply:
         write_payload(args.session, planned_payload)
         result["applied"] = True

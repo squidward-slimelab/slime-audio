@@ -547,6 +547,134 @@ def probe_duration_ms(path: str) -> int:
     return int(round(duration_seconds * 1000))
 
 
+def audit_session_durations(session: MixSession, *, threshold_ms: int = 5_000, from_ms: int | None = None) -> dict[str, Any]:
+    mismatches: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    checked = 0
+    for clip in sorted(session.clips, key=lambda item: (item.start_ms, item.id)):
+        if from_ms is not None and clip.end_ms is not None and clip.end_ms < from_ms:
+            continue
+        if clip.duration_ms is None:
+            failures.append({"id": clip.id, "path": clip.path, "error": "missing scheduled duration"})
+            continue
+        if not clip.path:
+            failures.append({"id": clip.id, "path": clip.path, "error": "missing path"})
+            continue
+        try:
+            actual_ms = probe_duration_ms(clip.path)
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+            failures.append({"id": clip.id, "path": clip.path, "error": str(exc)})
+            continue
+        checked += 1
+        remaining_ms = max(1, actual_ms - clip.trim_start_ms)
+        diff_ms = clip.duration_ms - remaining_ms
+        if abs(diff_ms) > threshold_ms:
+            mismatches.append(
+                {
+                    "id": clip.id,
+                    "path": clip.path,
+                    "start_ms": clip.start_ms,
+                    "scheduled_duration_ms": clip.duration_ms,
+                    "actual_remaining_ms": remaining_ms,
+                    "difference_ms": diff_ms,
+                    "kind": "scheduled_too_long" if diff_ms > 0 else "scheduled_too_short",
+                }
+            )
+    return {
+        "checked": checked,
+        "from_ms": from_ms,
+        "threshold_ms": threshold_ms,
+        "mismatch_count": len(mismatches),
+        "failure_count": len(failures),
+        "mismatches": mismatches,
+        "failures": failures,
+    }
+
+
+def _automation_times_values(automation: Automation) -> tuple[list[int], list[float]]:
+    times = [point.at_ms for point in automation.points]
+    values: list[float] = []
+    for point in automation.points:
+        try:
+            values.append(float(point.value))
+        except (TypeError, ValueError):
+            continue
+    return times, values
+
+
+def audit_hidden_volume_sag(
+    session: MixSession,
+    *,
+    from_ms: int | None = None,
+    max_fade_out_ms: int = 2_000,
+    min_gain_db: float = -6.0,
+    min_duck_volume: float = 0.98,
+) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    for clip in sorted(session.clips, key=lambda item: (item.start_ms, item.id)):
+        if from_ms is not None and clip.end_ms is not None and clip.end_ms < from_ms:
+            continue
+        if clip.fade_out_ms > max_fade_out_ms:
+            findings.append(
+                {
+                    "kind": "long_clip_fade_out",
+                    "id": clip.id,
+                    "path": clip.path,
+                    "start_ms": clip.start_ms,
+                    "fade_out_ms": clip.fade_out_ms,
+                    "threshold_ms": max_fade_out_ms,
+                }
+            )
+        for automation in clip.automations:
+            times, values = _automation_times_values(automation)
+            if from_ms is not None and times and max(times) < from_ms:
+                continue
+            if automation.param == "gain_db" and values and min(values) < min_gain_db:
+                findings.append(
+                    {
+                        "kind": "clip_gain_dip",
+                        "id": clip.id,
+                        "param": automation.param,
+                        "min_value": min(values),
+                        "threshold_db": min_gain_db,
+                    }
+                )
+    for automation in [*session.automations, *session.deck_automations]:
+        times, values = _automation_times_values(automation)
+        if from_ms is not None and times and max(times) < from_ms:
+            continue
+        if automation.param == "duck_volume" and values and min(values) < min_duck_volume:
+            findings.append(
+                {
+                    "kind": "master_or_session_duck",
+                    "target": automation.target,
+                    "param": automation.param,
+                    "min_value": min(values),
+                    "threshold": min_duck_volume,
+                }
+            )
+        if automation.param == "gain_db" and values and min(values) < min_gain_db:
+            findings.append(
+                {
+                    "kind": "gain_dip",
+                    "target": automation.target,
+                    "param": automation.param,
+                    "min_value": min(values),
+                    "threshold_db": min_gain_db,
+                }
+            )
+    return {
+        "from_ms": from_ms,
+        "finding_count": len(findings),
+        "findings": findings,
+        "thresholds": {
+            "max_fade_out_ms": max_fade_out_ms,
+            "min_gain_db": min_gain_db,
+            "min_duck_volume": min_duck_volume,
+        },
+    }
+
+
 def playlist_to_session_payload(
     tracks: list[str],
     *,
@@ -2084,6 +2212,18 @@ def main() -> int:
     validate_parser.add_argument("session", type=Path)
     summary_parser = sub.add_parser("summary")
     summary_parser.add_argument("session", type=Path)
+    audit_durations_parser = sub.add_parser("audit-durations")
+    audit_durations_parser.add_argument("session", type=Path)
+    audit_durations_parser.add_argument("--threshold-ms", type=int, default=5_000)
+    audit_durations_parser.add_argument("--from-ms")
+    audit_durations_parser.add_argument("--fail", action=argparse.BooleanOptionalAction, default=True)
+    audit_volume_parser = sub.add_parser("audit-volume")
+    audit_volume_parser.add_argument("session", type=Path)
+    audit_volume_parser.add_argument("--from-ms")
+    audit_volume_parser.add_argument("--max-fade-out-ms", type=int, default=2_000)
+    audit_volume_parser.add_argument("--min-gain-db", type=float, default=-6.0)
+    audit_volume_parser.add_argument("--min-duck-volume", type=float, default=0.98)
+    audit_volume_parser.add_argument("--fail", action=argparse.BooleanOptionalAction, default=True)
     sub.add_parser("template")
 
     import_playlist_parser = sub.add_parser("import-playlist")
@@ -2238,6 +2378,30 @@ def main() -> int:
 
     if args.command == "template":
         print(json.dumps(template_session(), indent=2, sort_keys=True))
+        return 0
+
+    if args.command == "audit-durations":
+        report = audit_session_durations(
+            load_session(args.session),
+            threshold_ms=args.threshold_ms,
+            from_ms=parse_ms(args.from_ms, "audit start") if args.from_ms else None,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        if args.fail and (report["mismatch_count"] or report["failure_count"]):
+            return 1
+        return 0
+
+    if args.command == "audit-volume":
+        report = audit_hidden_volume_sag(
+            load_session(args.session),
+            from_ms=parse_ms(args.from_ms, "audit start") if args.from_ms else None,
+            max_fade_out_ms=args.max_fade_out_ms,
+            min_gain_db=args.min_gain_db,
+            min_duck_volume=args.min_duck_volume,
+        )
+        print(json.dumps(report, indent=2, sort_keys=True))
+        if args.fail and report["finding_count"]:
+            return 1
         return 0
 
     if args.command == "import-playlist":

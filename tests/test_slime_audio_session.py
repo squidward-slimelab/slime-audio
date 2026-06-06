@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+import wave
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import AUDACITY_REVERB_PRESETS, load_session, parse_ms, playhead_ms_from_state, session_summary
+from slime_audio_session import AUDACITY_REVERB_PRESETS, audit_hidden_volume_sag, audit_session_durations, load_session, parse_ms, playhead_ms_from_state, session_summary
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
@@ -23,6 +24,15 @@ def run_cli(argv: list[str]) -> int:
             return session_main()
     finally:
         sys.argv = original_argv
+
+
+def write_silent_wav(path: Path, duration_ms: int, *, sample_rate: int = 8000) -> None:
+    frame_count = max(1, int(sample_rate * duration_ms / 1000))
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(b"\x00\x00" * frame_count)
 
 
 def write_analysis_cache(path: Path, track: str, *, bpm: float, beat_offset_ms: int = 0, confidence: float = 0.9) -> None:
@@ -87,6 +97,180 @@ class SlimeAudioSessionTests(unittest.TestCase):
     def test_parse_ms_accepts_clock_strings(self):
         self.assertEqual(parse_ms("01:02.500", "time"), 62_500)
         self.assertEqual(parse_ms("1:02:03", "time"), 3_723_000)
+
+    def test_audit_session_durations_reports_placeholder_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            track = temp_path / "short.wav"
+            write_silent_wav(track, 1_000)
+            session_path = temp_path / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "placeholder",
+                                "deck": "deck-1",
+                                "path": str(track),
+                                "start_ms": 0,
+                                "duration_ms": 240_000,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = audit_session_durations(load_session(session_path), threshold_ms=500)
+
+            self.assertEqual(report["checked"], 1)
+            self.assertEqual(report["mismatch_count"], 1)
+            self.assertEqual(report["mismatches"][0]["kind"], "scheduled_too_long")
+            self.assertNotEqual(run_cli(["slime_audio_session.py", "audit-durations", str(session_path), "--threshold-ms", "500"]), 0)
+
+    def test_audit_session_durations_passes_real_duration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            track = temp_path / "one-second.wav"
+            write_silent_wav(track, 1_000)
+            session_path = temp_path / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "real-duration",
+                                "deck": "deck-1",
+                                "path": str(track),
+                                "start_ms": 0,
+                                "duration_ms": 1_000,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(run_cli(["slime_audio_session.py", "audit-durations", str(session_path), "--threshold-ms", "500"]), 0)
+
+    def test_audit_session_durations_can_ignore_past_clips(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            track = temp_path / "short.wav"
+            write_silent_wav(track, 1_000)
+            session_path = temp_path / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "past-placeholder",
+                                "deck": "deck-1",
+                                "path": str(track),
+                                "start_ms": 0,
+                                "duration_ms": 240_000,
+                            },
+                            {
+                                "id": "future-real",
+                                "deck": "deck-1",
+                                "path": str(track),
+                                "start_ms": 300_000,
+                                "duration_ms": 1_000,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "audit-durations",
+                        str(session_path),
+                        "--threshold-ms",
+                        "500",
+                        "--from-ms",
+                        "250000",
+                    ]
+                ),
+                0,
+            )
+
+    def test_audit_volume_reports_hidden_sag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "saggy",
+                                "deck": "deck-1",
+                                "path": "/music/a.flac",
+                                "start_ms": 10_000,
+                                "duration_ms": 60_000,
+                                "fade_out_ms": 8_000,
+                            }
+                        ],
+                        "deck_automations": [
+                            {
+                                "target": "deck-1",
+                                "param": "gain_db",
+                                "points": [{"at_ms": 20_000, "value": 0}, {"at_ms": 24_000, "value": -18}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = audit_hidden_volume_sag(load_session(session_path), from_ms=0)
+
+            self.assertEqual(report["finding_count"], 2)
+            self.assertNotEqual(run_cli(["slime_audio_session.py", "audit-volume", str(session_path), "--from-ms", "0"]), 0)
+
+    def test_audit_volume_can_ignore_past_sag(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "past-sag",
+                                "deck": "deck-1",
+                                "path": "/music/a.flac",
+                                "start_ms": 0,
+                                "duration_ms": 10_000,
+                                "fade_out_ms": 8_000,
+                            },
+                            {
+                                "id": "future-clean",
+                                "deck": "deck-1",
+                                "path": "/music/b.flac",
+                                "start_ms": 30_000,
+                                "duration_ms": 10_000,
+                                "fade_out_ms": 0,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(run_cli(["slime_audio_session.py", "audit-volume", str(session_path), "--from-ms", "20000"]), 0)
 
     def test_cli_add_clip_accepts_rendered_tempo_and_pitch_correction(self):
         with tempfile.TemporaryDirectory() as temp_dir:

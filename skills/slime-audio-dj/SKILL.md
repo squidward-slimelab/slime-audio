@@ -1,6 +1,6 @@
 ---
 name: slime-audio-dj
-description: Use when planning, extending, or hosting SlimeAudio DJ sets from a local music library, including database-backed song selection, transition planning, live queue updates, and tasteful spoken commentary.
+description: Use when planning, extending, or hosting SlimeAudio DJ sets from a local music library, including immediate starter playback, database-backed song selection, transition planning, live queue updates, and tasteful spoken commentary.
 ---
 
 # SlimeAudio DJ
@@ -21,6 +21,7 @@ Keep this skill generic and portable.
 - `scripts/slime_music_library.py`: scan and query the SQLite music database.
 - `scripts/slime_audio_candidates.py`: choose database-backed future tracks from preferred files, recent playback history, and live operator constraints.
 - `scripts/slime_audio_dj.py`: analyze BPM, beat offset, key, Camelot code, energy, and transition compatibility.
+- `scripts/slime_audio_analysis_preflight.py`: verify selected tracks already have local analyzer/DB coverage before live planning.
 - `scripts/slime_audio_mix_planner.py`: rewrite future mix-session clips into phrase-aware blends, drop doubles, and planned transition automation.
 - `scripts/slime_audio_stream.py`: discover receivers and stream local files.
 - `scripts/slime_audio_session.py`: maintain planned mix-session clips, mic lean-ins, and automation.
@@ -31,13 +32,29 @@ Keep this skill generic and portable.
 - `scripts/slime_audio_session_runner.py`: run the native timestamped session in live-editable render windows.
 - `scripts/slime_audio_tts.py` and `scripts/slime_audio_drops.py`: legacy Spotify/drop helpers; do not use them for Snapcast-era mix lean-ins unless explicitly working on legacy Spotify playback.
 
+## Immediacy First
+
+When the operator asks for a live mix, get pleasant audio playing quickly, then build the larger set while that first track buys time. Do not spend 10-15 minutes silently planning before the room hears anything unless the operator explicitly asked for offline prep or a proof render.
+
+Default live sequence:
+
+1. Pick one suitable starter track from the library or active request context and start playback fast through the normal live path for the target room(s).
+2. Add or schedule a short smooth voiceover intro on `deck-5` once audio is moving. Keep it relaxed, clear, and brief; it should introduce the vibe without blocking the music.
+3. While the starter plays, build the real native session behind it: select follow-up tracks, analyze structure/cues, plan transitions, and add mix flavor on future windows.
+4. Use the live edit API to extend the active set before the starter runs out. Prefer clean simple continuity over waiting for a perfect complex plan.
+5. After continuity is secured, keep improving the upcoming material with beds, doubles, EQ/filter rides, effects, and commentary.
+
+The quality bar still matters, but latency is part of quality. A decent first song now plus a better mix in progress is usually better than a polished idea arriving after the room has been waiting in silence.
+
+Frontend state is part of the live-start contract. When starting real playback from a named session/state, use the native session runner so it writes the active dashboard pointer, or explicitly pass `--active-pointer runtime/active-set.json`. The dashboard should show the same session the room is hearing. Use `--no-active-pointer` only for isolated proofs or debugging where the frontend should not follow playback.
+
 ## Edit API Mix-Building Playbook
 
 When the operator asks for a mix, proof, routine, or revision, build it through the session edit API. The job is not to make an external audio collage; the job is to express the mix as editable session data so the runner, dashboard, review renders, and future agents all see the same thing.
 
 Use `scripts/slime_audio_live_edit.py` for active or future edits against the live session. Use `scripts/slime_audio_session.py` for offline setup against a named session file. These commands expose the same mix primitives: `add-clip`, `move`, `remove`, `automate`, `add-effect`, `slip`, `fader-routing`, `crossfader`, `beat-jump`, `instant-double`, `instant-double-routine`, and `mashup-bed`.
 
-The normal agent sequence is:
+The normal offline/proof sequence is:
 
 1. Select database-backed tracks, analyze cues/structure, and create or activate a named set.
 2. Build the base timeline with `import-playlist` or `add-clip` on the middle decks.
@@ -153,11 +170,39 @@ Session review should fail when EQ/filter use is only token automation: identica
 For any session with layered songs, doubles, beds, or long overlaps, beatmatching is a hard requirement. Do not accept a mix because the clips merely start near plausible timestamps.
 
 - Analyze every overlapped source with `slime_audio_dj.py structure` or equivalent cached analysis so BPM, beat offset, and phrase length are known before arranging.
-- Choose a target tempo for the layered section and document it. Apply `tempo_shift_pct` to clips that need rendered correction, staying within the conservative render range unless the operator explicitly wants an obvious tempo effect.
-- Align clip starts to the same beat grid: start overlays on downbeats or phrase boundaries, not arbitrary seconds. Use the detected beat offset and phrase length to compute starts.
+- Use the local music analyzer and SlimeAudio database as the source of truth for BPM, beat offset, phrase length, key, and duration. Do not use web BPM/key lookups for live planning except as a clearly labeled last-ditch note when the local analyzer/database is unavailable; never write those web values into the mix as authoritative analysis.
+- Choose a target tempo and compatible key for each planned overlap before placing the incoming clip. Apply `tempo_shift_pct` and, when needed, conservative `pitch_shift_semitones` so the tracks do not rhythmically or harmonically clash.
+- Treat tempo and pitch correction as part of the default mix plan, not as an emergency rescue. A future overlap without an explicit tempo/key decision is unfinished unless it is intentionally a short hard cut.
+- Align clip starts to the same beat grid: start overlays on downbeats or phrase boundaries, not arbitrary seconds. Use the detected beat offset and phrase length to compute starts after tempo correction.
 - Verify drift across the overlap. A bed that is aligned on bar 1 but audibly flams by bar 16 is not beatmatched. Shorten the layer, change the target tempo, or choose a better bed.
 - For house/club beds under non-house leads, prefer loopable intro/outro/drop sections with stable drums. If the lead has loose live timing, use shorter phrase windows and re-cue at phrase boundaries instead of forcing a long fake sync.
 - Render a proof window that includes the overlap start, middle, and exit. If the report is clean but kicks/snares drift or phase badly, fail the session and rebuild.
+
+Default transition build order:
+
+1. Analyze both tracks for BPM, beat offset, phrase length, key, Camelot code, and confidence.
+2. Pick the outgoing or section target tempo. If neither track can reach it with a tasteful `tempo_shift_pct`, do not make a long blend.
+3. Pick the key relationship. Use small `pitch_shift_semitones` only when it improves harmonic fit without making the source sound wrong.
+4. Place the incoming cue on a phrase/downbeat after applying the tempo decision.
+5. Add fader, EQ, filter, and optional effect automation to make the handoff intentional.
+6. Validate with a proof render or, for live sets, confirm the future prerender window includes the corrected clip data.
+
+Do not use hidden volume sag as a generic transition. Avoid long automatic `fade_out_ms`, unexplained `gain_db` dips, and low-level master `duck_volume` automation unless there is a clear replacement event such as a vocal lean-in, scratch, brake, or deliberate crossfader cut. If the main record fades down for a few seconds and the listener cannot hear why, the transition is wrong.
+
+### Live Beatmatch Rescue
+
+When a live set is already playing and the operator says drops or blends sound off, fix the future timeline immediately instead of waiting for a full planner pass.
+
+- Do not edit the current or already-prerendered window. Read the runner state and choose a future lock at or after the next safe render boundary, usually `window_end_ms` plus a small safety margin.
+- Work on a small upcoming block first, about 8-10 clips. The priority is to make the next few transitions better before they are rendered.
+- Use cached BPM/key/structure analysis when it exists. If deeper analysis is too slow for live timing, stop it and apply a conservative rescue rather than missing the transition.
+- Before a live repair pass, run `slime_audio_analysis_preflight.py` on the future block. If coverage is missing, use `slime_audio_mix_planner.py --cached-analysis-only --horizon-ms ...` so missing analysis becomes explicit cuts instead of slow decoding or fake blends.
+- Shorten unsafe generic overlaps. For mismatched pop/rock/acoustic material, a 5-8 second handoff with click-safe incoming fades and EQ/filter movement usually beats a long fake beatmatch.
+- Re-add or adjust future clips through `slime_audio_live_edit.py` with `fade_in_ms`, `fade_out_ms`, and conservative `tempo_shift_pct` only where analysis is credible. Do not invent tempo shifts for unknown tracks.
+- Do not add deck gain dips just to make a transition visible. Prefer EQ/filter/crossfader moves; use gain automation only for a clearly audible, intentional cut or replacement move.
+- If an effect write fails validation, skip it or retarget correctly; never force invalid session data during live playback.
+- Move the downstream tail to preserve the new overlap spacing so the later timeline does not collapse.
+- Validate the session and watch `runtime/play-history.jsonl` for the next `session_window_prerendered` event that includes the patched clips. The rescue is not done until the runner has accepted the future window.
 
 ### Creative Moves
 
@@ -408,7 +453,8 @@ These are part of the normal workflow, not future wishes.
 - Live future editing: use timestamped `mix-session.json` clips, not legacy queue slots. The session runner reloads future render windows and records `session_window_*` history. Future edits should use `slime_audio_live_edit.py` so the active state lock and edit history are applied consistently.
 - Live commentary planning: use `slime_audio_commentary_planner.py` to add future mic lean-ins independently of music selection. It writes normal session lean-ins with ducking/low-pass automation and appends `commentary_planned` logs tying text to timing, track context, and reason.
 - Tension-aware vocal windows: use `slime_audio_dj.py structure` for per-track intro/breakdown/build/drop/outro and `slime_audio_dj.py tension` for absolute mix-session drop windows with grounded `reason` and `talking_points`. Feed `runtime/tension-windows.json` to the commentary planner when available.
-- Real mix planning: use `slime_audio_mix_planner.py` for the first playable buffer and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, explicit clip fades, deck filter/EQ automation, master duck automation, and automatic real routines such as echo stabs, loop rolls, scratch cuts, and one-beat trades when the transition clears tempo/key compatibility gates. Unsafe transitions should remain hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
+- Real mix planning: use `slime_audio_mix_planner.py` for the first playable buffer and during future edits. It consumes cached track analysis, transition scores, beat-grid phrase lengths, detected build/drop windows, and live runner locks. It may create overlapped blends, drop-double clips, click-safe fade-ins, deck filter/EQ automation, persisted `transition_plans`, and automatic real routines such as echo stabs, loop rolls, scratch cuts, and one-beat trades when the transition clears tempo/key compatibility gates. Unsafe transitions should remain explicit hard cuts; do not rely on renderer auto-crossfades or layer incompatible tracks just because two clips can overlap on the timeline.
+- Live-safe planner mode: use `--cached-analysis-only --horizon-ms 1200000` or another bounded horizon during active playback when analysis may be missing. This mode must not decode new tracks on the critical path; it should rewrite only future clips inside the horizon and preserve transition plans outside that block.
 - Rendered tempo/key correction: mixdown honors clip `tempo_shift_pct` and `pitch_shift_semitones`, so the planner may allow small beat/key-matched overlays when the renderer limits permit it. Keep correction ranges conservative, document the reason in planner move output, and set `--max-render-pitch-shift-semitones 0` for routines where key preservation matters more than harmonic correction.
 - Key-fit policy: when more than one track plays at once, aim for exact key fit whenever the rendered correction is tasteful. For major/minor combinations, use the relative major/minor relationship to decide the correct transpose steps. Prefer keeping a compatible key lane for a run of tracks; only change key deliberately when the source song naturally modulates, the transition is short/non-overlapped, or the move is musically justified and documented.
 - Mashup-first planning: DJ sets should be planned as mashups rather than playlists. Prefer one or more compatible rhythm/EDM/dubstep/dnb clips as filtered beds under another lead track or section. Use `slime_audio_session.py mashup-bed` for gain plus low-pass/high-pass bed shaping, and render review files to verify the bed supports the lead instead of fighting it.

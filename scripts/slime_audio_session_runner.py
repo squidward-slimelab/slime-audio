@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import signal
@@ -27,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
+DEFAULT_ACTIVE_SET = REPO_ROOT / "runtime" / "active-set.json"
 _active_stream: subprocess.Popen[bytes] | None = None
 
 
@@ -70,7 +72,7 @@ class PersistentSnapcast:
         self.args = args
         self.targets: list[Receiver] = []
         self.server: subprocess.Popen[bytes] | None = None
-        self.fifo_handle: object | None = None
+        self.fifo_keepalive_fd: int | None = None
 
     def start(self) -> None:
         try:
@@ -109,7 +111,7 @@ class PersistentSnapcast:
         time.sleep(0.8)
         if self.server.poll() is not None:
             raise subprocess.CalledProcessError(self.server.returncode or 1, "snapserver")
-        self.fifo_handle = self.args.snapcast_fifo.open("wb")
+        self.fifo_keepalive_fd = open_fifo_writer_when_reader_ready(self.args.snapcast_fifo)
         discovered = discover_receivers(47777, self.args.discover_timeout_ms)
         self.targets = resolve_targets(self.args.target, discovered, 47777, include_muted=False)
         if not self.targets:
@@ -117,8 +119,8 @@ class PersistentSnapcast:
         send_control(self.targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
 
     def start_window(self, audio_path: Path) -> RunningWindow:
-        if self.fifo_handle is None:
-            raise RuntimeError("snapcast fifo writer is not open")
+        if self.fifo_keepalive_fd is None:
+            raise RuntimeError("snapcast fifo keepalive is not open")
         command = [
             require_ffmpeg(),
             "-hide_banner",
@@ -138,15 +140,14 @@ class PersistentSnapcast:
             str(self.args.sample_rate),
             "pipe:1",
         ]
-        process = subprocess.Popen(command, stdout=self.fifo_handle, start_new_session=True)
-        return RunningWindow(process)
+        fifo_handle = self.args.snapcast_fifo.open("wb")
+        process = subprocess.Popen(command, stdout=fifo_handle, start_new_session=True)
+        return RunningWindow(process, handle=fifo_handle)
 
     def stop(self) -> None:
-        if self.fifo_handle is not None:
-            close = getattr(self.fifo_handle, "close", None)
-            if close is not None:
-                close()
-            self.fifo_handle = None
+        if self.fifo_keepalive_fd is not None:
+            os.close(self.fifo_keepalive_fd)
+            self.fifo_keepalive_fd = None
         if self.server is not None and self.server.poll() is None:
             self.server.terminate()
             try:
@@ -176,6 +177,57 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def slugify(value: str) -> str:
+    clean = "".join(character.lower() if character.isalnum() else "-" for character in value)
+    return "-".join(part for part in clean.split("-") if part) or "set"
+
+
+def display_title_from_session(path: Path) -> str:
+    return " ".join(part for part in path.stem.replace("_", "-").split("-") if part).title() or "Live Mix"
+
+
+def write_active_dashboard_pointer(args: argparse.Namespace) -> None:
+    if args.dry_run or args.no_active_pointer:
+        return
+    session_path = args.session.resolve()
+    state_path = args.state.resolve()
+    pointer = load_json(args.active_pointer)
+    previous_session = pointer.get("active_session_path")
+    same_session = previous_session and Path(str(previous_session)).expanduser().resolve() == session_path
+    title = args.dashboard_title or (str(pointer.get("title")) if same_session and pointer.get("title") else display_title_from_session(args.session))
+    slug = args.dashboard_slug or (str(pointer.get("slug")) if same_session and pointer.get("slug") else slugify(args.session.stem))
+    write_json(
+        args.active_pointer,
+        {
+            "slug": slug,
+            "title": title,
+            "archive_session_path": str(pointer.get("archive_session_path") or session_path),
+            "active_session_path": str(session_path),
+            "active_state_path": str(state_path),
+            "loaded_at": iso_now(),
+        },
+    )
+
+
+def open_fifo_writer_when_reader_ready(path: Path, timeout_s: float = 5.0) -> int:
+    deadline = time.monotonic() + timeout_s
+    bootstrap_fd: int | None = None
+    while True:
+        try:
+            writer_fd = os.open(str(path), os.O_WRONLY | os.O_NONBLOCK)
+            if bootstrap_fd is not None:
+                os.close(bootstrap_fd)
+            return writer_fd
+        except OSError as exc:
+            if exc.errno != errno.ENXIO or time.monotonic() >= deadline:
+                if bootstrap_fd is not None:
+                    os.close(bootstrap_fd)
+                raise
+            if bootstrap_fd is None:
+                bootstrap_fd = os.open(str(path), os.O_RDWR | os.O_NONBLOCK)
+            time.sleep(0.05)
 
 
 def append_history(path: Path | None, event: dict[str, Any]) -> None:
@@ -423,6 +475,7 @@ def run_session(args: argparse.Namespace) -> int:
     if args.reset_state or not has_playhead:
         state = {"mix_started_at": iso_now()}
         write_json(args.state, state)
+    write_active_dashboard_pointer(args)
 
     prepared: PreparedWindow | None = None
     snapcast = (
@@ -563,6 +616,10 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--session", type=Path, default=DEFAULT_SESSION)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
+    parser.add_argument("--active-pointer", type=Path, default=DEFAULT_ACTIVE_SET)
+    parser.add_argument("--dashboard-title")
+    parser.add_argument("--dashboard-slug")
+    parser.add_argument("--no-active-pointer", action="store_true")
     parser.add_argument("--target", action="append", default=None)
     parser.add_argument("--mode", choices=["snapcast", "multicast"], default="snapcast")
     parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="ffmpeg")

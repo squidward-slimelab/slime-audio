@@ -416,6 +416,34 @@ class SlimeAudioWebTests(unittest.TestCase):
 
         self.assertEqual(web.choose_state_path(explicit), explicit)
 
+    def test_choose_paths_prefer_active_pointer(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "fresh-state.json"
+            session_path = temp / "fresh-session.json"
+            active_pointer = temp / "active-set.json"
+            default_state = temp / "mix-session-state.json"
+            default_session = temp / "mix-session.json"
+            state_path.write_text("{}", encoding="utf-8")
+            session_path.write_text("{}", encoding="utf-8")
+            default_state.write_text("{}", encoding="utf-8")
+            default_session.write_text("{}", encoding="utf-8")
+            active_pointer.write_text(
+                json.dumps(
+                    {
+                        "active_state_path": str(state_path),
+                        "active_session_path": str(session_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(web, "DEFAULT_ACTIVE_SET", active_pointer):
+                with patch.object(web, "DEFAULT_STATE", default_state):
+                    with patch.object(web, "DEFAULT_SESSION", default_session):
+                        self.assertEqual(web.choose_state_path(None), state_path)
+                        self.assertEqual(web.choose_session_path(None), session_path)
+
     def test_choose_session_path_returns_none_for_missing_explicit_path(self):
         self.assertIsNone(web.choose_session_path(Path("/tmp/missing-session.json")))
 

@@ -555,9 +555,27 @@ def load_archived_dashboard_state(slug: str) -> dict[str, Any]:
     return payload
 
 
+def resolve_pointer_path(value: object) -> Path | None:
+    if not value:
+        return None
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path
+
+
+def active_pointer_path(key: str) -> Path | None:
+    pointer = load_json(DEFAULT_ACTIVE_SET, {})
+    path = resolve_pointer_path(pointer.get(key))
+    return path if path is not None and path.exists() else None
+
+
 def choose_state_path(explicit: Path | None) -> Path:
     if explicit is not None:
         return explicit
+    active_state = active_pointer_path("active_state_path")
+    if active_state is not None:
+        return active_state
     if DEFAULT_STATE.exists():
         return DEFAULT_STATE
     candidates = sorted(
@@ -571,6 +589,9 @@ def choose_state_path(explicit: Path | None) -> Path:
 def choose_session_path(explicit: Path | None) -> Path | None:
     if explicit is not None:
         return explicit if explicit.exists() else None
+    active_session = active_pointer_path("active_session_path")
+    if active_session is not None:
+        return active_session
     if DEFAULT_SESSION.exists():
         return DEFAULT_SESSION
     candidates = sorted(

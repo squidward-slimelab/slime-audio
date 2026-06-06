@@ -12,6 +12,8 @@ SlimeAudio DJ sets are planned session data. Do not treat them as a flat playlis
 
 Treat `runtime/mix-session.json` and `runtime/mix-session-state.json` as active pointers, not as the identity of the set. Durable set identity lives under `runtime/sets/<slug>/`; load or replay those sets intentionally with `scripts/slime_audio_sets.py`.
 
+The live runner updates `runtime/active-set.json` when real playback starts, including when a named `--session` or `--state` path is used. The web dashboard chooses that active pointer before defaulting to `runtime/mix-session*`, so starting audio and updating the frontend are the same operation. If you intentionally run an isolated proof or dry run, use `--dry-run` or `--no-active-pointer`.
+
 ## Session Model
 
 Sessions use absolute mix timestamps. Clips can overlap across up to four decks, and each clip can have trim, gain, EQ, filters, tempo/pitch changes, reverse/playback-rate flags, fades, and routine metadata.
@@ -81,18 +83,19 @@ Analyze tracks first, then apply planner edits:
 
 ```bash
 python3 scripts/slime_audio_dj.py plan --playlist runtime/late-friday-fresh-playlist.txt
+python3 scripts/slime_audio_analysis_preflight.py --session runtime/mix-session.json --from-ms 0 --horizon-ms 1800000
 python3 scripts/slime_audio_mix_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --max-render-tempo-shift-pct 4 --max-render-pitch-shift-semitones 2 --apply
 ```
 
-The planner can add phrase-aware overlays, drop doubles, rendered tempo/key correction, and transition automation. A straight playlist import is not a finished DJ set.
+The planner can add phrase-aware overlays, drop doubles, rendered tempo/key correction, transition automation, and top-level `transition_plans` explaining each adjacent-pair decision. For live repair passes, add `--cached-analysis-only --horizon-ms 1200000` so the planner only uses existing DB analysis and touches a bounded future block. A straight playlist import is not a finished DJ set.
 
 For overlapping transitions, key fit is the default target. Use TuneBat-backed DB metadata where available, prefer exact same-key or relative major/minor compatible overlaps, and use conservative rendered correction only when it makes the overlap better. Unsafe transitions should remain hard cuts.
 
 ## Live Buffer
 
-For live DJ requests, start playback from the native session runner once there is a credible first buffer instead of waiting to perfect the whole set. Aim for about 5 minutes (`300_000 ms`) of scheduled future music before starting, then keep roughly that much ahead of the playhead with live edits.
+For live DJ requests, prioritize immediacy: get one suitable starter track playing through the native session runner, then build the larger set while the room already has music. Do not wait for a polished multi-track plan before starting unless the operator explicitly asked for offline prep.
 
-Use indexed/analyzed library tracks first so audio starts quickly. Downloads, elaborate commentary, full proof renders, and deeper crate work can happen while playback continues. If the remaining timeline is near or below the 5 minute buffer, extending the queue is higher priority than polishing already-safe future material.
+After the starter is moving, add a brief smooth voiceover intro on `deck-5` when appropriate, then extend the active session with follow-up tracks, transitions, and flavor before the starter runs out. Downloads, elaborate commentary, full proof renders, and deeper crate work can happen while playback continues. If the remaining timeline is near the end of the current starter or buffer, extending continuity is higher priority than polishing already-safe future material.
 
 ## Mixing Pass
 
