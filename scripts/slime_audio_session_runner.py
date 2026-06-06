@@ -425,7 +425,11 @@ def run_session(args: argparse.Namespace) -> int:
         write_json(args.state, state)
 
     prepared: PreparedWindow | None = None
-    snapcast = PersistentSnapcast(args) if args.mode == "snapcast" and not args.dry_run else None
+    snapcast = (
+        PersistentSnapcast(args)
+        if args.mode == "snapcast" and args.persistent_snapcast and not args.dry_run
+        else None
+    )
     if snapcast is not None:
         snapcast.start()
     try:
@@ -572,6 +576,12 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--snapcast-port", type=int, default=1704)
     parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
     parser.add_argument("--snapcast-fifo", type=Path, default=Path("/tmp/slime-audio-snapfifo"))
+    parser.add_argument(
+        "--persistent-snapcast",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep one snapserver/fifo open across windows. Disable to use the one-shot stream path per window.",
+    )
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--no-auto-listeners", action="store_true")

@@ -92,6 +92,56 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertEqual(command[command.index("--mode") + 1], "snapcast")
         self.assertEqual(command[command.index("--delay-ms") + 1], "0")
 
+    def test_no_persistent_snapcast_uses_window_stream_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            state_path = temp / "state.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(session_path),
+                    "--state",
+                    str(state_path),
+                    "--target",
+                    "SPONGEBOT",
+                    "--mode",
+                    "snapcast",
+                    "--no-persistent-snapcast",
+                    "--window-ms",
+                    "10000",
+                ]
+            )
+
+            with patch.object(runner, "render_window", return_value=["render"]):
+                with patch.object(runner, "start_stream") as start_stream:
+                    process = Mock()
+                    process.poll.side_effect = [0]
+                    process.wait.return_value = 0
+                    start_stream.return_value = process
+                    with patch.object(runner, "append_history"):
+                        with patch.object(runner, "session_duration_ms", return_value=10_000):
+                            with patch.object(runner, "playhead_ms_from_state", side_effect=[0, 10_000]):
+                                self.assertEqual(runner.run_session(args), 0)
+
+        start_stream.assert_called_once()
+        command = start_stream.call_args.args[0]
+        self.assertIn("slime_audio_stream.py", command[1])
+        self.assertIn("--mode", command)
+        self.assertEqual(command[command.index("--mode") + 1], "snapcast")
+
     def test_prepare_window_uses_configured_temp_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

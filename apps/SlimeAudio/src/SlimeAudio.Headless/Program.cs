@@ -81,18 +81,26 @@ internal sealed record HeadlessOptions(
 internal sealed class HeadlessReceiver : IDisposable
 {
     private const int ReceiveBufferBytes = 4 * 1024 * 1024;
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    private const int MaxReconnectAttempts = 12;
     private readonly HeadlessOptions _options;
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentDictionary<Guid, HeadlessPlaybackSession> _sessions = new();
+    private readonly object _multicastLock = new();
     private UdpClient? _udp;
     private Process? _multicastProcess;
+    private CancellationTokenSource? _reconnectStop;
     private string? _multicastStatus;
+    private string? _multicastServerHost;
     private long _decodeFailures;
     private long _droppedMutedPackets;
     private long _lastPacketUnixTimeMs;
     private long _receivedBytes;
     private long _receivedPackets;
     private long _resetCount;
+    private int _multicastExitCount;
+    private int _reconnectAttempts;
+    private bool _multicastStopRequested;
     private bool _streamMuted;
 
     public event EventHandler<string>? StatusChanged;
@@ -204,17 +212,30 @@ internal sealed class HeadlessReceiver : IDisposable
         session.TryStart();
     }
 
-    private void StartMulticast(string serverHost)
+    private void StartMulticast(string serverHost) => StartMulticast(serverHost, resetReconnectAttempts: true);
+
+    private void StartMulticast(string serverHost, bool resetReconnectAttempts)
     {
         if (_options.NoAudio)
         {
             SetMulticastStatus("snapclient ignored because audio sink is disabled");
             return;
         }
-        if (_multicastProcess is { HasExited: false })
+        lock (_multicastLock)
         {
-            SetMulticastStatus("snapclient already running");
-            return;
+            _multicastServerHost = serverHost;
+            _multicastStopRequested = false;
+            if (resetReconnectAttempts)
+            {
+                _reconnectAttempts = 0;
+            }
+            CancelReconnect();
+            if (_multicastProcess is { HasExited: false })
+            {
+                SetMulticastStatus("snapclient already running");
+                return;
+            }
+            DisposeExitedMulticastProcess();
         }
 
         var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
@@ -225,17 +246,37 @@ internal sealed class HeadlessReceiver : IDisposable
             UseShellExecute = false,
             CreateNoWindow = true,
         });
+        if (_multicastProcess is not null)
+        {
+            var process = _multicastProcess;
+            process.EnableRaisingEvents = true;
+            process.Exited += (_, _) =>
+            {
+                Interlocked.Increment(ref _multicastExitCount);
+                var stopRequested = _multicastStopRequested;
+                SetMulticastStatus(stopRequested ? $"snapclient stopped: {process.ExitCode}" : $"snapclient disconnected: {process.ExitCode}");
+                if (!stopRequested)
+                {
+                    ScheduleReconnect(serverHost, process.ExitCode);
+                }
+            };
+        }
         SetMulticastStatus($"snapclient connected to {serverHost}:{_options.SnapcastPort}");
     }
 
     private void StopMulticast()
     {
-        if (_multicastProcess is { HasExited: false })
+        lock (_multicastLock)
         {
-            _multicastProcess.Kill(entireProcessTree: true);
+            _multicastStopRequested = true;
+            CancelReconnect();
+            if (_multicastProcess is { HasExited: false })
+            {
+                _multicastProcess.Kill(entireProcessTree: true);
+            }
+            _multicastProcess?.Dispose();
+            _multicastProcess = null;
         }
-        _multicastProcess?.Dispose();
-        _multicastProcess = null;
         SetMulticastStatus("snapclient stopped");
     }
 
@@ -243,6 +284,83 @@ internal sealed class HeadlessReceiver : IDisposable
     {
         _multicastStatus = status;
         StatusChanged?.Invoke(this, status);
+    }
+
+    private void ScheduleReconnect(string serverHost, int exitCode)
+    {
+        lock (_multicastLock)
+        {
+            if (_multicastStopRequested || _reconnectStop is not null)
+            {
+                return;
+            }
+            _reconnectStop = new CancellationTokenSource();
+        }
+
+        var tokenSource = _reconnectStop;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (tokenSource is not null && !tokenSource.IsCancellationRequested)
+                {
+                    var attempt = Interlocked.Increment(ref _reconnectAttempts);
+                    if (attempt > MaxReconnectAttempts)
+                    {
+                        SetMulticastStatus($"snapclient disconnected after {attempt - 1} reconnect attempts");
+                        return;
+                    }
+
+                    SetMulticastStatus($"snapclient reconnecting ({attempt}/{MaxReconnectAttempts}) after exit {exitCode}");
+                    await Task.Delay(ReconnectDelay, tokenSource.Token).ConfigureAwait(false);
+                    if (tokenSource.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    lock (_multicastLock)
+                    {
+                        if (_multicastStopRequested || _multicastProcess is { HasExited: false })
+                        {
+                            return;
+                        }
+                        DisposeExitedMulticastProcess();
+                    }
+
+                    StartMulticast(serverHost, resetReconnectAttempts: false);
+                    return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                lock (_multicastLock)
+                {
+                    if (ReferenceEquals(_reconnectStop, tokenSource))
+                    {
+                        _reconnectStop.Dispose();
+                        _reconnectStop = null;
+                    }
+                }
+            }
+        });
+    }
+
+    private void CancelReconnect()
+    {
+        _reconnectStop?.Cancel();
+        _reconnectStop = null;
+    }
+
+    private void DisposeExitedMulticastProcess()
+    {
+        if (_multicastProcess is { HasExited: true })
+        {
+            _multicastProcess.Dispose();
+            _multicastProcess = null;
+        }
     }
 
     private void ResetAudio()
@@ -298,7 +416,10 @@ internal sealed class HeadlessReceiver : IDisposable
             latestSessionId,
             _multicastProcess is { HasExited: false },
             _multicastProcess is { HasExited: true } ? _multicastProcess.ExitCode : null,
-            _multicastStatus);
+            _multicastStatus,
+            _multicastServerHost,
+            _multicastProcess is { HasExited: false } ? _multicastProcess.Id : null,
+            SharedStreamExitCount: Volatile.Read(ref _multicastExitCount));
     }
 
     public void Dispose()

@@ -282,16 +282,22 @@ internal sealed class TrayContext : ApplicationContext
 
 internal sealed class MulticastReceiver : IDisposable
 {
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    private const int MaxReconnectAttempts = 12;
     private readonly MulticastOptions _options;
+    private readonly object _processLock = new();
     private Process? _process;
     private string? _lastStatus;
     private string? _serverHost;
     private readonly ClientSettings _settings = ClientSettings.Load();
     private IReadOnlyList<SnapclientOutputDevice>? _outputDevices;
+    private CancellationTokenSource? _reconnectStop;
     private long _startedUnixTimeMs;
     private long _lastExitUnixTimeMs;
     private long _lastStderrUnixTimeMs;
     private int _exitCount;
+    private int _reconnectAttempts;
+    private bool _stopRequested;
     private int _volumePercent = 100;
 
     public event EventHandler<string>? StatusChanged;
@@ -313,13 +319,26 @@ internal sealed class MulticastReceiver : IDisposable
         _options = options;
     }
 
-    public void Start(string serverHost)
+    public void Start(string serverHost) => Start(serverHost, resetReconnectAttempts: true);
+
+    private void Start(string serverHost, bool resetReconnectAttempts)
     {
-        _serverHost = serverHost;
-        if (_process is { HasExited: false })
+        lock (_processLock)
         {
-            SetStatus($"Snapclient already connected to {serverHost}:{_options.SnapcastPort}");
-            return;
+            _serverHost = serverHost;
+            _stopRequested = false;
+            if (resetReconnectAttempts)
+            {
+                _reconnectAttempts = 0;
+            }
+            CancelReconnect();
+            if (_process is { HasExited: false })
+            {
+                SetStatus($"Snapclient already connected to {serverHost}:{_options.SnapcastPort}");
+                return;
+            }
+
+            DisposeExitedProcess();
         }
 
         try
@@ -368,8 +387,13 @@ internal sealed class MulticastReceiver : IDisposable
                 {
                     Interlocked.Increment(ref _exitCount);
                     Interlocked.Exchange(ref _lastExitUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                    ClientTelemetry.Write("snapclient_exited", new { processId = process.Id, process.ExitCode, serverHost });
-                    SetStatus($"Shared stream exited: {process.ExitCode}");
+                    var stopRequested = _stopRequested;
+                    ClientTelemetry.Write("snapclient_exited", new { processId = process.Id, process.ExitCode, serverHost, stopRequested });
+                    SetStatus(stopRequested ? $"Shared stream stopped: {process.ExitCode}" : $"Shared stream disconnected: {process.ExitCode}");
+                    if (!stopRequested)
+                    {
+                        ScheduleReconnect(serverHost, process.ExitCode);
+                    }
                 };
                 process.BeginErrorReadLine();
             }
@@ -403,13 +427,18 @@ internal sealed class MulticastReceiver : IDisposable
 
     public void Stop()
     {
-        if (_process is { HasExited: false })
+        lock (_processLock)
         {
-            ClientTelemetry.Write("snapclient_stopping", new { processId = _process.Id, serverHost = _serverHost });
-            _process.Kill(entireProcessTree: true);
+            _stopRequested = true;
+            CancelReconnect();
+            if (_process is { HasExited: false })
+            {
+                ClientTelemetry.Write("snapclient_stopping", new { processId = _process.Id, serverHost = _serverHost });
+                _process.Kill(entireProcessTree: true);
+            }
+            _process?.Dispose();
+            _process = null;
         }
-        _process?.Dispose();
-        _process = null;
         SetStatus("Snapclient stopped");
     }
 
@@ -499,6 +528,87 @@ internal sealed class MulticastReceiver : IDisposable
         _lastStatus = status;
         ClientTelemetry.Write("status", new { status = TrimStatus(status), snapclientRunning = IsRunning, snapclientExitCode = ExitCode });
         StatusChanged?.Invoke(this, status);
+    }
+
+    private void ScheduleReconnect(string serverHost, int exitCode)
+    {
+        lock (_processLock)
+        {
+            if (_stopRequested || _reconnectStop is not null)
+            {
+                return;
+            }
+
+            _reconnectStop = new CancellationTokenSource();
+        }
+
+        var tokenSource = _reconnectStop;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (tokenSource is not null && !tokenSource.IsCancellationRequested)
+                {
+                    var attempt = Interlocked.Increment(ref _reconnectAttempts);
+                    if (attempt > MaxReconnectAttempts)
+                    {
+                        ClientTelemetry.Write("snapclient_reconnect_abandoned", new { serverHost, exitCode, attempts = attempt - 1 });
+                        SetStatus($"Shared stream disconnected after {attempt - 1} reconnect attempts");
+                        return;
+                    }
+
+                    ClientTelemetry.Write("snapclient_reconnect_waiting", new { serverHost, exitCode, attempt });
+                    SetStatus($"Shared stream reconnecting ({attempt}/{MaxReconnectAttempts})");
+                    await Task.Delay(ReconnectDelay, tokenSource.Token).ConfigureAwait(false);
+                    if (tokenSource.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    lock (_processLock)
+                    {
+                        if (_stopRequested || _process is { HasExited: false })
+                        {
+                            return;
+                        }
+
+                        DisposeExitedProcess();
+                    }
+
+                    Start(serverHost, resetReconnectAttempts: false);
+                    return;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                lock (_processLock)
+                {
+                    if (ReferenceEquals(_reconnectStop, tokenSource))
+                    {
+                        _reconnectStop.Dispose();
+                        _reconnectStop = null;
+                    }
+                }
+            }
+        });
+    }
+
+    private void CancelReconnect()
+    {
+        _reconnectStop?.Cancel();
+        _reconnectStop = null;
+    }
+
+    private void DisposeExitedProcess()
+    {
+        if (_process is { HasExited: true })
+        {
+            _process.Dispose();
+            _process = null;
+        }
     }
 
     private static string TrimStatus(string status) => status.Length > 180 ? status[..180] : status;

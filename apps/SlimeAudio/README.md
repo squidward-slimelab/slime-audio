@@ -105,7 +105,9 @@ python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
-Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, exit count, last stderr time, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, or is stopped. After a skip, run discovery and compare `shared_stream_exits`, `shared_stream_last_stderr_ms`, and `telemetry_path` against the sender/session logs.
+Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, exit count, last stderr time, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, changes output device, or is stopped. After a skip, run discovery and compare `shared_stream_exits`, `shared_stream_last_stderr_ms`, and `telemetry_path` against the sender/session logs.
+
+If snapclient exits without an explicit stop/mute/reset request, the tray treats it as a shared-stream disconnect and attempts a bounded reconnect to the last sender. Discovery keeps reporting the exit count and last status so planned sender handoffs can be separated from real client crashes.
 
 The tray `Output device` menu lists devices reported by `snapclient.exe --list`. Picking one saves it to `%LOCALAPPDATA%\SlimeAudio\settings.json` and restarts the active Snapcast listener with `--soundcard`. You can also set it remotely:
 

@@ -41,3 +41,9 @@ dotnet run --project apps/SlimeAudio/src/SlimeAudio.Headless/SlimeAudio.Headless
 ## Releases
 
 GitHub Actions builds win-x64 artifacts from `.github/workflows/slime-audio.yml`.
+
+## Shared Stream Diagnostics
+
+Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, exit count, last stderr time, selected output device, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, changes output device, or is stopped.
+
+If snapclient exits without an explicit stop/mute/reset request, the tray app treats it as a shared-stream disconnect and attempts a bounded reconnect to the last sender. Discovery still reports the exit count and last status so planned sender handoffs can be distinguished from real client crashes.
