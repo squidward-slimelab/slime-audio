@@ -13,6 +13,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 - Keep dashboard traffic conservative while playback is active: `/api/state` polls are non-overlapping and intentionally slow, archive/set refreshes are less frequent, waveform hydration is capped to a small batch, and noisy high-frequency API request logs are suppressed.
 - Expose named set archive browsing without loading archived sets into playback.
 - Provide a compact operational view of what the native session runner is about to play.
+- Serve `/tv` as the living-room display view. It consumes the same `/api/state` payload, avoids archive/edit controls, and renders a full-screen animated canvas driven by the current clip waveform from `/api/waveform`, with large now-playing, progress, upcoming, and runner-signal overlays for a TV attached to SPONGEBOT.
 
 The dashboard must track the current session schema. When new mix controls ship, the API and frontend should expose them instead of hiding real mixer state behind summary text.
 
@@ -21,6 +22,7 @@ The dashboard must track the current session schema. When new mix controls ship,
 - Server: `scripts/slime_audio_web.py`
 - Smoke runner: `scripts/slime_audio_web_smoke.py`
 - Frontend: `web/slime-audio/index.html`, `web/slime-audio/app.js`, `web/slime-audio/styles.css`
+- TV display: `web/slime-audio/tv.html`, `web/slime-audio/tv.js`, `web/slime-audio/tv.css`
 - Test fixtures: `tests/fixtures/slime-audio-web-active-session.json`, `tests/fixtures/slime-audio-web-active-state.json`
 - Tests: `tests/test_slime_audio_web.py`
 - Older detailed doc: [docs/slime-audio-dashboard.md](../docs/slime-audio-dashboard.md)

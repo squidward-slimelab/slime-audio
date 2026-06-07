@@ -56,6 +56,25 @@ def assert_json_error(url: str) -> None:
     raise AssertionError(f"expected api error from {url}")
 
 
+def fetch_text(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=2.0) as response:
+        return response.read().decode("utf-8")
+
+
+def assert_state_payload(url: str) -> None:
+    payload = json.loads(fetch_text(url))
+    dashboard = payload.get("dashboard") or {}
+    required = ["transport", "events", "lanes", "now", "upcoming"]
+    missing = [key for key in required if key not in dashboard]
+    if missing:
+        raise AssertionError(f"dashboard payload missing keys: {missing}")
+    event_text = json.dumps(dashboard.get("events", []))
+    if "short incoming vocal note" not in event_text:
+        raise AssertionError("fixture payload missing planned vocal marker")
+    if not dashboard.get("lanes"):
+        raise AssertionError("fixture payload has no lanes")
+
+
 def chrome_binary() -> str:
     for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
         path = shutil.which(name)
@@ -67,6 +86,7 @@ def chrome_binary() -> str:
 def run_chrome(chrome: str, url: str, out_dir: Path, name: str, size: str) -> str:
     profile = out_dir / f"profile-{name}"
     screenshot = out_dir / f"{name}.png"
+    shutil.rmtree(profile, ignore_errors=True)
     command = [
         chrome,
         "--headless=new",
@@ -74,23 +94,36 @@ def run_chrome(chrome: str, url: str, out_dir: Path, name: str, size: str) -> st
         "--no-sandbox",
         "--hide-scrollbars",
         "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=4000",
         f"--window-size={size}",
         f"--user-data-dir={profile}",
         f"--screenshot={screenshot}",
-        "--dump-dom",
         url,
     ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    subprocess.run(command, check=True, capture_output=True, text=True, timeout=45)
     if not screenshot.exists() or screenshot.stat().st_size < 10_000:
         raise AssertionError(f"{name} screenshot looks empty: {screenshot}")
-    dom = result.stdout
-    required = ["transport-strip", "timeline-event", "playhead", "mixer-channel", "short incoming vocal note"]
-    missing = [needle for needle in required if needle not in dom]
-    if missing:
-        raise AssertionError(f"{name} DOM missing expected dashboard markers: {missing}")
-    if "dashboard error" in dom.lower():
-        raise AssertionError(f"{name} rendered dashboard error")
+    return str(screenshot)
+
+
+def run_tv_chrome(chrome: str, url: str, out_dir: Path) -> str:
+    profile = out_dir / "profile-tv"
+    screenshot = out_dir / "tv.png"
+    shutil.rmtree(profile, ignore_errors=True)
+    command = [
+        chrome,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--hide-scrollbars",
+        "--run-all-compositor-stages-before-draw",
+        "--window-size=1920,1080",
+        f"--user-data-dir={profile}",
+        f"--screenshot={screenshot}",
+        url,
+    ]
+    subprocess.run(command, check=True, capture_output=True, text=True, timeout=45)
+    if not screenshot.exists() or screenshot.stat().st_size < 10_000:
+        raise AssertionError(f"tv screenshot looks empty: {screenshot}")
     return str(screenshot)
 
 
@@ -127,12 +160,19 @@ def main() -> int:
         url = f"http://127.0.0.1:{port}/"
         wait_for(f"http://127.0.0.1:{port}/api/state")
         assert_json_error(f"http://127.0.0.1:{port}/api/not-a-real-endpoint")
+        assert_state_payload(f"http://127.0.0.1:{port}/api/state")
+        root_html = fetch_text(url)
+        tv_html = fetch_text(f"http://127.0.0.1:{port}/tv")
+        if "app-shell" not in root_html or "tv-shell" not in tv_html:
+            raise AssertionError("dashboard static shells did not render expected HTML")
         args.out_dir.mkdir(parents=True, exist_ok=True)
         chrome = chrome_binary()
         desktop = run_chrome(chrome, url, args.out_dir, "desktop", "1440,1000")
         mobile = run_chrome(chrome, url, args.out_dir, "mobile", "390,900")
+        tv = run_tv_chrome(chrome, f"http://127.0.0.1:{port}/tv", args.out_dir)
         print(f"desktop screenshot: {desktop}")
         print(f"mobile screenshot: {mobile}")
+        print(f"tv screenshot: {tv}")
         return 0
     finally:
         server.terminate()

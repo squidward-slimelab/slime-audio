@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SlimeAudio TV</title>
+    <link rel="stylesheet" href="/tv.css" />
+  </head>
+  <body>
+    <canvas id="visualizer" aria-hidden="true"></canvas>
+    <div class="scanline" aria-hidden="true"></div>
+    <main class="tv-shell">
+      <header class="brand-row">
+        <p>SlimeAudio</p>
+        <span id="status-pill" class="pill">loading</span>
+      </header>
+
+      <section class="now-block" aria-label="now playing">
+        <p class="eyebrow">now playing</p>
+        <h1 id="now-title">loading session</h1>
+        <p id="now-meta">waiting for dashboard state</p>
+      </section>
+
+      <section class="lower-strip" aria-label="mix status">
+        <div class="progress-wrap" aria-label="session progress">
+          <div class="progress-labels">
+            <span id="playhead-time">--:--</span>
+            <span id="duration-time">--:--</span>
+          </div>
+          <div class="progress-track">
+            <div id="session-progress"></div>
+          </div>
+        </div>
+
+        <aside class="side-panel" aria-label="up next">
+          <p class="eyebrow">up next</p>
+          <div id="next-list" class="event-list"></div>
+        </aside>
+      </section>
+
+      <footer class="signal-footer" aria-label="room signal">
+        <div>
+          <span>set</span>
+          <strong id="set-name">--</strong>
+        </div>
+        <div>
+          <span>window</span>
+          <strong id="window-time">--:--</strong>
+        </div>
+        <div>
+          <span>runner</span>
+          <strong id="runner-state">--</strong>
+        </div>
+        <div>
+          <span>updated</span>
+          <strong id="updated-time">--</strong>
+        </div>
+      </footer>
+    </main>
+    <script src="/tv.js"></script>
+  </body>
+</html>

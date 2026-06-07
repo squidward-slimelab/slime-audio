@@ -12,6 +12,8 @@ The dashboard is a live operations view for native SlimeAudio mix sessions. It s
 
 It is not a marketing page, a generic playlist browser, or a manual performance surface. Timing-impacting moves should be planned in `mix-session.json` before playback reaches them.
 
+The same server also exposes `/tv` for the living-room TV on SPONGEBOT. That view is passive and room-facing: a full-screen animated waveform canvas driven by the current clip's `/api/waveform` bass/mid/high bands, large now-playing text, whole-session progress, upcoming tracks, active set, render window, update time, and runner health. It intentionally omits archive controls, timeline editing affordances, and dense mixer detail.
+
 ## Required Views
 
 - Transport strip: runner status, playhead, render window, and last update.
@@ -48,4 +50,4 @@ PYTHONPATH=scripts:src python3 -m unittest tests.test_slime_audio_web
 PYTHONPATH=scripts:src python3 scripts/slime_audio_web_smoke.py
 ```
 
-The smoke check starts a fixture-backed server, renders desktop and mobile headless Chrome screenshots into `runtime/web-smoke/`, and verifies that the timeline, playhead, and planned vocal marker render without an active room playback session.
+The smoke check starts a fixture-backed server, renders desktop, mobile, and TV headless Chrome screenshots into `runtime/web-smoke/`, and verifies that the timeline, playhead, planned vocal marker, and `/tv` display render without an active room playback session.

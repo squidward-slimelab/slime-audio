@@ -41,6 +41,13 @@ WAVEFORM_BINS = 240
 WAVEFORM_CACHE_VERSION = 2
 
 
+def static_path_for_request(request_path: str) -> Path:
+    rel = "index.html" if request_path in {"", "/"} else request_path.lstrip("/")
+    if rel in {"tv", "tv/"}:
+        rel = "tv.html"
+    return (WEB_ROOT / rel).resolve()
+
+
 def parse_timestamp(value: str | None) -> float | None:
     if not value:
         return None
@@ -866,8 +873,7 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def serve_static(self, request_path: str) -> None:
-        rel = "index.html" if request_path in {"", "/"} else request_path.lstrip("/")
-        path = (WEB_ROOT / rel).resolve()
+        path = static_path_for_request(request_path)
         if WEB_ROOT.resolve() not in path.parents and path != WEB_ROOT.resolve():
             self.send_error(HTTPStatus.FORBIDDEN)
             return

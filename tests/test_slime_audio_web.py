@@ -447,6 +447,10 @@ class SlimeAudioWebTests(unittest.TestCase):
     def test_choose_session_path_returns_none_for_missing_explicit_path(self):
         self.assertIsNone(web.choose_session_path(Path("/tmp/missing-session.json")))
 
+    def test_static_tv_route_serves_tv_display(self):
+        self.assertEqual(web.static_path_for_request("/tv"), web.WEB_ROOT / "tv.html")
+        self.assertEqual(web.static_path_for_request("/tv/"), web.WEB_ROOT / "tv.html")
+
 
 if __name__ == "__main__":
     unittest.main()
