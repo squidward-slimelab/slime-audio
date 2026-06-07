@@ -58,6 +58,8 @@ Systemd service files live in `deploy/systemd/`. Keep service docs here updated 
 
 After code changes to long-running services, verify the service process actually restarted. A correct commit can still look broken if the service is stale.
 
+The music library timer is intentionally live-playback-safe. It may scan mounted shares during a set, but expensive TuneBat and DJ-analysis backfills skip when `runtime/active-set.json` points at runner state updated within the last six hours. The user service is also low-priority and resource-capped, so analyzer aborts or spikes should fail the maintenance job instead of starving the gateway or live runner.
+
 For the local web dashboard:
 
 ```bash

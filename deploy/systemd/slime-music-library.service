@@ -4,7 +4,9 @@ Description=Refresh SlimeAudio music library database
 [Service]
 Type=oneshot
 WorkingDirectory=/home/squidward/.openclaw/workspace/slime-audio
-ExecStart=/usr/bin/python3 /home/squidward/.openclaw/workspace/slime-audio/scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200
-Nice=10
-IOSchedulingClass=best-effort
-IOSchedulingPriority=6
+ExecStart=/usr/bin/python3 /home/squidward/.openclaw/workspace/slime-audio/scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200 --dj-analysis-backfill-limit 6 --skip-backfill-when-live --live-grace-seconds 21600
+Nice=15
+CPUSchedulingPolicy=batch
+CPUQuota=35%
+MemoryMax=700M
+IOSchedulingClass=idle

@@ -411,6 +411,58 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertFalse(data["dashboard"]["transport"]["stale"])
         self.assertEqual(data["dashboard"]["health"]["runner_state"], "ok")
 
+    def test_dashboard_marks_missing_runner_pid_dead(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "state.json"
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "a", "deck": "deck-1", "path": "/music/A/B/a.flac", "start": 0, "duration": 240_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "current": "/music/A/B/a.flac",
+                        "runner_pid": 123456,
+                        "runner_status": "running",
+                        "runner_updated_at": "2026-05-30T12:00:00-0400",
+                        "started_at": "2026-05-30T12:00:00-0400",
+                        "window_started_at": "2026-05-30T12:00:00-0400",
+                        "window_start_ms": 0,
+                        "window_end_ms": 180_000,
+                        "updated_at": "2026-05-30T12:00:00-0400",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(web, "time") as fake_time:
+                fake_time.time.return_value = web.parse_timestamp("2026-05-30T12:01:00-0400")
+                with patch.object(web, "runner_process_alive", return_value=False):
+                    data = web.load_dashboard_state(state_path, session_path)
+
+        self.assertEqual(data["dashboard"]["health"]["runner_state"], "dead")
+        self.assertFalse(data["dashboard"]["health"]["runner_process_alive"])
+
+    def test_dashboard_surfaces_runner_fatal_reason(self):
+        health = web.runner_health(
+            {
+                "runner_status": "fatal",
+                "runner_pid": 123,
+                "runner_exit_reason": "RuntimeError: boom",
+                "current": "/music/a.flac",
+            },
+            {"status": "playing", "stale": False},
+        )
+
+        self.assertEqual(health["runner_state"], "fatal")
+        self.assertEqual(health["runner_exit_reason"], "RuntimeError: boom")
+
     def test_choose_state_path_prefers_explicit_path(self):
         explicit = Path("/tmp/example-state.json")
 

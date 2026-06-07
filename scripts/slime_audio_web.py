@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import os
 import subprocess
 import time
 from array import array
@@ -427,6 +428,51 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
     }
 
 
+def runner_process_alive(pid_value: object) -> bool | None:
+    if not isinstance(pid_value, int) or pid_value <= 0:
+        return None
+    proc_cmdline = Path("/proc") / str(pid_value) / "cmdline"
+    try:
+        cmdline = proc_cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        return "slime_audio_session_runner.py" in cmdline
+    except FileNotFoundError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid_value, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+
+def runner_health(state: dict[str, Any], transport: dict[str, Any]) -> dict[str, Any]:
+    status = str(state.get("runner_status") or "")
+    pid = state.get("runner_pid")
+    alive = runner_process_alive(pid)
+    health = "ok"
+    if status in {"fatal", "stopped"}:
+        health = status
+    elif status == "completed" or transport.get("status") == "completed":
+        health = "completed"
+    elif alive is False and (state.get("current") or state.get("window_started_at")):
+        health = "dead"
+    elif transport.get("stale"):
+        health = "stale"
+    return {
+        "runner_state": health,
+        "runner_pid": pid,
+        "runner_process_alive": alive,
+        "runner_status": status or None,
+        "runner_updated_at": state.get("runner_updated_at"),
+        "runner_exit_at": state.get("runner_exit_at"),
+        "runner_exit_reason": state.get("runner_exit_reason"),
+        "receivers": state.get("receivers", []),
+        "current_clips": state.get("current_clips", []),
+    }
+
+
 def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: Path, session_payload: dict[str, Any]) -> dict[str, Any]:
     raw_events = session_events(session_payload)
     try:
@@ -458,11 +504,12 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
         counts[str(event.get("kind") or "event")] = counts.get(str(event.get("kind") or "event"), 0) + 1
     fader_routing = session_payload.get("fader_routing", session_payload.get("faderRouting", {}))
     assignments = fader_routing.get("deck_assignments") if isinstance(fader_routing, dict) else {}
+    transport = transport_status(state, playhead_ms, duration_ms)
     return {
         "schema_version": 1,
         "state_path": str(state_path),
         "session_path": str(session_path),
-        "transport": transport_status(state, playhead_ms, duration_ms),
+        "transport": transport,
         "session": {
             "timeline_mode": session_payload.get("timeline_mode", "native"),
             "duration_ms": duration_ms,
@@ -477,11 +524,7 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
         "upcoming": upcoming,
         "commentary": commentary,
         "automation": automation,
-        "health": {
-            "runner_state": "stale" if transport_status(state, playhead_ms, duration_ms)["stale"] else "ok",
-            "receivers": state.get("receivers", []),
-            "current_clips": state.get("current_clips", []),
-        },
+        "health": runner_health(state, transport),
     }
 
 

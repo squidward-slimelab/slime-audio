@@ -336,7 +336,7 @@ python3 scripts/slime_music_library.py import-metadata runtime/music-metadata.js
 
 This is for TuneBat Analyzer output from `https://tunebat.com/Analyzer`, not the public TuneBat song database. The analyzer runs in-browser and is the path to use for odd local files, bootlegs, edits, samples, and other tracks that Spotify would never know about. `scripts/slime_tunebat_analyzer.js` runs the same public browser-capable engine family locally through `essentia.js` and FFmpeg, then `analyze-tunebat-local` caches that output into SQLite. It intentionally does not vendor TuneBat's protected site bundle. `essentia.js` is AGPL-3.0, so keep this as an optional local/internal tool unless the repo licensing is changed deliberately.
 
-Use the service wrapper for routine maintenance. It rescans mounted shares, then backfills a bounded number of missing local TuneBat-style rows and missing/stale DJ beatgrid/structure rows so full-library work spreads out over many small runs:
+Use the service wrapper for routine maintenance. It rescans mounted shares, then backfills a bounded number of missing local TuneBat-style rows and missing/stale DJ beatgrid/structure rows so full-library work spreads out over many small runs. By default, expensive backfills skip while active live playback has a runner state updated in the last six hours; use `--no-skip-backfill-when-live` only for deliberate offline maintenance.
 
 ```bash
 python3 scripts/slime_music_library_service.py --tunebat-backfill-limit 12 --tunebat-max-seconds 1200 --dj-analysis-backfill-limit 6
@@ -346,7 +346,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now slime-music-library.timer
 ```
 
-The service uses `runtime/slime-music-library.lock`, so overlapping timer runs skip instead of fighting SQLite or hammering the network shares. Lyrics are intentionally not scraped by the maintenance service; import verified lyrics or sidecar files explicitly so we do not fill the database with junk.
+The service uses `runtime/slime-music-library.lock`, so overlapping timer runs skip instead of fighting SQLite or hammering the network shares. The systemd unit also runs at low priority with CPU and memory ceilings so analyzer failures cannot starve live playback. Lyrics are intentionally not scraped by the maintenance service; import verified lyrics or sidecar files explicitly so we do not fill the database with junk.
 
 Session-building tools should use this database when selecting clip paths. Prefer the `preferred_path` from `tracks`/candidate output so playback uses the best available duplicate source.
 
