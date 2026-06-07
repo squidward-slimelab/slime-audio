@@ -9,6 +9,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +239,44 @@ def append_history(path: Path | None, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
+def write_runner_status(args: argparse.Namespace, status: str, **fields: Any) -> None:
+    state = load_json(args.state)
+    now = iso_now()
+    state.update(
+        {
+            "runner_pid": os.getpid(),
+            "runner_status": status,
+            "runner_updated_at": now,
+        }
+    )
+    state.setdefault("runner_started_at", now)
+    state.update(fields)
+    write_json(args.state, state)
+
+
+def record_runner_exit(args: argparse.Namespace, *, status: str, reason: str, **fields: Any) -> None:
+    now = iso_now()
+    payload = {
+        "runner_exit_at": now,
+        "runner_exit_reason": reason,
+        **fields,
+    }
+    write_runner_status(args, status, **payload)
+    append_history(
+        args.history_log,
+        {
+            "event": "session_runner_exit",
+            "pid": os.getpid(),
+            "reason": reason,
+            "session": str(args.session),
+            "state": str(args.state),
+            "status": status,
+            "timestamp": now,
+            **fields,
+        },
+    )
+
+
 def clip_overlaps_window(clip: Clip, start_ms: int, end_ms: int) -> bool:
     if clip.duration_ms is None:
         return clip.start_ms >= start_ms and clip.start_ms < end_ms
@@ -389,8 +428,9 @@ def wait_window_stream(running: RunningWindow) -> int:
         running.close()
 
 
-def install_signal_handlers() -> None:
+def install_signal_handlers(args: argparse.Namespace) -> None:
     def handle_stop(signum: int, _frame: object) -> None:
+        record_runner_exit(args, status="stopped", reason=f"signal:{signal.Signals(signum).name}", signal=signum)
         stop_active_stream()
         raise SystemExit(128 + signum)
 
@@ -432,9 +472,13 @@ def write_window_state(
                 for clip in active_clips
             ],
             "duration_ms": session_duration_ms(session),
+            "runner_pid": os.getpid(),
+            "runner_status": "running",
+            "runner_updated_at": now,
             "updated_at": now,
         }
     )
+    state.setdefault("runner_started_at", now)
     write_json(args.state, state)
     return state
 
@@ -469,13 +513,14 @@ def prepare_window(args: argparse.Namespace, session: MixSession, start_ms: int,
 
 
 def run_session(args: argparse.Namespace) -> int:
-    install_signal_handlers()
+    install_signal_handlers(args)
     state = load_json(args.state)
     has_playhead = any(key in state for key in ("playhead_ms", "mix_playhead_ms", "window_started_at", "mix_started_at"))
     if args.reset_state or not has_playhead:
         state = {"mix_started_at": iso_now()}
         write_json(args.state, state)
     write_active_dashboard_pointer(args)
+    write_runner_status(args, "running")
 
     prepared: PreparedWindow | None = None
     snapcast = (
@@ -493,7 +538,20 @@ def run_session(args: argparse.Namespace) -> int:
             if playhead_ms >= total_ms:
                 state["current"] = None
                 state["completed_at"] = iso_now()
+                state["runner_pid"] = os.getpid()
+                state["runner_status"] = "completed"
+                state["runner_updated_at"] = state["completed_at"]
                 write_json(args.state, state)
+                append_history(
+                    args.history_log,
+                    {
+                        "event": "session_runner_completed",
+                        "pid": os.getpid(),
+                        "session": str(args.session),
+                        "state": str(args.state),
+                        "timestamp": state["completed_at"],
+                    },
+                )
                 print("session done", flush=True)
                 return 0
 
@@ -665,7 +723,19 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main() -> int:
-    return run_session(parse_args_from())
+    args = parse_args_from()
+    try:
+        return run_session(args)
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        record_runner_exit(
+            args,
+            status="fatal",
+            reason=f"{exc.__class__.__name__}: {exc}",
+            traceback="".join(traceback.format_exception(exc.__class__, exc, exc.__traceback__)),
+        )
+        raise
 
 
 if __name__ == "__main__":

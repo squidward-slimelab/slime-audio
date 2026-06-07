@@ -10,6 +10,7 @@ The native session runner consumes:
 - `runtime/mix-session-state.json`
 
 It renders short future windows, streams them through Snapcast/multicast, reloads the session before each window, and records history events in `runtime/play-history.jsonl`.
+The state file also carries runner liveness fields: `runner_pid`, `runner_status`, `runner_started_at`, `runner_updated_at`, and, after a caught fatal/signal exit, `runner_exit_at` plus `runner_exit_reason`. A clean completion writes `session_runner_completed`; caught fatal exits and handled stop signals write `session_runner_exit` to history. A hard `SIGKILL` or OOM kill cannot be caught by Python, so diagnose those by comparing stale `runner_updated_at` / missing process with `journalctl --user` around the same timestamp.
 
 Start playback:
 
@@ -20,6 +21,13 @@ python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json
 Future live edits take effect on the next render window; audio already under the playhead is not interrupted.
 
 Skips exactly on render-window boundaries usually point at the session runner or Snapcast FIFO handoff, not necessarily the Windows receiver. Compare sender/session logs with `session_window_*` history before blaming the tray.
+
+Silent mid-session stops should be triaged in this order:
+
+- Check whether `runner_pid` still exists with `ps -fp <pid>`.
+- Check `runtime/play-history.jsonl` for `session_runner_exit`, `session_window_failed`, and the last `session_window_started`.
+- Check the named runner log for a Python traceback or Snapcast errors.
+- If history has no fatal record and the pid is gone, check `journalctl --user --since <time> --until <time>` for service restarts, `systemd-oomd`, or signal kills.
 
 ## Streaming Local Files
 

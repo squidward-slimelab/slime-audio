@@ -1,4 +1,5 @@
 import json
+import signal
 import sys
 import tempfile
 import unittest
@@ -82,6 +83,10 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         render.assert_called_once()
         self.assertEqual(render.call_args.args[1], 25_000)
         self.assertEqual(render.call_args.args[2], 10_000)
+        self.assertEqual(state["runner_status"], "running")
+        self.assertIsInstance(state["runner_pid"], int)
+        self.assertIn("runner_started_at", state)
+        self.assertIn("runner_updated_at", state)
 
     def test_stream_command_targets_snapcast_without_legacy_delay(self):
         args = runner.parse_args_from(["--target", "all", "--mode", "snapcast", "--dry-run"])
@@ -184,6 +189,66 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                 self.assertEqual(runner.run_session(args), 0)
 
         self.assertFalse(active_pointer.exists())
+
+    def test_record_runner_exit_writes_state_and_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "state.json"
+            history_path = temp / "history.jsonl"
+            session_path = temp / "session.json"
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(session_path),
+                    "--state",
+                    str(state_path),
+                    "--history-log",
+                    str(history_path),
+                    "--target",
+                    "all",
+                ]
+            )
+
+            runner.record_runner_exit(args, status="fatal", reason="RuntimeError: boom", traceback="trace")
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            history = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(state["runner_status"], "fatal")
+        self.assertEqual(state["runner_exit_reason"], "RuntimeError: boom")
+        self.assertEqual(state["traceback"], "trace")
+        self.assertEqual(history[-1]["event"], "session_runner_exit")
+        self.assertEqual(history[-1]["status"], "fatal")
+        self.assertEqual(history[-1]["reason"], "RuntimeError: boom")
+
+    def test_signal_handler_records_stopped_exit_before_stopping_stream(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(temp / "session.json"),
+                    "--state",
+                    str(temp / "state.json"),
+                    "--history-log",
+                    str(temp / "history.jsonl"),
+                    "--target",
+                    "all",
+                ]
+            )
+
+            with patch.object(runner, "stop_active_stream") as stop_active_stream:
+                runner.install_signal_handlers(args)
+                handler = signal.getsignal(signal.SIGTERM)
+                with self.assertRaises(SystemExit) as raised:
+                    handler(signal.SIGTERM, None)
+
+            state = json.loads((temp / "state.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(raised.exception.code, 128 + signal.SIGTERM)
+        stop_active_stream.assert_called_once()
+        self.assertEqual(state["runner_status"], "stopped")
+        self.assertEqual(state["runner_exit_reason"], "signal:SIGTERM")
 
     def test_prepare_window_uses_configured_temp_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
