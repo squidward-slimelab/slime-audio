@@ -211,7 +211,23 @@ def add_deck_automation(
     )
 
 
-def add_transition_filter_automation(payload: dict[str, Any], outgoing: dict[str, Any], incoming: dict[str, Any], overlap_ms: int) -> None:
+def transition_anchor_ms(incoming: dict[str, Any], analysis: TrackAnalysis | None, overlap_ms: int) -> int:
+    start_ms = int(incoming["start_ms"])
+    end_ms = start_ms + overlap_ms
+    phrase = phrase_ms(analysis)
+    cue = select_cue(analysis, {"drop", "hook"}, before_ms=overlap_ms + phrase, after_ms=4_000)
+    if cue is None:
+        return end_ms
+    return start_ms + int(cue.at_ms)
+
+
+def add_transition_filter_automation(
+    payload: dict[str, Any],
+    outgoing: dict[str, Any],
+    incoming: dict[str, Any],
+    overlap_ms: int,
+    incoming_analysis: TrackAnalysis | None = None,
+) -> None:
     if overlap_ms <= 0:
         return
     start_ms = int(incoming["start_ms"])
@@ -223,6 +239,8 @@ def add_transition_filter_automation(payload: dict[str, Any], outgoing: dict[str
     incoming_deck = str(incoming.get("deck") or "")
     if not outgoing_deck or not incoming_deck or outgoing_deck == incoming_deck:
         return
+    incoming_anchor_ms = transition_anchor_ms(incoming, incoming_analysis, overlap_ms)
+    incoming_middle_ms = start_ms + max(1, (incoming_anchor_ms - start_ms) // 2)
     add_deck_automation(
         payload,
         target=outgoing_deck,
@@ -265,8 +283,8 @@ def add_transition_filter_automation(payload: dict[str, Any], outgoing: dict[str
         related_clip_id=str(outgoing.get("id")),
         points=[
             {"at_ms": start_ms, "value": 420},
-            {"at_ms": middle_ms, "value": 180},
-            {"at_ms": end_ms, "value": 20},
+            {"at_ms": incoming_middle_ms, "value": 180},
+            {"at_ms": incoming_anchor_ms, "value": 20},
         ],
     )
     add_deck_automation(
@@ -277,7 +295,7 @@ def add_transition_filter_automation(payload: dict[str, Any], outgoing: dict[str
         related_clip_id=str(outgoing.get("id")),
         points=[
             {"at_ms": start_ms, "value": -5.0},
-            {"at_ms": end_ms, "value": 0.0},
+            {"at_ms": incoming_anchor_ms, "value": 0.0},
         ],
     )
 
@@ -432,7 +450,7 @@ def plan_future_mix(
         )
         if previous is not None and overlap and plan is not None:
             actual_overlap_ms = max(0, min(overlap, clip_end(previous) - start_ms))
-            add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms)
+            add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms, analysis)
 
         if double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
             cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=150_000, after_ms=8_000)

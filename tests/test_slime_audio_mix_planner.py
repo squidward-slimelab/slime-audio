@@ -7,11 +7,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_dj import BeatGrid, StructureWindow, TrackAnalysis
+from slime_audio_dj import BeatGrid, CuePoint, StructureWindow, TrackAnalysis
 from slime_audio_mix_planner import plan_future_mix
 
 
-def analysis(path: str, *, bpm: float = 120.0, tonic: int = 0, mode: str = "major", duration_s: float = 180.0) -> TrackAnalysis:
+def analysis(
+    path: str,
+    *,
+    bpm: float = 120.0,
+    tonic: int = 0,
+    mode: str = "major",
+    duration_s: float = 180.0,
+    drop_ms: int = 64_000,
+    explicit_drop_cue: bool = False,
+) -> TrackAnalysis:
     return TrackAnalysis(
         path=path,
         duration_s=duration_s,
@@ -30,8 +39,14 @@ def analysis(path: str, *, bpm: float = 120.0, tonic: int = 0, mode: str = "majo
         structure=[
             StructureWindow("intro", 0, 16_000, 0.5, "opening phrase"),
             StructureWindow("build", 8_000, 16_000, 0.95, "early rise"),
-            StructureWindow("drop", 64_000, 80_000, 0.9, "release"),
+            StructureWindow("drop", drop_ms, drop_ms + 16_000, 0.9, "release"),
         ],
+        cues=[
+            CuePoint("drop", "drop", drop_ms, drop_ms + 16_000, 0.9, "test", True, "explicit test drop"),
+            CuePoint("hook", "hook", drop_ms, drop_ms + 16_000, 0.9, "test", True, "explicit test hook"),
+        ]
+        if explicit_drop_cue
+        else None,
     )
 
 def write_analysis_cache(path: Path, tracks: list[str], *, bpm: float = 120.0) -> None:
@@ -177,6 +192,47 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
 
         self.assertTrue(any(move.kind == "blend" for move in moves))
         self.assertFalse(any(clip.get("planner_role") == "drop-double" for clip in planned["clips"]))
+
+    def test_transition_bass_restore_anchors_to_incoming_drop_cue(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 120_000},
+                {"id": "next", "deck": "deck-1", "path": "/music/next.flac", "start_ms": 140_000, "duration_ms": 120_000},
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        planned, _moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac"),
+                "/music/next.flac": analysis("/music/next.flac", drop_ms=36_000, explicit_drop_cue=True),
+            },
+            lock_before_ms=0,
+            routine_every=0,
+        )
+
+        clips = {clip["id"]: clip for clip in planned["clips"]}
+        drop_at = clips["next"]["start_ms"] + 36_000
+        incoming_low = next(
+            automation
+            for automation in planned["deck_automations"]
+            if automation["target"] == clips["next"]["deck"]
+            and automation["param"] == "eq_low_db"
+            and automation["related_clip_id"] == "current"
+        )
+        incoming_highpass = next(
+            automation
+            for automation in planned["deck_automations"]
+            if automation["target"] == clips["next"]["deck"]
+            and automation["param"] == "highpass_hz"
+            and automation["related_clip_id"] == "current"
+        )
+        self.assertEqual(incoming_low["points"][-1]["at_ms"], drop_at)
+        self.assertEqual(incoming_highpass["points"][-1]["at_ms"], drop_at)
 
     def test_incompatible_tracks_do_not_overlap_or_double(self):
         payload = {
