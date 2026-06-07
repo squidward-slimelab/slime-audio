@@ -203,7 +203,7 @@ def write_active_dashboard_pointer(args: argparse.Namespace) -> None:
         {
             "slug": slug,
             "title": title,
-            "archive_session_path": str(pointer.get("archive_session_path") or session_path),
+            "archive_session_path": str(pointer.get("archive_session_path") if same_session and pointer.get("archive_session_path") else session_path),
             "active_session_path": str(session_path),
             "active_state_path": str(state_path),
             "loaded_at": iso_now(),
