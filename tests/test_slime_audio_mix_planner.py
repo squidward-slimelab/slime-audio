@@ -153,6 +153,31 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(transition_plans["after"]["from_clip_id"], "next")
         self.assertEqual(transition_plans["after"]["pitch_shift_semitones"], clips["after"]["pitch_shift_semitones"])
 
+    def test_future_mix_planner_does_not_preview_incoming_tracks_by_default(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 120_000},
+                {"id": "next", "deck": "deck-1", "path": "/music/next.flac", "start_ms": 140_000, "duration_ms": 120_000},
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        planned, moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac"),
+                "/music/next.flac": analysis("/music/next.flac"),
+            },
+            lock_before_ms=0,
+            routine_every=0,
+        )
+
+        self.assertTrue(any(move.kind == "blend" for move in moves))
+        self.assertFalse(any(clip.get("planner_role") == "drop-double" for clip in planned["clips"]))
+
     def test_incompatible_tracks_do_not_overlap_or_double(self):
         payload = {
             "version": 1,

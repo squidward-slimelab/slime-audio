@@ -324,7 +324,7 @@ def plan_future_mix(
     analyses_by_path: dict[str, TrackAnalysis | dict],
     *,
     lock_before_ms: int,
-    double_every: int = 2,
+    double_every: int = 0,
     routine_every: int = 2,
     routine_cache_path: Path | None = None,
     routine_db_path: Path = DEFAULT_LIBRARY_DB,
@@ -434,7 +434,7 @@ def plan_future_mix(
             actual_overlap_ms = max(0, min(overlap, clip_end(previous) - start_ms))
             add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms)
 
-        if previous is not None and overlap and plan is not None and index % max(1, double_every) == 0:
+        if double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
             cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=150_000, after_ms=8_000)
             drop = first_structure(analysis, {"drop", "build"}) if cue is None else None
             cue_ms = int(cue.at_ms if cue is not None else drop.start_ms) if cue is not None or drop is not None else None
@@ -569,7 +569,7 @@ def main() -> int:
     parser.add_argument("--sample-rate", type=int, default=44_100)
     parser.add_argument("--lock-before-ms", type=int)
     parser.add_argument("--lock-lead-ms", type=int, default=DEFAULT_LOCK_LEAD_MS)
-    parser.add_argument("--double-every", type=int, default=2)
+    parser.add_argument("--double-every", type=int, default=0)
     parser.add_argument("--routine-every", type=int, default=2)
     parser.add_argument("--no-routines", action="store_true")
     parser.add_argument("--max-render-tempo-shift-pct", type=float, default=MAX_RENDER_TEMPO_SHIFT_PCT)
