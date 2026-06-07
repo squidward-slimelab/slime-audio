@@ -496,6 +496,64 @@ class SlimeAudioWebTests(unittest.TestCase):
                         self.assertEqual(web.choose_state_path(None), state_path)
                         self.assertEqual(web.choose_session_path(None), session_path)
 
+    def test_live_request_paths_refresh_active_pointer_when_not_fixed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            old_state = temp / "old-state.json"
+            old_session = temp / "old-session.json"
+            new_state = temp / "new-state.json"
+            new_session = temp / "new-session.json"
+            active_pointer = temp / "active-set.json"
+            for path in (old_state, old_session, new_state, new_session):
+                path.write_text("{}", encoding="utf-8")
+            active_pointer.write_text(
+                json.dumps(
+                    {
+                        "active_state_path": str(new_state),
+                        "active_session_path": str(new_session),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(web, "DEFAULT_ACTIVE_SET", active_pointer):
+                state_path, session_path = web.resolve_live_request_paths({}, old_state, old_session)
+
+        self.assertEqual(state_path, new_state)
+        self.assertEqual(session_path, new_session)
+
+    def test_live_request_paths_keep_explicit_server_paths_fixed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            old_state = temp / "old-state.json"
+            old_session = temp / "old-session.json"
+            new_state = temp / "new-state.json"
+            new_session = temp / "new-session.json"
+            active_pointer = temp / "active-set.json"
+            for path in (old_state, old_session, new_state, new_session):
+                path.write_text("{}", encoding="utf-8")
+            active_pointer.write_text(
+                json.dumps(
+                    {
+                        "active_state_path": str(new_state),
+                        "active_session_path": str(new_session),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(web, "DEFAULT_ACTIVE_SET", active_pointer):
+                state_path, session_path = web.resolve_live_request_paths(
+                    {},
+                    old_state,
+                    old_session,
+                    fixed_state_path=True,
+                    fixed_session_path=True,
+                )
+
+        self.assertEqual(state_path, old_state)
+        self.assertEqual(session_path, old_session)
+
     def test_choose_session_path_returns_none_for_missing_explicit_path(self):
         self.assertIsNone(web.choose_session_path(Path("/tmp/missing-session.json")))
 

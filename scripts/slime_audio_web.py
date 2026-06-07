@@ -652,6 +652,33 @@ def choose_session_path(explicit: Path | None) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def resolve_live_request_paths(
+    params: dict[str, list[str]],
+    server_state_path: Path,
+    server_session_path: Path | None,
+    *,
+    fixed_state_path: bool = False,
+    fixed_session_path: bool = False,
+) -> tuple[Path, Path | None]:
+    state_values = params.get("state")
+    session_values = params.get("session")
+    if state_values:
+        state_path = Path(state_values[0]).expanduser()
+    elif fixed_state_path:
+        state_path = server_state_path
+    else:
+        state_path = choose_state_path(None)
+
+    if session_values:
+        session_arg = session_values[0]
+        session_path = Path(session_arg).expanduser() if session_arg else None
+    elif fixed_session_path:
+        session_path = server_session_path
+    else:
+        session_path = choose_session_path(None)
+    return state_path, session_path
+
+
 def automation_payload(automation: dict[str, Any], owner: str | None = None) -> dict[str, Any]:
     points = automation.get("points") or []
     parsed_points = [
@@ -812,9 +839,13 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
                 except Exception as ex:
                     self.send_json({"error": str(ex)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
-            state_path = Path(params.get("state", [str(self.server.state_path)])[0]).expanduser()
-            session_arg = params.get("session", [str(self.server.session_path) if self.server.session_path else ""])[0]
-            session_path = Path(session_arg).expanduser() if session_arg else None
+            state_path, session_path = resolve_live_request_paths(
+                params,
+                self.server.state_path,
+                self.server.session_path,
+                fixed_state_path=self.server.fixed_state_path,
+                fixed_session_path=self.server.fixed_session_path,
+            )
             try:
                 payload = load_dashboard_state(state_path, session_path)
             except Exception as ex:
@@ -940,10 +971,20 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
 
 
 class SlimeAudioServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], state_path: Path, session_path: Path | None):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        state_path: Path,
+        session_path: Path | None,
+        *,
+        fixed_state_path: bool = False,
+        fixed_session_path: bool = False,
+    ):
         super().__init__(address, SlimeAudioHandler)
         self.state_path = state_path
         self.session_path = session_path
+        self.fixed_state_path = fixed_state_path
+        self.fixed_session_path = fixed_session_path
 
 
 def main() -> int:
@@ -956,7 +997,13 @@ def main() -> int:
 
     session_path = choose_session_path(args.session)
     state_path = choose_state_path(args.state)
-    server = SlimeAudioServer((args.host, args.port), state_path, session_path)
+    server = SlimeAudioServer(
+        (args.host, args.port),
+        state_path,
+        session_path,
+        fixed_state_path=args.state is not None,
+        fixed_session_path=args.session is not None,
+    )
     print(f"slime-audio web listening on http://{args.host}:{args.port} state={state_path}", flush=True)
     server.serve_forever()
     return 0
