@@ -284,10 +284,14 @@ internal sealed class MulticastReceiver : IDisposable
 {
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
     private const int MaxReconnectAttempts = 12;
+    private const int NoExitCode = int.MinValue;
     private readonly MulticastOptions _options;
     private readonly object _processLock = new();
     private Process? _process;
     private string? _lastStatus;
+    private string? _lastExitStatus;
+    private string? _lastStderrLine;
+    private string? _lastStartCommand;
     private string? _serverHost;
     private readonly ClientSettings _settings = ClientSettings.Load();
     private IReadOnlyList<SnapclientOutputDevice>? _outputDevices;
@@ -295,6 +299,7 @@ internal sealed class MulticastReceiver : IDisposable
     private long _startedUnixTimeMs;
     private long _lastExitUnixTimeMs;
     private long _lastStderrUnixTimeMs;
+    private int _lastExitCode = NoExitCode;
     private int _exitCount;
     private int _reconnectAttempts;
     private bool _stopRequested;
@@ -302,14 +307,42 @@ internal sealed class MulticastReceiver : IDisposable
 
     public event EventHandler<string>? StatusChanged;
     public bool IsRunning => _process is { HasExited: false };
-    public int? ExitCode => _process is { HasExited: true } ? _process.ExitCode : null;
+    public int? ExitCode
+    {
+        get
+        {
+            if (_process is { HasExited: true })
+            {
+                return _process.ExitCode;
+            }
+            var lastExitCode = Volatile.Read(ref _lastExitCode);
+            return lastExitCode == NoExitCode ? null : lastExitCode;
+        }
+    }
     public string? LastStatus => _lastStatus;
+    public string? LastExitStatus => _lastExitStatus;
+    public string? LastStderrLine => _lastStderrLine;
+    public string? LastStartCommand => _lastStartCommand;
     public string? ServerHost => _serverHost;
     public int? ProcessId => _process is { HasExited: false } ? _process.Id : null;
     public long StartedUnixTimeMs => Interlocked.Read(ref _startedUnixTimeMs);
     public long LastExitUnixTimeMs => Interlocked.Read(ref _lastExitUnixTimeMs);
     public long LastStderrUnixTimeMs => Interlocked.Read(ref _lastStderrUnixTimeMs);
+    public long UptimeMs
+    {
+        get
+        {
+            var startedMs = StartedUnixTimeMs;
+            if (startedMs <= 0)
+            {
+                return 0;
+            }
+            var endMs = IsRunning ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() : LastExitUnixTimeMs;
+            return endMs > startedMs ? endMs - startedMs : 0;
+        }
+    }
     public int ExitCount => Volatile.Read(ref _exitCount);
+    public int ReconnectAttempts => Volatile.Read(ref _reconnectAttempts);
     public string TelemetryPath => ClientTelemetry.Path;
     public int VolumePercent => _volumePercent;
     public string? OutputDevice => _settings.OutputDevice;
@@ -366,30 +399,38 @@ internal sealed class MulticastReceiver : IDisposable
                 startInfo.ArgumentList.Add(_settings.OutputDevice);
             }
 
-            ClientTelemetry.Write("snapclient_starting", new { serverHost, snapcastPort = _options.SnapcastPort, outputDevice = _settings.OutputDevice });
+            _lastStartCommand = startInfo.FileName + " " + string.Join(" ", startInfo.ArgumentList.Select(QuoteArgument));
+            ClientTelemetry.Write("snapclient_starting", new { serverHost, snapcastPort = _options.SnapcastPort, outputDevice = _settings.OutputDevice, command = _lastStartCommand });
             _process = Process.Start(startInfo);
             if (_process is not null)
             {
                 var process = _process;
                 Interlocked.Exchange(ref _startedUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                ClientTelemetry.Write("snapclient_started", new { serverHost, snapcastPort = _options.SnapcastPort, processId = process.Id, outputDevice = _settings.OutputDevice });
+                Interlocked.Exchange(ref _lastExitCode, NoExitCode);
+                _lastExitStatus = null;
+                ClientTelemetry.Write("snapclient_started", new { serverHost, snapcastPort = _options.SnapcastPort, processId = process.Id, outputDevice = _settings.OutputDevice, command = _lastStartCommand });
                 process.EnableRaisingEvents = true;
                 process.ErrorDataReceived += (_, e) =>
                 {
                     if (!string.IsNullOrWhiteSpace(e.Data))
                     {
+                        _lastStderrLine = TrimStatus(e.Data);
                         Interlocked.Exchange(ref _lastStderrUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                        ClientTelemetry.Write("snapclient_stderr", new { processId = process.Id, line = TrimStatus(e.Data) });
-                        SetStatus(TrimStatus(e.Data));
+                        ClientTelemetry.Write("snapclient_stderr", new { processId = process.Id, line = _lastStderrLine });
+                        SetStatus(_lastStderrLine);
                     }
                 };
                 process.Exited += (_, _) =>
                 {
+                    var exitedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     Interlocked.Increment(ref _exitCount);
-                    Interlocked.Exchange(ref _lastExitUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    Interlocked.Exchange(ref _lastExitUnixTimeMs, exitedAtMs);
+                    Interlocked.Exchange(ref _lastExitCode, process.ExitCode);
                     var stopRequested = _stopRequested;
-                    ClientTelemetry.Write("snapclient_exited", new { processId = process.Id, process.ExitCode, serverHost, stopRequested });
-                    SetStatus(stopRequested ? $"Shared stream stopped: {process.ExitCode}" : $"Shared stream disconnected: {process.ExitCode}");
+                    var uptimeMs = Math.Max(0, exitedAtMs - Interlocked.Read(ref _startedUnixTimeMs));
+                    _lastExitStatus = stopRequested ? $"Shared stream stopped: {process.ExitCode}" : $"Shared stream disconnected: {process.ExitCode}";
+                    ClientTelemetry.Write("snapclient_exited", new { processId = process.Id, process.ExitCode, serverHost, stopRequested, uptimeMs, lastStderr = _lastStderrLine, command = _lastStartCommand });
+                    SetStatus(_lastExitStatus);
                     if (!stopRequested)
                     {
                         ScheduleReconnect(serverHost, process.ExitCode);
@@ -402,8 +443,9 @@ internal sealed class MulticastReceiver : IDisposable
         }
         catch (Exception ex)
         {
-            ClientTelemetry.Write("snapclient_start_failed", new { serverHost, snapcastPort = _options.SnapcastPort, outputDevice = _settings.OutputDevice, error = ex.Message });
-            SetStatus($"Snapclient failed: {ex.Message}");
+            _lastExitStatus = $"Snapclient failed: {ex.Message}";
+            ClientTelemetry.Write("snapclient_start_failed", new { serverHost, snapcastPort = _options.SnapcastPort, outputDevice = _settings.OutputDevice, error = ex.Message, command = _lastStartCommand });
+            SetStatus(_lastExitStatus);
         }
     }
 
@@ -528,6 +570,11 @@ internal sealed class MulticastReceiver : IDisposable
         _lastStatus = status;
         ClientTelemetry.Write("status", new { status = TrimStatus(status), snapclientRunning = IsRunning, snapclientExitCode = ExitCode });
         StatusChanged?.Invoke(this, status);
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return value.Any(char.IsWhiteSpace) ? '"' + value.Replace("\"", "\\\"", StringComparison.Ordinal) + '"' : value;
     }
 
     private void ScheduleReconnect(string serverHost, int exitCode)
@@ -1065,7 +1112,12 @@ internal sealed class AudioReceiver : IDisposable
             _multicast.LastStderrUnixTimeMs,
             _multicast.TelemetryPath,
             _multicast.OutputDevice,
-            _multicast.ListOutputDevices().Select(device => device.Soundcard).ToArray());
+            _multicast.ListOutputDevices().Select(device => device.Soundcard).ToArray(),
+            _multicast.LastExitStatus,
+            _multicast.LastStderrLine,
+            _multicast.LastStartCommand,
+            _multicast.UptimeMs,
+            _multicast.ReconnectAttempts);
     }
 
     public void Dispose()

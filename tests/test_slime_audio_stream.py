@@ -98,6 +98,11 @@ class SlimeAudioStreamTests(unittest.TestCase):
                 "SharedStreamProcessId": 1234,
                 "SharedStreamExitCount": 2,
                 "SharedStreamTelemetryPath": r"C:\Users\slimeq\AppData\Local\SlimeAudio\telemetry.jsonl",
+                "SharedStreamLastExitStatus": "Shared stream disconnected: -1073741819",
+                "SharedStreamLastStderr": "snapclient audio error",
+                "SharedStreamStartCommand": "snapclient.exe -h 192.168.0.122",
+                "SharedStreamUptimeMs": 42000,
+                "SharedStreamReconnectAttempts": 3,
             },
             now_ms=1_250,
             clock_offset_ms=50,
@@ -109,8 +114,13 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertIn("shared_stream_host=192.168.0.122", text)
         self.assertIn("shared_stream_pid=1234", text)
         self.assertIn("shared_stream_exits=2", text)
+        self.assertIn("shared_stream_uptime_ms=42000", text)
+        self.assertIn("shared_stream_reconnect_attempts=3", text)
         self.assertIn("telemetry_path=", text)
         self.assertIn("output_device=default", text)
+        self.assertIn("last_exit_status=Shared stream disconnected: -1073741819", text)
+        self.assertIn("last_stderr=snapclient audio error", text)
+        self.assertIn("start_command=snapclient.exe -h 192.168.0.122", text)
 
     def test_format_diagnostics_includes_output_device(self):
         text = format_diagnostics(

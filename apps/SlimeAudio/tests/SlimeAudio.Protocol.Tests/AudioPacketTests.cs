@@ -63,7 +63,12 @@ public sealed class AudioPacketTests
             SharedStreamLastStderrUnixTimeMs: 1500,
             SharedStreamTelemetryPath: @"C:\Users\slimeq\AppData\Local\SlimeAudio\telemetry.jsonl",
             SharedStreamOutputDevice: "Speakers",
-            SharedStreamOutputDevices: ["Headphones", "Speakers"]);
+            SharedStreamOutputDevices: ["Headphones", "Speakers"],
+            SharedStreamLastExitStatus: "Shared stream disconnected: -1073741819",
+            SharedStreamLastStderr: "snapclient audio error",
+            SharedStreamStartCommand: "snapclient.exe -h 192.168.0.122",
+            SharedStreamUptimeMs: 42_000,
+            SharedStreamReconnectAttempts: 3);
         var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123, StreamMuted: true, Diagnostics: diagnostics);
 
         var decoded = DiscoveryResponse.FromJson(original.ToJson());
@@ -84,6 +89,11 @@ public sealed class AudioPacketTests
         Assert.EndsWith("telemetry.jsonl", decoded.Diagnostics?.SharedStreamTelemetryPath);
         Assert.Equal("Speakers", decoded.Diagnostics?.SharedStreamOutputDevice);
         Assert.Contains("Headphones", decoded.Diagnostics?.SharedStreamOutputDevices ?? []);
+        Assert.Equal("Shared stream disconnected: -1073741819", decoded.Diagnostics?.SharedStreamLastExitStatus);
+        Assert.Equal("snapclient audio error", decoded.Diagnostics?.SharedStreamLastStderr);
+        Assert.Equal("snapclient.exe -h 192.168.0.122", decoded.Diagnostics?.SharedStreamStartCommand);
+        Assert.Equal(42_000, decoded.Diagnostics?.SharedStreamUptimeMs);
+        Assert.Equal(3, decoded.Diagnostics?.SharedStreamReconnectAttempts);
     }
 
     [Fact]

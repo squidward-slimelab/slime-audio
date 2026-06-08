@@ -73,9 +73,14 @@ def format_diagnostics(
         f"\tshared_stream_last_exit_ms={diagnostics.get('SharedStreamLastExitUnixTimeMs', 0)}"
         f"\tshared_stream_exits={diagnostics.get('SharedStreamExitCount', 0)}"
         f"\tshared_stream_last_stderr_ms={diagnostics.get('SharedStreamLastStderrUnixTimeMs', 0)}"
+        f"\tshared_stream_uptime_ms={diagnostics.get('SharedStreamUptimeMs', 0)}"
+        f"\tshared_stream_reconnect_attempts={diagnostics.get('SharedStreamReconnectAttempts', 0)}"
         f"\ttelemetry_path={diagnostics.get('SharedStreamTelemetryPath') or ''}"
         f"\toutput_device={diagnostics.get('SharedStreamOutputDevice') or 'default'}"
         f"\toutput_devices={','.join(diagnostics.get('SharedStreamOutputDevices') or [])}"
+        f"\tlast_exit_status={diagnostics.get('SharedStreamLastExitStatus') or ''}"
+        f"\tlast_stderr={diagnostics.get('SharedStreamLastStderr') or ''}"
+        f"\tstart_command={diagnostics.get('SharedStreamStartCommand') or ''}"
     )
 
 

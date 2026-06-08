@@ -118,7 +118,7 @@ python3 scripts/slime_audio_stream.py ./mix.mp3 --target all --mode snapcast
 
 Use `--dry-run` to see resolved receivers without sending audio.
 
-Receiver discovery reports Snapcast client telemetry from each tray: server host, snapclient PID, start time, exit count, last stderr time, last status, and the local `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` path. Use that after audible skips to see whether the receiver process exited/restarted or merely stayed connected while the sender/window changed.
+Receiver discovery reports Snapcast client telemetry from each tray: server host, snapclient PID, start time, uptime, exit count, reconnect attempts, last stderr time, last status, last exit status, last stderr line, start command, and the local `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` path. Use that after audible skips to see whether the receiver process exited/restarted or merely stayed connected while the sender/window changed. The last-exit fields are kept separate from current status so later controls, such as output-device changes, do not bury the crash reason.
 
 For multi-room music, use Snapcast or multicast mode. These are shared streams instead of per-host packet playback. Multicast starts shared stream listeners on the selected receivers before playback; add `--stop-listeners-when-done` when you want it to shut them down after the file exits.
 

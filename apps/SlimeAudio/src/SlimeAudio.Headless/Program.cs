@@ -91,10 +91,16 @@ internal sealed class HeadlessReceiver : IDisposable
     private Process? _multicastProcess;
     private CancellationTokenSource? _reconnectStop;
     private string? _multicastStatus;
+    private string? _multicastLastExitStatus;
+    private string? _multicastLastStderr;
+    private string? _multicastStartCommand;
     private string? _multicastServerHost;
     private long _decodeFailures;
     private long _droppedMutedPackets;
     private long _lastPacketUnixTimeMs;
+    private long _multicastStartedUnixTimeMs;
+    private long _multicastLastExitUnixTimeMs;
+    private long _multicastLastStderrUnixTimeMs;
     private long _receivedBytes;
     private long _receivedPackets;
     private long _resetCount;
@@ -239,27 +245,44 @@ internal sealed class HeadlessReceiver : IDisposable
         }
 
         var args = $"-h \"{serverHost}\" -p {_options.SnapcastPort} --hostID \"{Environment.MachineName}\" --logsink stderr --logfilter \"*:warning\"";
+        _multicastStartCommand = $"snapclient {args}";
         _multicastProcess = Process.Start(new ProcessStartInfo
         {
             FileName = "snapclient",
             Arguments = args,
             UseShellExecute = false,
             CreateNoWindow = true,
+            RedirectStandardError = true,
         });
         if (_multicastProcess is not null)
         {
             var process = _multicastProcess;
+            Interlocked.Exchange(ref _multicastStartedUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            _multicastLastExitStatus = null;
             process.EnableRaisingEvents = true;
+            process.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data))
+                {
+                    _multicastLastStderr = TrimStatus(e.Data);
+                    Interlocked.Exchange(ref _multicastLastStderrUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    SetMulticastStatus(_multicastLastStderr);
+                }
+            };
             process.Exited += (_, _) =>
             {
+                var exitedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 Interlocked.Increment(ref _multicastExitCount);
+                Interlocked.Exchange(ref _multicastLastExitUnixTimeMs, exitedAtMs);
                 var stopRequested = _multicastStopRequested;
-                SetMulticastStatus(stopRequested ? $"snapclient stopped: {process.ExitCode}" : $"snapclient disconnected: {process.ExitCode}");
+                _multicastLastExitStatus = stopRequested ? $"snapclient stopped: {process.ExitCode}" : $"snapclient disconnected: {process.ExitCode}";
+                SetMulticastStatus(_multicastLastExitStatus);
                 if (!stopRequested)
                 {
                     ScheduleReconnect(serverHost, process.ExitCode);
                 }
             };
+            process.BeginErrorReadLine();
         }
         SetMulticastStatus($"snapclient connected to {serverHost}:{_options.SnapcastPort}");
     }
@@ -285,6 +308,8 @@ internal sealed class HeadlessReceiver : IDisposable
         _multicastStatus = status;
         StatusChanged?.Invoke(this, status);
     }
+
+    private static string TrimStatus(string status) => status.Length > 180 ? status[..180] : status;
 
     private void ScheduleReconnect(string serverHost, int exitCode)
     {
@@ -419,7 +444,28 @@ internal sealed class HeadlessReceiver : IDisposable
             _multicastStatus,
             _multicastServerHost,
             _multicastProcess is { HasExited: false } ? _multicastProcess.Id : null,
-            SharedStreamExitCount: Volatile.Read(ref _multicastExitCount));
+            SharedStreamStartedUnixTimeMs: Interlocked.Read(ref _multicastStartedUnixTimeMs),
+            SharedStreamLastExitUnixTimeMs: Interlocked.Read(ref _multicastLastExitUnixTimeMs),
+            SharedStreamExitCount: Volatile.Read(ref _multicastExitCount),
+            SharedStreamLastStderrUnixTimeMs: Interlocked.Read(ref _multicastLastStderrUnixTimeMs),
+            SharedStreamLastExitStatus: _multicastLastExitStatus,
+            SharedStreamLastStderr: _multicastLastStderr,
+            SharedStreamStartCommand: _multicastStartCommand,
+            SharedStreamUptimeMs: SharedStreamUptimeMs(),
+            SharedStreamReconnectAttempts: Volatile.Read(ref _reconnectAttempts));
+    }
+
+    private long SharedStreamUptimeMs()
+    {
+        var startedMs = Interlocked.Read(ref _multicastStartedUnixTimeMs);
+        if (startedMs <= 0)
+        {
+            return 0;
+        }
+        var endMs = _multicastProcess is { HasExited: false }
+            ? DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            : Interlocked.Read(ref _multicastLastExitUnixTimeMs);
+        return endMs > startedMs ? endMs - startedMs : 0;
     }
 
     public void Dispose()

@@ -105,7 +105,7 @@ python3 scripts/slime_audio_stream.py --target all --start-listeners
 python3 scripts/slime_audio_stream.py --target all --stop-listeners
 ```
 
-Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, exit count, last stderr time, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, changes output device, or is stopped. After a skip, run discovery and compare `shared_stream_exits`, `shared_stream_last_stderr_ms`, and `telemetry_path` against the sender/session logs.
+Receiver discovery includes Snapcast client telemetry for skip diagnosis: server host, snapclient PID, start time, uptime, exit count, reconnect attempts, last stderr time, last status, last exit status, last stderr line, start command, and the local telemetry file path. The Windows tray writes JSONL events to `%LOCALAPPDATA%\SlimeAudio\telemetry.jsonl` whenever snapclient starts, exits, emits stderr, changes volume, changes output device, or is stopped. After a skip, run discovery and compare `shared_stream_exits`, `last_exit_status`, `last_stderr`, `start_command`, `shared_stream_last_stderr_ms`, and `telemetry_path` against the sender/session logs. Last-exit fields are preserved separately from current status so later controls do not bury the crash reason.
 
 If snapclient exits without an explicit stop/mute/reset request, the tray treats it as a shared-stream disconnect and attempts a bounded reconnect to the last sender. Discovery keeps reporting the exit count and last status so planned sender handoffs can be separated from real client crashes.
 

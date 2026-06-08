@@ -73,7 +73,12 @@ public sealed record AudioDiagnostics(
     long SharedStreamLastStderrUnixTimeMs = 0,
     string? SharedStreamTelemetryPath = null,
     string? SharedStreamOutputDevice = null,
-    string[]? SharedStreamOutputDevices = null);
+    string[]? SharedStreamOutputDevices = null,
+    string? SharedStreamLastExitStatus = null,
+    string? SharedStreamLastStderr = null,
+    string? SharedStreamStartCommand = null,
+    long SharedStreamUptimeMs = 0,
+    int SharedStreamReconnectAttempts = 0);
 
 public sealed record EffectEnvelope(
     long StartUnixTimeMs,
