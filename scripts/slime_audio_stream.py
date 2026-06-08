@@ -246,6 +246,7 @@ def publish_active_stream(
     source_session: Path | None,
     dashboard_title: str | None,
     dashboard_slug: str | None,
+    start_offset_ms: int,
     dry_run: bool,
 ) -> None:
     if dry_run:
@@ -312,7 +313,7 @@ def publish_active_stream(
             "started_at": now,
             "updated_at": now,
             "window_started_at": now,
-            "window_start_ms": 0,
+            "window_start_ms": max(0, start_offset_ms),
             "window_end_ms": duration_ms,
             "duration_ms": duration_ms,
             "timeline_mode": "direct-stream",
@@ -424,7 +425,9 @@ def run_multicast_stream(
     backend: str,
     sample_rate: int,
     channels: int,
+    start_offset_ms: int = 0,
 ) -> None:
+    seek_args = ["-ss", f"{start_offset_ms / 1000:.3f}"] if start_offset_ms > 0 else []
     subprocess.run(
         [
             require_ffmpeg(),
@@ -432,6 +435,7 @@ def run_multicast_stream(
             "-loglevel",
             "error",
             "-re",
+            *seek_args,
             "-i",
             str(input_path),
             "-vn",
@@ -460,6 +464,7 @@ def run_snapcast_stream(
     channels: int,
     buffer_ms: int,
     delay_ms: int,
+    start_offset_ms: int = 0,
 ) -> None:
     try:
         fifo_path.unlink()
@@ -500,6 +505,7 @@ def run_snapcast_stream(
         time.sleep(max(delay_ms, 0) / 1000)
         try:
             with fifo_path.open("wb") as fifo:
+                seek_args = ["-ss", f"{start_offset_ms / 1000:.3f}"] if start_offset_ms > 0 else []
                 subprocess.run(
                     [
                         require_ffmpeg(),
@@ -507,6 +513,7 @@ def run_snapcast_stream(
                         "-loglevel",
                         "error",
                         "-re",
+                        *seek_args,
                         "-i",
                         str(input_path),
                         "-vn",
@@ -623,6 +630,7 @@ def main() -> int:
     parser.add_argument("--source-session", type=Path, help="Existing session JSON that describes this rendered stream.")
     parser.add_argument("--dashboard-title", help="Title shown by the dashboard for this stream.")
     parser.add_argument("--dashboard-slug", help="Slug shown by the dashboard for this stream.")
+    parser.add_argument("--start-offset-ms", type=int, default=0, help="Start streaming this far into the file and publish that playhead to the dashboard.")
     parser.add_argument("--no-active-pointer", action="store_true", help="Do not publish this playback to the dashboard active pointer.")
     args = parser.parse_args()
 
@@ -718,6 +726,7 @@ def main() -> int:
             source_session=args.source_session,
             dashboard_title=args.dashboard_title,
             dashboard_slug=args.dashboard_slug,
+            start_offset_ms=args.start_offset_ms,
             dry_run=args.dry_run,
         )
 
@@ -731,7 +740,15 @@ def main() -> int:
             flush=True,
         )
         try:
-            run_multicast_stream(args.file, args.multicast_group, args.multicast_port, args.backend, args.sample_rate, args.channels)
+            run_multicast_stream(
+                args.file,
+                args.multicast_group,
+                args.multicast_port,
+                args.backend,
+                args.sample_rate,
+                args.channels,
+                args.start_offset_ms,
+            )
         finally:
             if not args.no_active_pointer:
                 mark_active_stream_completed(args.active_state, dry_run=args.dry_run)
@@ -755,6 +772,7 @@ def main() -> int:
                 args.channels,
                 args.snapcast_buffer_ms,
                 args.delay_ms,
+                args.start_offset_ms,
             )
         finally:
             if not args.no_active_pointer:

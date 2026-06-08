@@ -55,6 +55,18 @@ python3 scripts/slime_audio_stream.py runtime/show-render.mp3 \
   --dashboard-title "Show Session"
 ```
 
+To resume a rendered stream from the middle, pass `--start-offset-ms`. The same
+offset is published to the dashboard state, so the frontend playhead and current
+clip match the audible stream:
+
+```bash
+python3 scripts/slime_audio_stream.py runtime/show-render.mp3 \
+  --target all \
+  --mode snapcast \
+  --source-session runtime/show-session.json \
+  --start-offset-ms 1482533
+```
+
 Use `--no-active-pointer` only for proofs, diagnostics, or tests where the
 dashboard should deliberately keep showing the previous live set.
 

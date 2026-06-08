@@ -148,6 +148,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
                     source_session=None,
                     dashboard_title="Kitchen Sink",
                     dashboard_slug="kitchen-sink",
+                    start_offset_ms=12_000,
                     dry_run=False,
                 )
 
@@ -162,6 +163,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(session_payload["clips"][0]["path"], str(media.resolve()))
         self.assertEqual(state_payload["current"], str(media.resolve()))
         self.assertEqual(state_payload["duration_ms"], 123_000)
+        self.assertEqual(state_payload["window_start_ms"], 12_000)
         self.assertEqual(state_payload["receivers"][0]["machine_name"], "SPONGEBOT")
 
     def test_publish_active_stream_can_reference_source_session(self):
@@ -188,6 +190,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
                     source_session=source_session,
                     dashboard_title=None,
                     dashboard_slug=None,
+                    start_offset_ms=0,
                     dry_run=False,
                 )
 
@@ -215,6 +218,7 @@ class SlimeAudioStreamTests(unittest.TestCase):
                     source_session=temp / "missing-session.json",
                     dashboard_title=None,
                     dashboard_slug=None,
+                    start_offset_ms=0,
                     dry_run=False,
                 )
 
