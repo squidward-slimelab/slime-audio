@@ -238,6 +238,29 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
 
 Do not build a straight playlist and call it a DJ set. The default product is an edited arrangement: lead songs plus key/beat-matched EDM beds, visible routines/effects, and recurring TTS drops about the music. `slime_audio_mix_planner.py` is only a helper for beat/key-safe transitions; it is not the creative pass.
 
+### Selection Governance
+
+Before choosing a future block, write a short block intent in runtime notes or the set notes. The intent should say the energy target, texture, likely genre lane, and the reason the block belongs after the current music. Do not pick tracks first and invent the story afterward.
+
+Use a candidate pool, not a memory loop:
+
+1. Read recent playback and the active/upcoming set so repeated artists, albums, crates, and moods are visible.
+2. Pull candidates from at least three sources when possible: adjacent library search terms, compatible analysis metadata, and deeper local folders or less-used artists.
+3. Reject obvious compilation/fallback crates unless the operator explicitly asked for that sound.
+4. Prefer one clear lead idea plus supporting alternates. If a left turn is selected, document the bridge: shared rhythm, timbre, key/tempo relationship, lyric mood, historical lineage, or deliberate contrast.
+5. Cap repeated artists and obvious fallback names. A second track from the same artist in a short window needs a reason such as a planned mini-feature, callback, stem/routine use, or operator request.
+6. Avoid long same-artist or same-crate runs unless the operator asked for a focused feature. Variety should be audible across artists, eras, textures, and energy.
+
+Run a taste lint before rendering or extending:
+
+- Can a listener infer what the block is going for?
+- Are there too many familiar fallback artists, novelty records, or obvious chart/dance compilations?
+- Is every weird pick doing a job, or is it just random?
+- Does the block move from the current track naturally enough, or is it a jarring folder-search accident?
+- Are there enough fresh names that the set does not sound like the same few local habits?
+
+If the answer is weak, rebuild the candidate pool before mixing. Technical compatibility does not rescue bad taste.
+
 ### Immediate Playback Rule
 
 For live DJ requests, get music playing quickly. Do not wait to fully design, render, or QA an entire set before starting playback. Build the smallest credible editable session first, start the native runner, then keep improving the future timeline while audio is already playing.

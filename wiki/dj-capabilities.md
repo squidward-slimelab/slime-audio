@@ -33,6 +33,18 @@ python3 scripts/slime_audio_candidates.py candidates "query" --recent-limit 40 -
 
 For clean-room or fresh sets, treat novelty as a hard gate. Read recent play history, active/archive set playlists, and constraints before choosing tracks.
 
+Selection must have governance, not just search results:
+
+- Define a block intent before choosing tracks: energy, texture, genre lane, and why the block follows the current record.
+- Pull candidates from multiple pools instead of one remembered artist or obvious folder.
+- Check recent playback for repeated artists, albums, compilations, and moods.
+- Cap repeat artists in short windows unless there is a clear mini-feature, callback, stem/routine use, or operator request.
+- Reject obvious fallback compilations and chart/dance crates unless the operator explicitly asked for that.
+- Require a reason for weird left turns. The bridge can be rhythm, timbre, key/tempo, lyric mood, lineage, or deliberate contrast.
+- Run a taste lint before rendering: the block should have a legible arc, fresh names, and no long same-artist/same-crate rut.
+
+If a block feels random, cheesy, or like the same few artists again, rebuild the candidate pool before mixing.
+
 ## Analysis Facts
 
 Shipped persistent DJ analysis includes:

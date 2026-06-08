@@ -91,6 +91,15 @@ The planner can add phrase-aware overlays, drop doubles, rendered tempo/key corr
 
 For overlapping transitions, key fit is the default target. Use TuneBat-backed DB metadata where available, prefer exact same-key or relative major/minor compatible overlaps, and use conservative rendered correction only when it makes the overlap better. Unsafe transitions should remain hard cuts.
 
+Before the planner runs, selection needs a taste pass:
+
+- Write a one- or two-sentence intent for the next block.
+- Check recent play history and the current/upcoming set for artist/crate repeats.
+- Build candidates from multiple sources rather than one habitual search term.
+- Reject tracks that are only technically compatible but do not support the block intent.
+- For any strange left turn, write the bridge reason before keeping it.
+- If the block leans on obvious fallback artists, novelty records, or compilation crates, rebuild it.
+
 ## Live Buffer
 
 For live DJ requests, prioritize immediacy: get one suitable starter track playing through the native session runner, then build the larger set while the room already has music. Do not wait for a polished multi-track plan before starting unless the operator explicitly asked for offline prep.
