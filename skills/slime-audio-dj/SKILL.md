@@ -238,6 +238,23 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
 
 Do not build a straight playlist and call it a DJ set. The default product is an edited arrangement: lead songs plus key/beat-matched EDM beds, visible routines/effects, and recurring TTS drops about the music. `slime_audio_mix_planner.py` is only a helper for beat/key-safe transitions; it is not the creative pass.
 
+### Mandatory Creative Pass
+
+After continuity/runway is safe, creative DJ work is the default, not a special request. Every new block or heartbeat extension should receive a creative pass unless the operator explicitly asked for restraint or there is a documented live-safety reason to defer.
+
+The creative pass should add intentional musical behavior such as:
+
+- beat/key matched overlays or mashup beds
+- drum loops or rhythm beds under lead songs
+- instant doubles, stabs, one-beat trades, or hook teases
+- echo/reverb throws, slip brakes, vinyl brakes, scratches, or loop rolls
+- deck-level EQ/filter rides and crossfader motion
+- short music-aware vocal drops on `deck-5`
+
+A plain sequence of main clips plus minor fades is unfinished DJ work. If a future block has no beds, routines, effects, filter/EQ movement, or vocal lane, write the reason before accepting it. Otherwise keep editing future material until the set has audible intent.
+
+Use proof renders for risky routines and for any bed/overlay whose audibility is uncertain. The test is not whether the dashboard shows the move; the move must be audible and musically justified.
+
 ### Selection Governance
 
 Before choosing a future block, write a short block intent in runtime notes or the set notes. The intent should say the energy target, texture, likely genre lane, and the reason the block belongs after the current music. Do not pick tracks first and invent the story afterward.

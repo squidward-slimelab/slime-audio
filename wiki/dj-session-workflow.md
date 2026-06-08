@@ -110,6 +110,8 @@ After the starter is moving, add a brief smooth voiceover intro on `deck-5` when
 
 After the first live buffer is playing, keep running dedicated mixing passes on future material. The pass should classify each clip by role, set `trim_db` for source loudness, then use `gain_db`, EQ, filters, and fader automation to make the intended relationship audible.
 
+For heartbeat/live extensions, run a creative pass before calling the block done. Add at least a couple of intentional moves when time and tooling allow: a beat/key matched bed, drum loop, double, stab, hook tease, echo/reverb throw, brake/scratch/loop roll, filter/EQ ride, crossfader move, or `deck-5` vocal drop. A straight playlist extension is only acceptable with an explicit restraint or emergency-runway reason.
+
 Rhythm beds that are supposed to change the groove should normally start around `-6` to `-9 dB` under a full lead, then be adjusted by proof render. Dubstep, dnb, bass music, and other drop-forward beds often need to be closer to the lead than soft support textures. A bed at `-12 dB` or lower is a special-case ghost texture, not a normal groove layer. A bass/rhythm bed around `-13 dB` should fail review unless the operator explicitly asked for barely-there texture and the reason is documented.
 
 Use EQ/filter carving before hiding a bed with fader level. If a proof still sounds like a straight playlist, or if the dashboard shows beds that cannot be heard, the set is not mixed yet.

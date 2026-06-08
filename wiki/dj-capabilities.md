@@ -119,3 +119,5 @@ A DJ set should not be a straight playlist with tiny decorations. Use:
 Overlapped blends should have deck-level filter/EQ automation by default. Raw full-band song-on-song overlap is only acceptable for very short stabs or a deliberately tested mashup.
 
 For showpiece requests, long vanilla stretches need a musical reason.
+
+Creative work is the default for normal heartbeat/live extensions, not something the operator should have to request. Once runway is safe, each new block should include intentional moves such as beat/key matched overlays, drum loops, rhythm beds, doubles, stabs, echo/reverb throws, filter/EQ rides, crossfader motion, hook teases, scratches/brakes, or music-aware vocal drops. If a block remains a plain run of main songs, document the restraint reason or treat it as unfinished.
