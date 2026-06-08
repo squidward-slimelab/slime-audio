@@ -13,6 +13,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 - Keep dashboard traffic conservative while playback is active: `/api/state` polls are non-overlapping and intentionally slow, archive/set refreshes are less frequent, waveform hydration is capped to a small batch, and noisy high-frequency API request logs are suppressed.
 - Expose named set archive browsing without loading archived sets into playback.
 - Provide a compact operational view of what the native session runner is about to play.
+- Treat `runtime/active-set.json` as the single active-playback pointer for both native session runner playback and direct `slime_audio_stream.py` fallback playback. The frontend should not require manual pointer edits after audio starts.
 - Serve `/tv` as the living-room display view. It consumes the same `/api/state` payload, avoids archive/edit controls, and renders a full-screen animated canvas driven by the current clip waveform from `/api/waveform`, with large now-playing, progress, upcoming, and runner-signal overlays for a TV attached to SPONGEBOT.
 
 The dashboard must track the current session schema. When new mix controls ship, the API and frontend should expose them instead of hiding real mixer state behind summary text.
@@ -45,6 +46,8 @@ The frontend consumes the server view model from `/api/state`. Keep this contrac
 - dedicated vocal lane metadata for mic lean-ins/TTS drops
 - echo, reverb, and vinyl brake events
 - summary counts
+
+Direct stream playback writes `runtime/active-stream-state.json`, `runtime/active-stream-session.json`, and updates `runtime/active-set.json` by default. If the stream is a rendered DJ session file, start it with `--source-session path/to/session.json` so the dashboard shows the real arrangement timeline while the streamed render plays. Use `--no-active-pointer` only for isolated tests where the frontend should intentionally ignore the stream.
 
 Unknown `/api/*` routes must return JSON errors, not static HTML. The frontend should parse responses defensively and report endpoint/status details when a response is not JSON.
 

@@ -2,10 +2,14 @@ import unittest
 
 from pathlib import Path
 import sys
+import tempfile
+from unittest.mock import patch
+import json
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import slime_audio_stream as stream
 from slime_audio_stream import (
     EFFECT_MESSAGE_PREFIX,
     OUTPUT_DEVICE_MESSAGE_PREFIX,
@@ -121,6 +125,110 @@ class SlimeAudioStreamTests(unittest.TestCase):
 
     def test_output_device_control_message_prefix_is_stable(self):
         self.assertEqual(OUTPUT_DEVICE_MESSAGE_PREFIX, b"SLIME_AUDIO_OUTPUT_DEVICE_V1 ")
+
+    def test_publish_active_stream_writes_synthetic_dashboard_state(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            media = temp / "song.mp3"
+            media.write_bytes(b"fake")
+            pointer = temp / "active-set.json"
+            session = temp / "active-stream-session.json"
+            state = temp / "active-stream-state.json"
+            receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPONGEBOT", "user", "0.4.28")
+
+            with patch.object(stream, "probe_duration_ms", return_value=123_000):
+                stream.publish_active_stream(
+                    input_path=media,
+                    targets=[receiver],
+                    mode="snapcast",
+                    backend="ffmpeg",
+                    active_pointer=pointer,
+                    active_session=session,
+                    active_state=state,
+                    source_session=None,
+                    dashboard_title="Kitchen Sink",
+                    dashboard_slug="kitchen-sink",
+                    dry_run=False,
+                )
+
+            pointer_payload = json.loads(pointer.read_text(encoding="utf-8"))
+            session_payload = json.loads(session.read_text(encoding="utf-8"))
+            state_payload = json.loads(state.read_text(encoding="utf-8"))
+
+        self.assertEqual(pointer_payload["title"], "Kitchen Sink")
+        self.assertEqual(pointer_payload["playback_mode"], "direct-stream")
+        self.assertEqual(pointer_payload["active_session_path"], str(session.resolve()))
+        self.assertEqual(session_payload["timeline_mode"], "direct-stream")
+        self.assertEqual(session_payload["clips"][0]["path"], str(media.resolve()))
+        self.assertEqual(state_payload["current"], str(media.resolve()))
+        self.assertEqual(state_payload["duration_ms"], 123_000)
+        self.assertEqual(state_payload["receivers"][0]["machine_name"], "SPONGEBOT")
+
+    def test_publish_active_stream_can_reference_source_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            media = temp / "render.mp3"
+            media.write_bytes(b"fake")
+            source_session = temp / "real-session.json"
+            source_session.write_text('{"version": 1, "clips": []}', encoding="utf-8")
+            pointer = temp / "active-set.json"
+            generated_session = temp / "active-stream-session.json"
+            state = temp / "active-stream-state.json"
+            receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPONGEBOT", "user", "0.4.28")
+
+            with patch.object(stream, "probe_duration_ms", return_value=60_000):
+                stream.publish_active_stream(
+                    input_path=media,
+                    targets=[receiver],
+                    mode="snapcast",
+                    backend="ffmpeg",
+                    active_pointer=pointer,
+                    active_session=generated_session,
+                    active_state=state,
+                    source_session=source_session,
+                    dashboard_title=None,
+                    dashboard_slug=None,
+                    dry_run=False,
+                )
+
+            pointer_payload = json.loads(pointer.read_text(encoding="utf-8"))
+
+        self.assertEqual(pointer_payload["active_session_path"], str(source_session.resolve()))
+        self.assertFalse(generated_session.exists())
+
+    def test_publish_active_stream_rejects_missing_source_session(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            media = temp / "render.mp3"
+            media.write_bytes(b"fake")
+            receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPONGEBOT", "user", "0.4.28")
+
+            with self.assertRaises(FileNotFoundError):
+                stream.publish_active_stream(
+                    input_path=media,
+                    targets=[receiver],
+                    mode="snapcast",
+                    backend="ffmpeg",
+                    active_pointer=temp / "active-set.json",
+                    active_session=temp / "active-stream-session.json",
+                    active_state=temp / "active-stream-state.json",
+                    source_session=temp / "missing-session.json",
+                    dashboard_title=None,
+                    dashboard_slug=None,
+                    dry_run=False,
+                )
+
+    def test_mark_active_stream_completed_only_for_current_process(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = Path(temp_dir) / "state.json"
+            state.write_text(json.dumps({"stream_pid": stream.os.getpid(), "runner_status": "streaming"}), encoding="utf-8")
+
+            stream.mark_active_stream_completed(state, dry_run=False)
+
+            payload = json.loads(state.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["runner_status"], "completed")
+        self.assertIn("completed_at", payload)
 
 
 if __name__ == "__main__":

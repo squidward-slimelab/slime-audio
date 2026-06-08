@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 import shutil
@@ -21,6 +22,10 @@ OUTPUT_DEVICE_MESSAGE_PREFIX = b"SLIME_AUDIO_OUTPUT_DEVICE_V1 "
 DEFAULT_PORT = 47777
 DEFAULT_LIVE_DELAY_MS = 7000
 DEFAULT_PREBUFFER_MS = 15000
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ACTIVE_SET = REPO_ROOT / "runtime" / "active-set.json"
+DEFAULT_ACTIVE_STREAM_SESSION = REPO_ROOT / "runtime" / "active-stream-session.json"
+DEFAULT_ACTIVE_STREAM_STATE = REPO_ROOT / "runtime" / "active-stream-state.json"
 
 
 @dataclass(frozen=True)
@@ -187,6 +192,168 @@ def require_snapserver() -> str:
     if snapserver is None:
         raise FileNotFoundError("snapserver is not installed")
     return snapserver
+
+
+def iso_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def probe_duration_ms(path: Path) -> int | None:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        seconds = float(result.stdout.strip())
+    except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return max(1, int(round(seconds * 1000)))
+
+
+def display_title(path: Path) -> str:
+    return path.stem.replace("_", " ").replace("-", " ").strip() or path.name
+
+
+def publish_active_stream(
+    *,
+    input_path: Path,
+    targets: list[Receiver],
+    mode: str,
+    backend: str,
+    active_pointer: Path,
+    active_session: Path,
+    active_state: Path,
+    source_session: Path | None,
+    dashboard_title: str | None,
+    dashboard_slug: str | None,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        return
+
+    resolved_input = input_path.resolve()
+    if source_session is not None and not source_session.exists():
+        raise FileNotFoundError(f"source session not found: {source_session}")
+
+    session_path = source_session.resolve() if source_session is not None else active_session.resolve()
+    state_path = active_state.resolve()
+    title = dashboard_title or display_title(resolved_input)
+    slug = dashboard_slug or "active-stream"
+    now = iso_now()
+    duration_ms = probe_duration_ms(resolved_input)
+    receivers = [
+        {
+            "endpoint": target.endpoint,
+            "machine_name": target.machine_name,
+            "host": target.host,
+            "port": target.port,
+            "version": target.version,
+        }
+        for target in targets
+    ]
+
+    if source_session is None:
+        clip = {
+            "id": "active-stream",
+            "deck": "deck-1",
+            "path": str(resolved_input),
+            "start_ms": 0,
+            "trim_start_ms": 0,
+            "kind": "song",
+        }
+        if duration_ms is not None:
+            clip["duration_ms"] = duration_ms
+        write_json(
+            session_path,
+            {
+                "version": 1,
+                "source": "direct-stream",
+                "timeline_mode": "direct-stream",
+                "decks": ["deck-1"],
+                "clips": [clip],
+            },
+        )
+
+    write_json(
+        state_path,
+        {
+            "current": str(resolved_input),
+            "resolved_current": str(resolved_input),
+            "current_clips": [
+                {
+                    "id": "active-stream",
+                    "deck": "deck-1",
+                    "path": str(resolved_input),
+                    "start_ms": 0,
+                    "trim_start_ms": 0,
+                    "duration_ms": duration_ms,
+                }
+            ],
+            "started_at": now,
+            "updated_at": now,
+            "window_started_at": now,
+            "window_start_ms": 0,
+            "window_end_ms": duration_ms,
+            "duration_ms": duration_ms,
+            "timeline_mode": "direct-stream",
+            "runner_status": "streaming",
+            "stream_pid": os.getpid(),
+            "stream_mode": mode,
+            "stream_backend": backend,
+            "stream_input": str(resolved_input),
+            "receivers": receivers,
+        },
+    )
+    write_json(
+        active_pointer,
+        {
+            "active_session_path": str(session_path),
+            "active_state_path": str(state_path),
+            "archive_session_path": str(session_path),
+            "loaded_at": now,
+            "slug": slug,
+            "title": title,
+            "playback_mode": "direct-stream",
+            "stream_input": str(resolved_input),
+            "targets": [target.machine_name for target in targets],
+        },
+    )
+
+
+def mark_active_stream_completed(active_state: Path, *, dry_run: bool) -> None:
+    if dry_run or not active_state.exists():
+        return
+    try:
+        payload = json.loads(active_state.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if payload.get("stream_pid") != os.getpid():
+        return
+    now = iso_now()
+    payload["completed_at"] = now
+    payload["updated_at"] = now
+    payload["runner_status"] = "completed"
+    write_json(active_state, payload)
 
 
 def convert_with_ffmpeg(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
@@ -450,6 +617,13 @@ def main() -> int:
     parser.add_argument("--effect-fade-out-ms", type=int, default=600)
     parser.add_argument("--effect-during-stream", action="store_true", help="Send a synced effect envelope aligned to this stream's start.")
     parser.add_argument("--effect-start-offset-ms", type=int, default=-250)
+    parser.add_argument("--active-pointer", type=Path, default=DEFAULT_ACTIVE_SET)
+    parser.add_argument("--active-session", type=Path, default=DEFAULT_ACTIVE_STREAM_SESSION)
+    parser.add_argument("--active-state", type=Path, default=DEFAULT_ACTIVE_STREAM_STATE)
+    parser.add_argument("--source-session", type=Path, help="Existing session JSON that describes this rendered stream.")
+    parser.add_argument("--dashboard-title", help="Title shown by the dashboard for this stream.")
+    parser.add_argument("--dashboard-slug", help="Slug shown by the dashboard for this stream.")
+    parser.add_argument("--no-active-pointer", action="store_true", help="Do not publish this playback to the dashboard active pointer.")
     args = parser.parse_args()
 
     control_count = sum(
@@ -532,6 +706,21 @@ def main() -> int:
     if not args.file.exists():
         raise SystemExit(f"file not found: {args.file}")
 
+    if not args.no_active_pointer:
+        publish_active_stream(
+            input_path=args.file,
+            targets=targets,
+            mode=args.mode,
+            backend=args.backend,
+            active_pointer=args.active_pointer,
+            active_session=args.active_session,
+            active_state=args.active_state,
+            source_session=args.source_session,
+            dashboard_title=args.dashboard_title,
+            dashboard_slug=args.dashboard_slug,
+            dry_run=args.dry_run,
+        )
+
     if args.mode == "multicast":
         if not args.no_auto_listeners:
             send_control(targets, SHARED_STREAM_START_MESSAGE, "started listener")
@@ -544,6 +733,8 @@ def main() -> int:
         try:
             run_multicast_stream(args.file, args.multicast_group, args.multicast_port, args.backend, args.sample_rate, args.channels)
         finally:
+            if not args.no_active_pointer:
+                mark_active_stream_completed(args.active_state, dry_run=args.dry_run)
             if args.stop_listeners_when_done:
                 send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
         return 0
@@ -554,16 +745,20 @@ def main() -> int:
             f"port={args.snapcast_port} targets={len(targets)}",
             flush=True,
         )
-        run_snapcast_stream(
-            args.file,
-            targets,
-            args.snapcast_fifo,
-            args.snapcast_port,
-            args.sample_rate,
-            args.channels,
-            args.snapcast_buffer_ms,
-            args.delay_ms,
-        )
+        try:
+            run_snapcast_stream(
+                args.file,
+                targets,
+                args.snapcast_fifo,
+                args.snapcast_port,
+                args.sample_rate,
+                args.channels,
+                args.snapcast_buffer_ms,
+                args.delay_ms,
+            )
+        finally:
+            if not args.no_active_pointer:
+                mark_active_stream_completed(args.active_state, dry_run=args.dry_run)
         return 0
 
     raise SystemExit(f"unsupported stream mode: {args.mode}")

@@ -42,6 +42,22 @@ python3 scripts/slime_audio_stream.py --target all --stop-listeners
 
 Use `--dry-run` to resolve targets without sending audio.
 
+Direct streams publish frontend state by default. `slime_audio_stream.py` writes
+`runtime/active-set.json` plus `runtime/active-stream-state.json` so `/api/state`
+reflects the audio that is actually being sent. For rendered DJ sessions, pass
+the source session too:
+
+```bash
+python3 scripts/slime_audio_stream.py runtime/show-render.mp3 \
+  --target all \
+  --mode snapcast \
+  --source-session runtime/show-session.json \
+  --dashboard-title "Show Session"
+```
+
+Use `--no-active-pointer` only for proofs, diagnostics, or tests where the
+dashboard should deliberately keep showing the previous live set.
+
 For persistent Snapcast playback, keep one parent FIFO writer open across render windows and swap only the ffmpeg child input. Closing the FIFO between windows can make snapserver emit EOF and create audible gaps even when receiver clients remain healthy.
 
 ## Timed Drops
