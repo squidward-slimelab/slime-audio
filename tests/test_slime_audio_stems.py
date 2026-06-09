@@ -8,6 +8,7 @@ import wave
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -98,6 +99,43 @@ class SlimeAudioStemsTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         self.assertIn("manifest missing", payload["errors"])
+
+    def test_run_demucs_uses_remote_host_when_configured(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            output = temp / "remote-output" / "htdemucs" / "source"
+            output.mkdir(parents=True)
+            for stem_name in stems.CANONICAL_STEMS:
+                (output / f"{stem_name}.wav").write_bytes(b"stem")
+
+            calls = []
+
+            def fake_remote_shell(host: str, command: str, capture: bool = False) -> str:
+                calls.append((host, command, capture))
+                if capture:
+                    return "/tmp/slime-audio-demucs.remote"
+                return ""
+
+            with patch.object(stems, "remote_shell", side_effect=fake_remote_shell):
+                with patch.object(stems, "remote_path_readable", return_value=True):
+                    with patch.object(stems, "remote_rsync_from"):
+                        with patch.object(stems.subprocess, "run"):
+                            result = stems.run_demucs(
+                                Path("/mnt/rockhouse/Music/source.flac"),
+                                temp,
+                                demucs_bin="demucs",
+                                model="htdemucs",
+                                jobs=1,
+                                demucs_host="squidward@patrick",
+                            )
+
+        self.assertEqual(result, output)
+        self.assertTrue(any(call[0] == "squidward@patrick" and "demucs" in call[1] for call in calls))
+
+    def test_local_demucs_flag_disables_default_remote_host(self):
+        args = stems.parse_args(["split", "/tmp/source.wav", "--local-demucs"])
+
+        self.assertIsNone(args.demucs_host)
 
 
 if __name__ == "__main__":

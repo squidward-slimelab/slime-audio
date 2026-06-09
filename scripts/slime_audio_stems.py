@@ -5,6 +5,8 @@ import argparse
 import hashlib
 import json
 import math
+import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -20,6 +22,7 @@ from slime_music_library import DEFAULT_DB, connect
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STEM_ROOT = REPO_ROOT / "runtime" / "stems"
+DEFAULT_DEMUCS_HOST = os.environ.get("SLIME_AUDIO_DEMUCS_HOST", "squidward@patrick")
 CANONICAL_STEMS = ("vocals", "drums", "bass", "other")
 WINDOW_MS = 1000
 
@@ -248,16 +251,107 @@ def copy_stems(source_dir: Path, artifact_root: Path) -> dict[str, Path]:
     return copied
 
 
-def run_demucs(source_path: Path, temp_dir: Path, *, demucs_bin: str, model: str, jobs: int) -> Path:
-    command = [demucs_bin, "-n", model, "-j", str(jobs), "-o", str(temp_dir), str(source_path)]
-    subprocess.run(command, check=True)
-    candidates = list(temp_dir.glob(f"{model}/*"))
+def find_demucs_output(root: Path, model: str) -> Path:
+    candidates = list(root.glob(f"{model}/*"))
     if not candidates:
-        candidates = list(temp_dir.glob("*/*"))
+        candidates = list(root.glob("*/*"))
     for candidate in candidates:
         if all((candidate / f"{stem}.wav").exists() for stem in CANONICAL_STEMS):
             return candidate
-    raise RuntimeError(f"demucs did not produce canonical stems under {temp_dir}")
+    raise RuntimeError(f"demucs did not produce canonical stems under {root}")
+
+
+def run_local_demucs(source_path: Path, temp_dir: Path, *, demucs_bin: str, model: str, jobs: int) -> Path:
+    command = [demucs_bin, "-n", model, "-j", str(jobs), "-o", str(temp_dir), str(source_path)]
+    subprocess.run(command, check=True)
+    return find_demucs_output(temp_dir, model)
+
+
+def remote_shell(host: str, command: str, *, capture: bool = False) -> str:
+    result = subprocess.run(
+        ["ssh", host, command],
+        check=True,
+        capture_output=capture,
+        text=True,
+    )
+    return result.stdout.strip() if capture else ""
+
+
+def remote_path_readable(host: str, path: Path) -> bool:
+    result = subprocess.run(["ssh", host, "test", "-r", str(path)], check=False)
+    return result.returncode == 0
+
+
+def remote_rsync_from(host: str, remote_path: str, local_path: Path) -> None:
+    subprocess.run(["rsync", "-a", f"{host}:{remote_path.rstrip('/')}/", str(local_path)], check=True)
+
+
+def remote_rsync_to(local_path: Path, host: str, remote_path: str) -> None:
+    subprocess.run(["rsync", "-a", str(local_path), f"{host}:{remote_path}"], check=True)
+
+
+def run_remote_demucs(
+    source_path: Path,
+    temp_dir: Path,
+    *,
+    host: str,
+    demucs_bin: str,
+    model: str,
+    jobs: int,
+    remote_workdir: str | None = None,
+) -> Path:
+    template = "slime-audio-demucs.XXXXXX"
+    mktemp_command = f"mktemp -d {shlex.quote(str(Path(remote_workdir) / template))}" if remote_workdir else "mktemp -d"
+    remote_temp = remote_shell(host, mktemp_command, capture=True)
+    try:
+        if remote_path_readable(host, source_path):
+            remote_source = str(source_path)
+        else:
+            remote_source = f"{remote_temp}/source{source_path.suffix}"
+            remote_rsync_to(source_path, host, remote_source)
+        remote_output = f"{remote_temp}/out"
+        command = " ".join(
+            [
+                shlex.quote(demucs_bin),
+                "-n",
+                shlex.quote(model),
+                "-j",
+                shlex.quote(str(jobs)),
+                "-o",
+                shlex.quote(remote_output),
+                shlex.quote(remote_source),
+            ]
+        )
+        remote_shell(host, command)
+        local_output = temp_dir / "remote-output"
+        local_output.mkdir(parents=True, exist_ok=True)
+        remote_rsync_from(host, remote_output, local_output)
+        return find_demucs_output(local_output, model)
+    finally:
+        subprocess.run(["ssh", host, "rm", "-rf", remote_temp], check=False)
+
+
+def run_demucs(
+    source_path: Path,
+    temp_dir: Path,
+    *,
+    demucs_bin: str,
+    model: str,
+    jobs: int,
+    demucs_host: str | None,
+    remote_workdir: str | None = None,
+) -> Path:
+    if demucs_host:
+        return run_remote_demucs(
+            source_path,
+            temp_dir,
+            host=demucs_host,
+            demucs_bin=demucs_bin,
+            model=model,
+            jobs=jobs,
+            remote_workdir=remote_workdir,
+        )
+    return run_local_demucs(source_path, temp_dir, demucs_bin=demucs_bin, model=model, jobs=jobs)
 
 
 def write_manifest(path: Path, identity: TrackIdentity, audio: dict[str, Any], stem_metrics: dict[str, dict[str, Any]]) -> None:
@@ -402,7 +496,15 @@ def command_split(args: argparse.Namespace) -> int:
             if args.source_stems_dir:
                 demucs_dir = args.source_stems_dir
             else:
-                demucs_dir = run_demucs(source_path, Path(temp), demucs_bin=args.demucs_bin, model=args.model, jobs=args.jobs)
+                demucs_dir = run_demucs(
+                    source_path,
+                    Path(temp),
+                    demucs_bin=args.demucs_bin,
+                    model=args.model,
+                    jobs=args.jobs,
+                    demucs_host=args.demucs_host,
+                    remote_workdir=args.remote_workdir,
+                )
             stems = copy_stems(demucs_dir, artifact_root)
         metrics: dict[str, dict[str, Any]] = {}
         windows: dict[str, list[tuple[int, int, float]]] = {}
@@ -490,6 +592,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     split = sub.add_parser("split")
     split.add_argument("track")
     split.add_argument("--demucs-bin", default="demucs")
+    split.add_argument("--demucs-host", default=DEFAULT_DEMUCS_HOST, help="SSH host that runs Demucs. Defaults to SLIME_AUDIO_DEMUCS_HOST or squidward@patrick.")
+    split.add_argument("--local-demucs", action="store_true", help="Run Demucs on this machine instead of over SSH.")
+    split.add_argument("--remote-workdir", help="Remote parent directory for temporary Demucs work.")
     split.add_argument("--jobs", type=int, default=1)
     split.add_argument("--force", action=argparse.BooleanOptionalAction, default=False)
     split.add_argument("--source-stems-dir", type=Path)
@@ -506,7 +611,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     gc = sub.add_parser("gc")
     gc.add_argument("--older-than-days", type=int, default=30)
     gc.set_defaults(func=command_gc)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if getattr(args, "local_demucs", False):
+        args.demucs_host = None
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
