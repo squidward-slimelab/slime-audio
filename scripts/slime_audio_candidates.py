@@ -263,6 +263,9 @@ def candidate_rows(
     filters = [
         "preferred_path IS NOT NULL",
         "lower(preferred_path) NOT LIKE '%/separated/%'",
+        "lower(preferred_path) NOT LIKE '%/duplicate/%'",
+        "lower(preferred_path) NOT LIKE '%/duplicated/%'",
+        "lower(preferred_path) NOT LIKE '%/duplicates/%'",
         "lower(title_guess) NOT IN ('bass', 'drums', 'other', 'vocals')",
         "lower(title_guess) NOT GLOB 'bass [0-9]*'",
         "lower(title_guess) NOT GLOB 'drums [0-9]*'",

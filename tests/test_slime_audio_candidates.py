@@ -163,6 +163,30 @@ class SlimeAudioCandidateTests(unittest.TestCase):
 
         self.assertEqual([candidate["title_guess"] for candidate in candidates], ["Song"])
 
+    def test_candidates_skip_duplicate_folders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "music"
+            keep = root / "Artist" / "Album" / "01 - Keep.flac"
+            duplicate = root / "Artist" / "duplicates" / "01 - Duplicate.flac"
+            duplicated = root / "Artist" / "duplicated" / "01 - Duplicated.flac"
+            duplicate_singular = root / "Artist" / "duplicate" / "01 - Duplicate Singular.flac"
+            for path in [keep, duplicate, duplicated, duplicate_singular]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"a" * 100)
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+
+            candidates = candidate_rows(
+                conn,
+                load_constraints(temp / "missing-constraints.json"),
+                history_path=temp / "missing-history.jsonl",
+                recent_limit=10,
+                limit=10,
+            )
+
+        self.assertEqual([candidate["title_guess"] for candidate in candidates], ["Keep"])
+
 
 if __name__ == "__main__":
     unittest.main()
