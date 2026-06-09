@@ -105,7 +105,7 @@ stem-group:<group-id>:bass.mute
 
 ## Dashboard
 
-The dashboard timeline surfaces stem groups as `stem-group` events on their parent deck and includes child stem state, enabled/muted/solo flags, gain, stem-set id, and manifest path. This is for debugging agent decisions, not manual DAW editing.
+The dashboard timeline surfaces stem groups as `stem-group` events on their parent deck and includes a compact `V D B O` strip for vocals, drums, bass, and other. Bright cells are currently audible, yellow marks a soloed stem, and dim cells are muted, disabled, suppressed by solo, or missing. Event payloads also include child stem state, enabled/muted/solo flags, gain, stem-set id, and manifest path. This is for debugging agent decisions, not manual DAW editing.
 
 ## Planner Rules
 

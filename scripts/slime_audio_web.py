@@ -108,6 +108,7 @@ def session_stem_group_event(group: dict[str, Any]) -> dict[str, Any]:
     duration = group.get("duration_ms", group.get("duration"))
     duration_ms = parse_ms(duration, "stem group duration") if duration is not None else None
     stems = group.get("stems") if isinstance(group.get("stems"), dict) else {}
+    stem_indicators = stem_group_indicators(stems)
     return {
         "id": group.get("id"),
         "kind": "stem-group",
@@ -132,8 +133,39 @@ def session_stem_group_event(group: dict[str, Any]) -> dict[str, Any]:
             }
             for name, stem in stems.items()
         },
+        "stem_indicators": stem_indicators,
         **format_title(str(group.get("source_path") or group.get("path") or "")),
     }
+
+
+def stem_group_indicators(stems: dict[str, Any]) -> list[dict[str, Any]]:
+    order = ("vocals", "drums", "bass", "other")
+    solo_names = {
+        name
+        for name, stem in stems.items()
+        if isinstance(stem, dict) and bool(stem.get("enabled", True)) and bool(stem.get("solo", False))
+    }
+    indicators: list[dict[str, Any]] = []
+    for name in order:
+        stem = stems.get(name)
+        if stem is None:
+            indicators.append({"name": name, "label": name[0].upper(), "state": "missing", "active": False})
+            continue
+        enabled = bool(stem.get("enabled", True)) if isinstance(stem, dict) else bool(stem)
+        muted = bool(stem.get("mute", False)) if isinstance(stem, dict) else False
+        solo = bool(stem.get("solo", False)) if isinstance(stem, dict) else False
+        if not enabled:
+            state = "disabled"
+        elif muted:
+            state = "muted"
+        elif solo_names and not solo:
+            state = "suppressed"
+        elif solo:
+            state = "solo"
+        else:
+            state = "active"
+        indicators.append({"name": name, "label": name[0].upper(), "state": state, "active": state in {"active", "solo"}})
+    return indicators
 
 
 def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:

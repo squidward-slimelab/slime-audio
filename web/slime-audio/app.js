@@ -159,6 +159,7 @@ function eventSignature(dashboard) {
       event.end_ms,
       event.display_title,
       event.display_meta,
+      event.stem_indicators,
       event.style_flags,
       event.path,
       event.trim_start_ms,
@@ -217,6 +218,26 @@ function setFeedbackTarget(event = null) {
 
 function statusLabel(value) {
   return String(value || "unknown").replace("-", " ");
+}
+
+function stemIndicatorTitle(indicator) {
+  return `${indicator.name || "stem"} ${statusLabel(indicator.state)}`;
+}
+
+function renderStemIndicators(event) {
+  const indicators = event.stem_indicators || [];
+  if (event.kind !== "stem-group" || !indicators.length) return null;
+  const strip = document.createElement("div");
+  strip.className = "stem-indicators";
+  strip.setAttribute("aria-label", "stem playback state");
+  for (const indicator of indicators) {
+    const item = document.createElement("i");
+    item.className = `stem-indicator ${cssToken(indicator.name || "stem")} ${cssToken(indicator.state || "unknown")}`;
+    item.textContent = indicator.label || String(indicator.name || "?").slice(0, 1).toUpperCase();
+    item.title = stemIndicatorTitle(indicator);
+    strip.append(item);
+  }
+  return strip;
 }
 
 function clamp(value, min, max) {
@@ -1061,7 +1082,12 @@ function renderTimeline() {
       eventTitle.textContent = event.display_title || "event";
       const eventMeta = document.createElement("small");
       eventMeta.textContent = event.display_meta || "";
-      el.append(eventTitle, eventMeta);
+      const stemIndicators = renderStemIndicators(event);
+      if (stemIndicators) {
+        el.append(eventTitle, stemIndicators, eventMeta);
+      } else {
+        el.append(eventTitle, eventMeta);
+      }
       track.append(el);
     }
     row.append(label, track);

@@ -26,7 +26,12 @@ class SlimeAudioWebTests(unittest.TestCase):
                         "source_path": "/music/source.flac",
                         "start": 1_000,
                         "duration": 8_000,
-                        "stems": {"vocals": {"enabled": True, "gain_db": -3, "path": "/stems/vocals.wav"}, "bass": {"enabled": False}},
+                        "stems": {
+                            "vocals": {"enabled": True, "gain_db": -3, "path": "/stems/vocals.wav", "solo": True},
+                            "drums": {"enabled": True, "path": "/stems/drums.wav"},
+                            "bass": {"enabled": True, "path": "/stems/bass.wav", "mute": True},
+                            "other": {"enabled": False},
+                        },
                     }
                 ],
             }
@@ -36,6 +41,7 @@ class SlimeAudioWebTests(unittest.TestCase):
 
         self.assertEqual(stem_event["id"], "stem-hook")
         self.assertEqual(stem_event["stems"]["vocals"]["gain_db"], -3)
+        self.assertEqual([item["state"] for item in stem_event["stem_indicators"]], ["solo", "suppressed", "muted", "disabled"])
 
     def test_session_dashboard_includes_now_and_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
