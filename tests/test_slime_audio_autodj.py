@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_autodj import (
     SelectedTrack,
+    continue_set,
     ensure_utility_deck,
     filter_defensible_source_tracks,
     is_edm_bed_candidate,
@@ -39,9 +40,9 @@ def autodj_args(**overrides):
         "require_section_analysis": False,
         "remix_focus": False,
         "stem_aware_remix": False,
-        "fade_in_ms": 2_500,
-        "fade_out_ms": 5_000,
-        "base_overlap_ms": 8_000,
+        "fade_in_ms": 0,
+        "fade_out_ms": 0,
+        "base_overlap_ms": 0,
         "title": "test",
         "intent": "test",
         "min_tracks": 1,
@@ -54,6 +55,8 @@ def autodj_args(**overrides):
         "min_track_ms": 1,
         "structured_source_only": False,
         "taste_profile": Path("/missing/taste-profile.json"),
+        "pause_file": Path("/missing/dj-watchdog.paused"),
+        "ignore_pause": False,
         "downloaded_track_ratio": 0.10,
         "leftfield_download_ratio": 0.10,
     }
@@ -99,6 +102,19 @@ def analysis(path="/music/lead.flac"):
 
 
 class SlimeAudioAutodjTests(unittest.TestCase):
+    def test_continue_set_respects_pause_file_before_selection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            pause_file = temp / "pause"
+            pause_file.write_text("debug pause", encoding="utf-8")
+            args = autodj_args(runtime=temp, pause_file=pause_file, ignore_pause=False)
+
+            with patch("slime_audio_autodj.candidate_pool") as candidate_pool:
+                result = continue_set(args)
+
+        self.assertEqual(result, 0)
+        candidate_pool.assert_not_called()
+
     def test_taste_profile_scores_top_artists_and_tracks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             profile_path = Path(temp_dir) / "taste.json"

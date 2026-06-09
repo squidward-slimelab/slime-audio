@@ -33,12 +33,13 @@ from slime_audio_dj import (
     cue_points_for_analysis,
     load_analysis_from_db,
 )
-from slime_audio_session import parse_session, probe_duration_ms, write_payload
+from slime_audio_session import add_action, parse_session, probe_duration_ms, write_payload
 from slime_music_library import DEFAULT_DB, connect, normalize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME = REPO_ROOT / "runtime"
 DEFAULT_TASTE_PROFILE = DEFAULT_RUNTIME / "spotify-taste-profile.json"
+DEFAULT_AUTODJ_PAUSE_FILE = DEFAULT_RUNTIME / "dj-watchdog.paused"
 DEFAULT_TARGETS = ["192.168.0.123:47777", "192.168.0.163:47777"]
 DEFAULT_MIN_RUNWAY_MS = 35 * 60 * 1000
 DEFAULT_MAX_TRACKS = 24
@@ -1081,24 +1082,6 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
         if clip.get("planner_role") == "rhythm-bed":
             moves.append({"kind": "structural-rhythm-bed", "source": clip.get("id"), "target": clip.get("bed_under")})
 
-    # Crossfader movement across future handoffs: a basic DJ gesture that every
-    # unattended set should have, even when deeper beatgrid metadata is sparse.
-    points: list[dict[str, float | int]] = []
-    for incoming in clips[1:4]:
-        start = clip_start_ms(incoming)
-        points.extend(
-            [
-                {"at_ms": max(0, start - 8_000), "value": -0.25},
-                {"at_ms": start + 2_000, "value": 0.25},
-                {"at_ms": start + 12_000, "value": 0.0},
-            ]
-        )
-    result = run_session_edit(["crossfader", str(session_path), "--points-json", json.dumps(points)])
-    if result["returncode"] == 0:
-        moves.append({"kind": "crossfader-motion", "result": result})
-    else:
-        failures.append({"kind": "crossfader-motion", "result": result})
-
     echo_target = next((clip for clip in clips[1:] if clip_duration_ms(clip) >= 70_000), clips[1])
     echo_start = max(clip_start_ms(echo_target), clip_end_ms(echo_target) - 12_000)
     result = run_session_edit(
@@ -1141,56 +1124,75 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
     if bed_duration >= 32_000:
         ensure_utility_deck(session_path, "deck-4")
         bed_id = f"autodj-bed-{slugify(str(bed_source['id']))[:32]}"
-        result = run_session_edit(
-            [
-                "add-clip",
-                str(session_path),
-                "--id",
-                bed_id,
-                "--deck",
-                "deck-4",
-                "--path",
-                str(bed_source["path"]),
-                "--start",
-                str(bed_start),
-                "--trim-start",
-                str(min(60_000, max(0, clip_duration_ms(bed_source) - bed_duration - 1_000))),
-                "--duration",
-                str(bed_duration),
-                "--gain-db",
-                str(args.bed_gain_db),
-                "--fade-in-ms",
-                "3000",
-                "--fade-out-ms",
-                "1500",
-            ]
-        )
-        if result["returncode"] == 0:
-            moves.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "result": result})
-            bed_result = run_session_edit(
-                [
-                    "mashup-bed",
-                    str(session_path),
-                    "--bed-id",
-                    bed_id,
-                    "--start",
-                    str(bed_start),
-                    "--end",
-                    str(bed_start + bed_duration),
-                    "--gain-db",
-                    str(args.bed_gain_db),
-                    "--lowpass-hz",
-                    "1800",
-                    "--highpass-hz",
-                    "90",
-                ]
+        try:
+            session_payload = load_session_payload(session_path)
+            session_payload = add_action(
+                session_payload,
+                action={
+                    "type": "load_track",
+                    "id": bed_id,
+                    "deck": "deck-4",
+                    "source_path": str(bed_source["path"]),
+                    "at_ms": bed_start,
+                    "trim_start_ms": min(60_000, max(0, clip_duration_ms(bed_source) - bed_duration - 1_000)),
+                    "duration_ms": bed_duration,
+                    "gain_db": args.bed_gain_db,
+                    "fade_in_ms": 3000,
+                    "fade_out_ms": 1500,
+                    "play_stems": ["drums", "bass", "other"],
+                    "planner_role": "rhythm-bed",
+                    "bed_under": target.get("id"),
+                },
+                db_path=args.db,
+                lock_before_ms=None,
+                force=True,
             )
-            if bed_result["returncode"] == 0:
-                moves.append({"kind": "bed-filter-carve", "source": bed_id, "result": bed_result})
-            else:
-                failures.append({"kind": "bed-filter-carve", "source": bed_id, "result": bed_result})
-        else:
-            failures.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "result": result})
+            for action in (
+                {
+                    "type": "knob_lerp",
+                    "id": f"{bed_id}-gain-ride",
+                    "target": "deck-4",
+                    "param": "gain_db",
+                    "at_ms": bed_start,
+                    "duration_ms": bed_duration,
+                    "from": args.bed_gain_db - 3.0,
+                    "to": args.bed_gain_db - 1.0,
+                },
+                {
+                    "type": "knob_lerp",
+                    "id": f"{bed_id}-lowpass-open",
+                    "target": "deck-4",
+                    "param": "lowpass_hz",
+                    "at_ms": bed_start,
+                    "duration_ms": bed_duration,
+                    "from": 810.0,
+                    "to": 1800.0,
+                },
+                {
+                    "type": "knob_lerp",
+                    "id": f"{bed_id}-highpass-trim",
+                    "target": "deck-4",
+                    "param": "highpass_hz",
+                    "at_ms": bed_start,
+                    "duration_ms": bed_duration,
+                    "from": 170.0,
+                    "to": 90.0,
+                },
+            ):
+                session_payload = add_action(session_payload, action=action, db_path=args.db, lock_before_ms=None, force=True)
+            write_payload(session_path, session_payload)
+            moves.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "action_id": bed_id})
+            moves.append({"kind": "bed-filter-carve", "source": bed_id, "action_id": f"{bed_id}-lowpass-open"})
+        except Exception as error:
+            failures.append(
+                {
+                    "kind": "rhythm-bed",
+                    "source": bed_source["id"],
+                    "target": target["id"],
+                    "id": bed_id,
+                    "error": str(error),
+                }
+            )
 
     validate = subprocess.run(
         [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -1247,6 +1249,18 @@ def launch_runner(session_path: Path, state_path: Path, args: argparse.Namespace
 
 def continue_set(args: argparse.Namespace) -> int:
     args.runtime.mkdir(parents=True, exist_ok=True)
+    if args.pause_file.exists() and not args.ignore_pause:
+        print(
+            json.dumps(
+                {
+                    "status": "paused",
+                    "pause_file": str(args.pause_file),
+                    "reason": args.pause_file.read_text(encoding="utf-8", errors="replace").strip(),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     lock_fd = acquire_lock()
     try:
         if not args.force and playback_healthy():
@@ -1322,6 +1336,8 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
     cont.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     cont.add_argument("--taste-profile", type=Path, default=DEFAULT_TASTE_PROFILE)
+    cont.add_argument("--pause-file", type=Path, default=DEFAULT_AUTODJ_PAUSE_FILE)
+    cont.add_argument("--ignore-pause", action="store_true")
     cont.add_argument("--analysis-cache", type=Path, default=DEFAULT_ANALYSIS_CACHE)
     cont.add_argument("--analysis-backend", choices=["auto", "ffmpeg"], default="ffmpeg")
     cont.add_argument("--analysis-sample-rate", type=int, default=44_100)
@@ -1357,9 +1373,9 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--min-section-clip-ms", type=int, default=32_000)
     cont.add_argument("--min-anchor-section-ms", type=int, default=8_000)
     cont.add_argument("--min-section-confidence", type=float, default=0.45)
-    cont.add_argument("--base-overlap-ms", type=int, default=8_000)
-    cont.add_argument("--fade-in-ms", type=int, default=2_500)
-    cont.add_argument("--fade-out-ms", type=int, default=5_000)
+    cont.add_argument("--base-overlap-ms", type=int, default=0)
+    cont.add_argument("--fade-in-ms", type=int, default=0)
+    cont.add_argument("--fade-out-ms", type=int, default=0)
     cont.add_argument("--bed-duration-ms", type=int, default=96_000)
     cont.add_argument("--bed-trim-start-ms", type=int, default=60_000)
     cont.add_argument("--bed-gain-db", type=float, default=-3.0)
