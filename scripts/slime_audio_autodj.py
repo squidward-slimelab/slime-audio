@@ -34,9 +34,14 @@ DEFAULT_MAX_TRACKS = 10
 AUTODJ_LOCK = Path("/tmp/slime-audio-autodj.lock")
 DEFAULT_SKIP_TERMS = [
     "christmas",
+    "copy",
     "disney",
+    "8-bit",
     "karaoke",
     "kids",
+    "lifter",
+    "loopmasters",
+    "metal gear",
     "ministry of sound",
     "nintendo",
     "ost",
@@ -50,7 +55,28 @@ DEFAULT_SKIP_TERMS = [
     "various artista",
     "video game",
 ]
-DEFAULT_QUERY_LANES = ["leftfield", "techno", "breakbeat", "dubstep", "hip-hop", "punk", "industrial", "experimental"]
+DEFAULT_QUERY_LANES = [
+    "leftfield",
+    "techno",
+    "breakbeat",
+    "dubstep",
+    "hip-hop",
+    "punk",
+    "industrial",
+    "experimental",
+    "electronic",
+    "drum and bass",
+    "post-punk",
+    "garage",
+    "alternative",
+    "hardcore",
+    "metal",
+    "noise",
+    "electro",
+    "indie",
+    "dance-punk",
+    "post-hardcore",
+]
 
 
 @dataclass(frozen=True)
@@ -152,6 +178,7 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
         raise SystemExit("no candidates available")
     rng = random.SystemRandom()
     artist_counts: Counter[str] = Counter()
+    title_counts: Counter[str] = Counter()
     selected: list[SelectedTrack] = []
     runway_ms = 0
     top_window = min(len(pool), max(args.max_tracks * 12, 120))
@@ -166,7 +193,7 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
         haystack = normalize(
             " ".join(str(row.get(key) or "") for key in ("title_guess", "artist_guess", "album_guess", "preferred_path"))
         )
-        if any(term in haystack for term in args.skip_term):
+        if any(normalize(term) in haystack for term in args.skip_term):
             continue
         if args.require_analysis and not (row.get("tunebat_bpm") or row.get("tunebat_energy") is not None):
             continue
@@ -174,9 +201,14 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
             continue
         artist = str(row.get("artist_guess") or "").strip()
         artist_key = normalize(artist) or artist.casefold()
+        title_key = normalize(str(row.get("title_guess") or ""))
         if artist_key and artist_counts[artist_key] >= args.max_per_artist:
             continue
+        if title_key and title_counts[title_key] >= 1:
+            continue
         duration_ms = probe_duration_ms(path)
+        if duration_ms is not None and duration_ms < args.min_track_ms:
+            continue
         selected.append(
             SelectedTrack(
                 path=path,
@@ -192,12 +224,16 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
         )
         if artist_key:
             artist_counts[artist_key] += 1
+        if title_key:
+            title_counts[title_key] += 1
         runway_ms += duration_ms or args.default_track_ms
         if len(selected) >= args.max_tracks or runway_ms >= args.min_runway_ms:
             break
 
-    if len(selected) < args.min_tracks:
-        raise SystemExit(f"only selected {len(selected)} tracks; refusing weak autodj set")
+    if len(selected) < args.min_tracks and runway_ms < args.min_runway_ms:
+        raise SystemExit(
+            f"only selected {len(selected)} tracks / {round(runway_ms / 60000, 1)} min; refusing weak autodj set"
+        )
     return selected
 
 
@@ -233,6 +269,7 @@ def run_planner(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
         "--cached-analysis-only",
         "--routine-every",
         str(args.routine_every),
+        "--no-routines",
         "--apply",
     ]
     result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
@@ -273,6 +310,20 @@ def creative_source_score(clip: dict[str, Any]) -> int:
         if word in haystack:
             score += 2
     if clip_duration_ms(clip) >= 120_000:
+        score += 1
+    return score
+
+
+def vocal_target_score(clip: dict[str, Any]) -> int:
+    haystack = normalize(" ".join(str(clip.get(key) or "") for key in ("id", "path")))
+    score = 0
+    for word in ("vocal", "rap", "hip-hop", "punk", "song", "feat", "with"):
+        if word in haystack:
+            score += 1
+    for word in ("instrumental", "withoutvocals", "bed", "techno", "breakbeat"):
+        if word in haystack:
+            score -= 2
+    if clip_duration_ms(clip) >= 90_000:
         score += 1
     return score
 
@@ -342,8 +393,10 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
     else:
         failures.append({"kind": "echo-exit", "target": echo_target["id"], "result": result})
 
-    bed_source = max(clips, key=creative_source_score)
-    target = next((clip for clip in clips[2:] if str(clip.get("id")) != str(bed_source.get("id"))), clips[-1])
+    bed_candidates = [clip for clip in clips if creative_source_score(clip) > 0]
+    bed_source = max(bed_candidates or clips, key=creative_source_score)
+    targets = [clip for clip in clips[1:] if str(clip.get("id")) != str(bed_source.get("id"))]
+    target = max(targets, key=vocal_target_score) if targets else clips[-1]
     bed_start = clip_start_ms(target) + min(30_000, max(0, clip_duration_ms(target) // 4))
     bed_duration = min(96_000, max(32_000, clip_end_ms(target) - bed_start - 2_000))
     if bed_duration >= 32_000:
@@ -398,27 +451,6 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
                 failures.append({"kind": "bed-filter-carve", "source": bed_id, "result": bed_result})
         else:
             failures.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "result": result})
-
-    routine_target = next((clip for clip in reversed(clips) if clip_duration_ms(clip) >= 120_000), clips[-1])
-    routine_start = clip_start_ms(routine_target) + min(45_000, max(8_000, clip_duration_ms(routine_target) // 3))
-    result = run_session_edit(
-        [
-            "instant-double-routine",
-            str(session_path),
-            "--source-id",
-            str(routine_target["id"]),
-            "--id",
-            f"autodj-loop-{slugify(str(routine_target['id']))[:28]}",
-            "--recipe",
-            "loop-roll",
-            "--start",
-            str(routine_start),
-        ]
-    )
-    if result["returncode"] == 0:
-        moves.append({"kind": "beatgrid-loop-roll", "target": routine_target["id"], "result": result})
-    else:
-        failures.append({"kind": "beatgrid-loop-roll", "target": routine_target["id"], "result": result})
 
     validate = subprocess.run(
         [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -545,6 +577,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--min-score", type=float, default=0.20)
     cont.add_argument("--default-track-ms", type=int, default=240_000)
+    cont.add_argument("--min-track-ms", type=int, default=90_000)
     cont.add_argument("--base-overlap-ms", type=int, default=8_000)
     cont.add_argument("--fade-in-ms", type=int, default=2_500)
     cont.add_argument("--fade-out-ms", type=int, default=5_000)
