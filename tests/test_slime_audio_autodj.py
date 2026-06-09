@@ -14,6 +14,7 @@ from slime_audio_autodj import (
     SelectedTrack,
     ensure_utility_deck,
     filter_defensible_source_tracks,
+    is_edm_bed_candidate,
     is_downloaded_candidate,
     load_taste_profile,
     rhythm_bed_score,
@@ -182,6 +183,63 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         self.assertTrue(any("downloaded material lane" in reason for reason in reasons))
         self.assertTrue(any("spotify left-field download lane" in reason for reason in reasons))
         self.assertTrue(is_downloaded_candidate({"preferred_path": str(leftfield_download)}))
+
+    def test_edm_download_beds_use_discretion_not_spotify_leftfield(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            taste_profile = temp / "taste.json"
+            taste_profile.write_text(json.dumps({"top_artists": ["Known Artist"]}), encoding="utf-8")
+            lead = temp / "library" / "Known Artist" / "Album" / "lead.flac"
+            bed = temp / "_Slime Incoming" / "Techno Sound Beds" / "Rrose" / "Waterfall.flac"
+            leftfield_song = temp / "_Slime Incoming" / "Songs" / "Odd Artist" / "Song.flac"
+            for path in [lead, bed, leftfield_song]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"a")
+            rows = [
+                {
+                    "duplicate_key": "lead",
+                    "preferred_path": str(lead),
+                    "artist_guess": "Known Artist",
+                    "title_guess": "Lead",
+                    "album_guess": "Album",
+                    "score": 1.0,
+                    "reasons": [],
+                },
+                {
+                    "duplicate_key": "bed",
+                    "preferred_path": str(bed),
+                    "artist_guess": "Rrose",
+                    "title_guess": "Waterfall",
+                    "album_guess": "Techno Sound Beds",
+                    "tunebat_bpm": 132.0,
+                    "score": 0.9,
+                    "reasons": ["rhythm lane query: hard techno"],
+                },
+                {
+                    "duplicate_key": "leftfield-song",
+                    "preferred_path": str(leftfield_song),
+                    "artist_guess": "Odd Artist",
+                    "title_guess": "Song",
+                    "album_guess": "Album",
+                    "score": 0.2,
+                    "reasons": [],
+                },
+            ]
+            args = autodj_args(
+                max_tracks=10,
+                max_per_artist=2,
+                taste_profile=taste_profile,
+                downloaded_track_ratio=0.20,
+                leftfield_download_ratio=0.50,
+            )
+            with patch("slime_audio_autodj.candidate_pool", return_value=rows), patch("slime_audio_autodj.probe_duration_ms", return_value=120_000):
+                selected = select_tracks(args)
+
+        bed_track = next(track for track in selected if track.title == "Waterfall")
+        self.assertTrue(is_edm_bed_candidate(rows[1]))
+        self.assertIn("edm bed discretion lane", bed_track.reasons)
+        self.assertIn("downloaded material lane", bed_track.reasons)
+        self.assertNotIn("spotify left-field download lane", bed_track.reasons)
 
     def test_vanilla_lead_guard_rejects_untouched_long_lead(self):
         with tempfile.TemporaryDirectory() as temp_dir:

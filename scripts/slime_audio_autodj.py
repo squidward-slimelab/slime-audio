@@ -227,6 +227,41 @@ def is_downloaded_candidate(row: dict[str, Any]) -> bool:
     return "/_slime incoming/" in path or "/downloads/" in path or "/sldl/" in path or "-sldl/" in path
 
 
+def is_edm_bed_candidate(row: dict[str, Any]) -> bool:
+    haystack = normalize(
+        " ".join(
+            [
+                str(row.get("title_guess") or ""),
+                str(row.get("artist_guess") or ""),
+                str(row.get("album_guess") or ""),
+                str(row.get("preferred_path") or ""),
+                " ".join(str(reason) for reason in row.get("reasons") or []),
+            ]
+        )
+    )
+    for word in (
+        "techno",
+        "hard techno",
+        "drum and bass",
+        "dnb",
+        "dubstep",
+        "riddim",
+        "bass music",
+        "neurofunk",
+        "jungle",
+        "breakbeat",
+        "sound beds",
+        "rhythm lane query",
+    ):
+        if word in haystack:
+            return True
+    bpm = row.get("tunebat_bpm")
+    try:
+        return bpm is not None and 128 <= float(bpm) <= 180 and is_downloaded_candidate(row)
+    except (TypeError, ValueError):
+        return False
+
+
 def load_state() -> dict[str, Any]:
     try:
         with urllib.request.urlopen("http://127.0.0.1:8765/api/state", timeout=4) as response:
@@ -320,14 +355,18 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
     runway_ms = 0
     top_window = min(len(pool), max(args.max_tracks * 12, 120))
     for row in pool:
-        affinity = taste_affinity(row, taste_profile)
+        edm_bed = is_edm_bed_candidate(row)
+        row["edm_bed_discretion"] = edm_bed
+        if edm_bed:
+            row.setdefault("reasons", []).append("edm bed discretion lane")
+        affinity = 0.0 if edm_bed else taste_affinity(row, taste_profile)
         row["spotify_taste_affinity"] = affinity
         if affinity:
             row.setdefault("reasons", []).append(f"spotify taste affinity {affinity:.2f}")
         if is_downloaded_candidate(row):
             row["downloaded_material"] = True
             row.setdefault("reasons", []).append("downloaded material lane")
-            if taste_profile.available and not is_taste_anchor(row, taste_profile):
+            if taste_profile.available and not edm_bed and not is_taste_anchor(row, taste_profile):
                 row["spotify_leftfield_download"] = True
                 row.setdefault("reasons", []).append("spotify left-field download lane")
     quota_ranked = list(pool)
@@ -1264,6 +1303,7 @@ def continue_set(args: argparse.Namespace) -> int:
                 "taste_profile_available": load_taste_profile(args.taste_profile).available,
                 "downloaded_track_ratio": args.downloaded_track_ratio,
                 "leftfield_download_ratio": args.leftfield_download_ratio,
+                "edm_beds_use_spotify_taste": False,
             },
         }
         plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
