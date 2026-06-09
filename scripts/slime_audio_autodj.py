@@ -23,6 +23,15 @@ from slime_audio_candidates import (
     constraints_to_payload,
     load_constraints,
 )
+from slime_audio_dj import (
+    DEFAULT_CACHE as DEFAULT_ANALYSIS_CACHE,
+    DEFAULT_TUNEBAT_LOCAL_ANALYZER,
+    TrackAnalysis,
+    analyze_with_cache,
+    coerce_structure,
+    cue_points_for_analysis,
+    load_analysis_from_db,
+)
 from slime_audio_session import parse_session, probe_duration_ms, write_payload
 from slime_music_library import DEFAULT_DB, connect, normalize
 
@@ -94,6 +103,14 @@ class SelectedTrack:
     reasons: list[str]
 
 
+@dataclass(frozen=True)
+class SourceWindow:
+    trim_start_ms: int
+    duration_ms: int
+    reason: str
+    structure_kind: str | None
+
+
 def iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -163,6 +180,7 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
             query=query,
             pool_limit=args.sql_pool_limit,
             randomize_pool=query is None,
+            require_structure=args.structured_source_only,
         )
         for row in rows:
             key = str(row.get("duplicate_key") or row.get("preferred_path"))
@@ -229,7 +247,9 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
         if title_key:
             title_counts[title_key] += 1
         runway_ms += duration_ms or args.default_track_ms
-        if len(selected) >= args.max_tracks or runway_ms >= args.min_runway_ms:
+        if len(selected) >= args.max_tracks:
+            break
+        if not args.structured_source_only and runway_ms >= args.min_runway_ms:
             break
 
     if len(selected) < args.min_tracks and runway_ms < args.min_runway_ms:
@@ -274,30 +294,148 @@ def lead_score(track: SelectedTrack) -> int:
     return score
 
 
-def session_payload(selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
+def load_or_analyze_selected(selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, TrackAnalysis]:
+    analyses: dict[str, TrackAnalysis] = {}
+    missing: list[Path] = []
+    for track in selected:
+        path = Path(track.path)
+        analysis = load_analysis_from_db(args.db, path)
+        if analysis is None:
+            missing.append(path)
+        else:
+            analyses[track.path] = analysis
+    if missing and args.analyze_missing_sections:
+        for analysis in analyze_with_cache(
+            missing,
+            args.analysis_cache,
+            args.analysis_backend,
+            args.analysis_sample_rate,
+            args.db,
+            args.tunebat_analyzer,
+        ):
+            analyses[analysis.path] = analysis
+    return analyses
+
+
+def source_window_for_track(track: SelectedTrack, analysis: TrackAnalysis | None, args: argparse.Namespace, *, fast_mode: bool) -> SourceWindow:
+    source_duration_ms = track.duration_ms or args.default_track_ms
+    max_clip_ms = args.max_fast_lead_clip_ms if fast_mode else args.max_lead_clip_ms
+    min_clip_ms = min(args.min_section_clip_ms, max_clip_ms)
+    if analysis is not None:
+        windows = [
+            window
+            for window in coerce_structure(analysis.structure)
+            if window.kind not in {"outro"}
+            and window.confidence >= args.min_section_confidence
+            and window.end_ms > window.start_ms
+        ]
+        candidates: list[SourceWindow] = []
+        for window in windows:
+            duration_ms = window.end_ms - window.start_ms
+            if duration_ms < min_clip_ms:
+                continue
+            clipped_duration_ms = min(duration_ms, max_clip_ms)
+            if duration_ms > max_clip_ms and not fast_mode:
+                continue
+            candidates.append(
+                SourceWindow(
+                    trim_start_ms=window.start_ms,
+                    duration_ms=clipped_duration_ms,
+                    reason=f"structure:{window.kind}",
+                    structure_kind=window.kind,
+                )
+            )
+        if candidates:
+            priority = {"drop": 0, "build": 1, "breakdown": 2, "intro": 3}
+            candidates.sort(key=lambda item: (priority.get(str(item.structure_kind), 9), item.trim_start_ms))
+            return candidates[0]
+        cues = [
+            cue
+            for cue in cue_points_for_analysis(analysis)
+            if cue.kind in {"drop", "hook", "clean_intro", "safe_loop"}
+            and cue.end_ms is not None
+            and cue.end_ms > cue.at_ms
+            and cue.end_ms - cue.at_ms >= min_clip_ms
+        ]
+        if cues:
+            cue = sorted(cues, key=lambda item: (item.kind not in {"drop", "hook"}, item.at_ms))[0]
+            return SourceWindow(
+                trim_start_ms=cue.at_ms,
+                duration_ms=min(cue.end_ms - cue.at_ms, max_clip_ms),
+                reason=f"cue:{cue.kind}",
+                structure_kind=cue.kind,
+            )
+        phrase_ms = analysis.beatgrid.phrase_ms if analysis.beatgrid and analysis.beatgrid.phrase_ms else None
+        if phrase_ms and not args.require_section_analysis:
+            phrases = max(1, max_clip_ms // phrase_ms)
+            duration_ms = min(source_duration_ms, phrases * phrase_ms)
+            if duration_ms >= min_clip_ms:
+                return SourceWindow(0, duration_ms, "phrase-aligned-fallback", None)
+    if args.require_section_analysis:
+        raise SystemExit(f"no defensible structure window for {track.artist} - {track.title}")
+    return SourceWindow(0, min(source_duration_ms, max_clip_ms), "duration-fallback", None)
+
+
+def fast_section_mode_for(tracks: list[SelectedTrack]) -> bool:
+    rhythm_sources = [track for track in tracks if rhythm_bed_score(track) > 0]
+    return any(material_score(track, ("dubstep", "bass", "drum and bass", "dnb", "riddim", "heavy")) > 0 for track in rhythm_sources)
+
+
+def filter_defensible_source_tracks(
+    selected: list[SelectedTrack],
+    analyses: dict[str, TrackAnalysis],
+    args: argparse.Namespace,
+) -> tuple[list[SelectedTrack], list[dict[str, str]]]:
+    fast_mode = fast_section_mode_for(selected)
+    accepted: list[SelectedTrack] = []
+    rejected: list[dict[str, str]] = []
+    for track in selected:
+        try:
+            source_window_for_track(track, analyses.get(track.path), args, fast_mode=fast_mode)
+        except SystemExit as exc:
+            rejected.append(
+                {
+                    "path": track.path,
+                    "artist": track.artist,
+                    "title": track.title,
+                    "reason": str(exc),
+                }
+            )
+            continue
+        accepted.append(track)
+    if len(accepted) < args.min_tracks:
+        summary = "; ".join(f"{item['artist']} - {item['title']}" for item in rejected[:5])
+        raise SystemExit(f"only {len(accepted)} defensible structured track(s); rejected {len(rejected)} ({summary})")
+    return accepted, rejected
+
+
+def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, analyses: dict[str, TrackAnalysis] | None = None) -> dict[str, Any]:
+    analyses = analyses or {}
     rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
     leads = [track for track in selected if track not in rhythm_sources]
     if len(leads) < args.min_tracks:
         leads = sorted(selected, key=lead_score, reverse=True)
 
+    fast_mode = fast_section_mode_for(selected)
     cursor_ms = 0
     lead_clips: list[dict[str, Any]] = []
     for index, track in enumerate(leads[: args.max_tracks]):
-        source_duration_ms = track.duration_ms or args.default_track_ms
-        duration_ms = min(source_duration_ms, args.max_lead_clip_ms)
+        source_window = source_window_for_track(track, analyses.get(track.path), args, fast_mode=fast_mode)
         clip = {
             "id": f"lead-{index + 1:03d}-{slugify(track.title)[:40]}",
             "deck": "deck-2" if index % 2 == 0 else "deck-3",
             "path": track.path,
             "start_ms": cursor_ms,
-            "trim_start_ms": 0,
-            "duration_ms": duration_ms,
+            "trim_start_ms": source_window.trim_start_ms,
+            "duration_ms": source_window.duration_ms,
             "fade_in_ms": 0 if index == 0 else args.fade_in_ms,
             "fade_out_ms": args.fade_out_ms,
             "planner_role": "lead",
+            "source_window_reason": source_window.reason,
+            "source_structure_kind": source_window.structure_kind,
         }
         lead_clips.append(clip)
-        cursor_ms += max(1, duration_ms - args.base_overlap_ms)
+        cursor_ms += max(1, source_window.duration_ms - args.base_overlap_ms)
 
     payload = {
         "version": 1,
@@ -318,6 +456,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace) -> 
         "lead_count": len(lead_clips),
         "bed_count": 0,
         "max_lead_clip_ms": args.max_lead_clip_ms,
+        "fast_section_mode": fast_mode,
     }
     parse_session(payload)
     return payload
@@ -604,6 +743,9 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
     failures: list[dict[str, Any]] = []
     if len(clips) < 3:
         raise SystemExit("creative pass needs at least 3 clips")
+    for clip in clips:
+        if clip.get("planner_role") == "rhythm-bed":
+            moves.append({"kind": "structural-rhythm-bed", "source": clip.get("id"), "target": clip.get("bed_under")})
 
     # Crossfader movement across future handoffs: a basic DJ gesture that every
     # unattended set should have, even when deeper beatgrid metadata is sparse.
@@ -780,7 +922,9 @@ def continue_set(args: argparse.Namespace) -> int:
         session_path = args.runtime / f"{args.slug}.json"
         state_path = args.runtime / f"{args.slug}-state.json"
         plan_path = args.runtime / f"{args.slug}-plan.json"
-        payload = session_payload(selected, args)
+        analyses = load_or_analyze_selected(selected, args)
+        selected, structure_rejections = filter_defensible_source_tracks(selected, analyses, args)
+        payload = session_payload(selected, args, analyses)
         write_payload(session_path, payload)
         append_selection_history(selected, args, session_path=session_path, dry_run=args.dry_run)
         planner = run_planner(session_path, args)
@@ -811,6 +955,8 @@ def continue_set(args: argparse.Namespace) -> int:
             "creative": creative,
             "vanilla_guard": vanilla_guard,
             "tracks": [asdict(track) for track in selected],
+            "structure_rejections": structure_rejections,
+            "analysis_coverage": {"selected": len(selected), "available": len(analyses)},
         }
         plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(plan, indent=2, sort_keys=True))
@@ -827,6 +973,13 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--constraints", type=Path, default=DEFAULT_CONSTRAINTS)
     cont.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
     cont.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    cont.add_argument("--analysis-cache", type=Path, default=DEFAULT_ANALYSIS_CACHE)
+    cont.add_argument("--analysis-backend", choices=["auto", "ffmpeg"], default="ffmpeg")
+    cont.add_argument("--analysis-sample-rate", type=int, default=44_100)
+    cont.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
+    cont.add_argument("--analyze-missing-sections", action=argparse.BooleanOptionalAction, default=True)
+    cont.add_argument("--require-section-analysis", action=argparse.BooleanOptionalAction, default=True)
+    cont.add_argument("--structured-source-only", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--title", default=f"Autodj Continuation {time.strftime('%Y-%m-%d %H%M')}")
     cont.add_argument("--slug", default=f"autodj-continuation-{time.strftime('%Y%m%d-%H%M%S')}")
     cont.add_argument("--intent", default="continue the room from fresh database-backed candidates without hardcoded tracks")
@@ -843,10 +996,13 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--selection-jitter", type=float, default=0.12)
     cont.add_argument("--skip-term", action="append", default=list(DEFAULT_SKIP_TERMS))
     cont.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
-    cont.add_argument("--min-score", type=float, default=0.20)
+    cont.add_argument("--min-score", type=float, default=None)
     cont.add_argument("--default-track-ms", type=int, default=240_000)
     cont.add_argument("--min-track-ms", type=int, default=90_000)
     cont.add_argument("--max-lead-clip-ms", type=int, default=90_000)
+    cont.add_argument("--max-fast-lead-clip-ms", type=int, default=64_000)
+    cont.add_argument("--min-section-clip-ms", type=int, default=32_000)
+    cont.add_argument("--min-section-confidence", type=float, default=0.45)
     cont.add_argument("--base-overlap-ms", type=int, default=8_000)
     cont.add_argument("--fade-in-ms", type=int, default=2_500)
     cont.add_argument("--fade-out-ms", type=int, default=5_000)

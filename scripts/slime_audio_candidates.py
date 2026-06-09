@@ -267,6 +267,7 @@ def candidate_rows(
     include_untagged: bool = False,
     pool_limit: int | None = None,
     randomize_pool: bool = False,
+    require_structure: bool = False,
 ) -> list[dict[str, Any]]:
     recent_plays = recent_play_index(conn, history_path, recent_limit)
     filters = [
@@ -301,6 +302,20 @@ def candidate_rows(
         filters.append("(normalized_title LIKE ? OR normalized_artist LIKE ? OR lower(locations) LIKE lower(?))")
         normalized = f"%{normalize(query)}%"
         params.extend([normalized, normalized, f"%{query}%"])
+    if require_structure:
+        filters.append(
+            """
+            EXISTS (
+                SELECT 1
+                FROM track_dj_structure s
+                WHERE s.path = tracks.preferred_path
+                  AND s.kind != 'outro'
+                  AND s.confidence >= 0.45
+                  AND s.end_ms > s.start_ms
+                  AND s.end_ms - s.start_ms >= 32000
+            )
+            """
+        )
 
     where = " AND ".join(filters)
     order_by = "ORDER BY random()" if randomize_pool else "ORDER BY preferred_quality_score DESC, copies DESC, server_count DESC"
