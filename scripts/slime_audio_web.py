@@ -103,6 +103,39 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def session_stem_group_event(group: dict[str, Any]) -> dict[str, Any]:
+    start_ms = parse_ms(group.get("start_ms", group.get("start", 0)), "stem group start")
+    duration = group.get("duration_ms", group.get("duration"))
+    duration_ms = parse_ms(duration, "stem group duration") if duration is not None else None
+    stems = group.get("stems") if isinstance(group.get("stems"), dict) else {}
+    return {
+        "id": group.get("id"),
+        "kind": "stem-group",
+        "deck": group.get("deck"),
+        "source_path": group.get("source_path") or group.get("path"),
+        "stem_set_id": group.get("stem_set_id"),
+        "manifest_path": group.get("manifest_path"),
+        "start_ms": start_ms,
+        "trim_start_ms": parse_ms(group.get("trim_start_ms", group.get("trim_start", 0)), "stem group trim_start"),
+        "duration_ms": duration_ms,
+        "end_ms": start_ms + duration_ms if duration_ms is not None else None,
+        "gain_db": group.get("gain_db", 0.0),
+        "tempo_shift_pct": group.get("tempo_shift_pct", 0.0),
+        "pitch_shift_semitones": group.get("pitch_shift_semitones", 0),
+        "stems": {
+            str(name): {
+                "enabled": bool(stem.get("enabled", True)) if isinstance(stem, dict) else bool(stem),
+                "mute": bool(stem.get("mute", False)) if isinstance(stem, dict) else False,
+                "solo": bool(stem.get("solo", False)) if isinstance(stem, dict) else False,
+                "gain_db": stem.get("gain_db", 0.0) if isinstance(stem, dict) else 0.0,
+                "path": stem.get("path") if isinstance(stem, dict) else None,
+            }
+            for name, stem in stems.items()
+        },
+        **format_title(str(group.get("source_path") or group.get("path") or "")),
+    }
+
+
 def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
     parse_session(payload)
     events: list[dict[str, Any]] = []
@@ -111,6 +144,15 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
         events.append(event)
         for automation in clip.get("automations", []):
             events.append(automation_payload(automation, owner=str(clip.get("id"))))
+    for group in payload.get("stem_groups", payload.get("stemGroups", [])):
+        events.append(session_stem_group_event(group))
+        for automation in group.get("automations", []):
+            events.append(automation_payload(automation, owner=str(group.get("id"))))
+        stems = group.get("stems") if isinstance(group.get("stems"), dict) else {}
+        for stem_name, stem in stems.items():
+            if isinstance(stem, dict):
+                for automation in stem.get("automations", []):
+                    events.append(automation_payload(automation, owner=f"stem-group:{group.get('id')}:{stem_name}"))
     for lean_in in payload.get("mic_lean_ins", payload.get("micLeanIns", [])):
         start_ms = parse_ms(lean_in.get("start_ms", lean_in.get("start", 0)), "mic lean-in start")
         events.append(
@@ -182,7 +224,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "routine_recipe": slip.get("routine_recipe"),
             }
         )
-    kind_order = {"song": 0, "vocal": 1, "effect": 2, "slip": 3, "automation": 4}
+    kind_order = {"song": 0, "stem-group": 1, "vocal": 2, "effect": 3, "slip": 4, "automation": 5}
     return sorted(
         events,
         key=lambda item: (
@@ -250,6 +292,8 @@ def display_title_for_event(event: dict[str, Any]) -> str:
         return str(event.get("routine_recipe") or event.get("planner_role") or event.get("id") or "effect track")
     if event.get("kind") == "slip":
         return "slip/flux"
+    if event.get("kind") == "stem-group":
+        return str(event.get("title") or event.get("id") or "stem group")
     return str(event.get("title") or event.get("id") or "untitled")
 
 
@@ -290,6 +334,15 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
     if event.get("kind") == "slip":
         recipe = f" | {event.get('routine_recipe')}" if event.get("routine_recipe") else ""
         return f"{event.get('target_clip_id')} over {event.get('source_clip_id')}{recipe}"
+    if event.get("kind") == "stem-group":
+        stems = event.get("stems") if isinstance(event.get("stems"), dict) else {}
+        active = [
+            f"{name}{' solo' if stem.get('solo') else ''}{' muted' if stem.get('mute') else ''}"
+            for name, stem in stems.items()
+            if isinstance(stem, dict) and stem.get("enabled", True)
+        ]
+        mix = ", ".join(active) if active else "full-track fallback"
+        return f"stem deck | {mix}"
     if event.get("routine_recipe"):
         return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":

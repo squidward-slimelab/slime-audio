@@ -11,7 +11,7 @@ import urllib.request
 from dataclasses import replace
 from pathlib import Path
 
-from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, SlipEvent, load_payload, load_session, parse_ms
+from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, SlipEvent, StemGroup, StemState, load_payload, load_session, parse_ms
 
 
 def seconds(ms: int) -> str:
@@ -117,6 +117,33 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
             )
         )
 
+    stem_groups: list[StemGroup] = []
+    for group in session.stem_groups:
+        if group.end_ms is not None and group.end_ms <= from_ms:
+            continue
+        if window_end_ms is not None and group.start_ms >= window_end_ms:
+            continue
+        if group.start_ms < from_ms and group.duration_ms is None:
+            continue
+        overlap_ms = max(0, from_ms - group.start_ms)
+        group_duration_ms = group.duration_ms - overlap_ms if group.duration_ms is not None else None
+        if group_duration_ms is not None and window_end_ms is not None:
+            group_duration_ms = min(group_duration_ms, max(0, window_end_ms - max(group.start_ms, from_ms)))
+        if group_duration_ms is not None and group_duration_ms <= 0:
+            continue
+        shifted_automations = [
+            shifted for automation in group.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
+        ]
+        stem_groups.append(
+            replace(
+                group,
+                start_ms=max(0, group.start_ms - from_ms),
+                trim_start_ms=group.trim_start_ms + int(round(overlap_ms * tempo_factor(group))),
+                duration_ms=group_duration_ms,
+                automations=shifted_automations,
+            )
+        )
+
     mic_lean_ins = [
         replace(
             lean_in,
@@ -156,6 +183,7 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         version=session.version,
         decks=session.decks,
         clips=clips,
+        stem_groups=stem_groups,
         mic_lean_ins=mic_lean_ins,
         effects=effects,
         automations=automations,
@@ -223,6 +251,7 @@ def collect_master_automation(session: MixSession, param: str) -> list[tuple[int
 
 def session_duration_ms(session: MixSession, lean_in_default_ms: int = 5000) -> int:
     ends = [clip.end_ms for clip in session.clips if clip.end_ms is not None]
+    ends.extend(group.end_ms for group in session.stem_groups if group.end_ms is not None)
     ends.extend(lean_in.start_ms + lean_in_default_ms for lean_in in session.mic_lean_ins)
     ends.extend(effect.end_ms for effect in session.effects)
     ends.extend(event.end_ms for event in session.slip_events)
@@ -272,6 +301,31 @@ def deck_automation_windows(session: MixSession, clip: Clip, param: str) -> list
     return sorted(windows, key=lambda item: item[0])
 
 
+def event_deck_automation_windows(session: MixSession, deck: str, start_ms: int, end_ms: int | None, param: str) -> list[tuple[int, int, float]]:
+    if end_ms is None:
+        return []
+    windows: list[tuple[int, int, float]] = []
+    for automation in session.deck_automations:
+        if automation.target != deck or automation.param != param:
+            continue
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        for left, right in zip(points, points[1:]):
+            if right.at_ms <= left.at_ms:
+                continue
+            overlap_start_ms = max(left.at_ms, start_ms)
+            overlap_end_ms = min(right.at_ms, end_ms)
+            if overlap_end_ms <= overlap_start_ms:
+                continue
+            windows.append(
+                (
+                    max(0, overlap_start_ms - start_ms),
+                    max(0, overlap_end_ms - start_ms),
+                    interpolate_automation_value(left, right, overlap_start_ms),
+                )
+            )
+    return sorted(windows, key=lambda item: item[0])
+
+
 def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list[tuple[int, int, float]]:
     windows: list[tuple[int, int, float]] = []
     automations = [*clip.automations, *(automation for automation in session.automations if automation.target == clip.id)]
@@ -287,6 +341,44 @@ def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list
             continue
         windows.append((start_ms, end_ms, float(points[0].value)))
     windows.extend(deck_automation_windows(session, clip, param))
+    return sorted(windows, key=lambda item: item[0])
+
+
+def group_automation_windows(session: MixSession, group: StemGroup, param: str) -> list[tuple[int, int, float]]:
+    windows: list[tuple[int, int, float]] = []
+    automations = [*group.automations, *(automation for automation in session.automations if automation.target == group.id)]
+    for automation in automations:
+        if automation.param != param:
+            continue
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        if len(points) < 2:
+            continue
+        start_ms = max(0, points[0].at_ms - group.start_ms)
+        end_ms = max(0, points[-1].at_ms - group.start_ms)
+        if end_ms <= start_ms:
+            continue
+        windows.append((start_ms, end_ms, float(points[0].value)))
+    windows.extend(event_deck_automation_windows(session, group.deck, group.start_ms, group.end_ms, param))
+    return sorted(windows, key=lambda item: item[0])
+
+
+def stem_automation_windows(session: MixSession, group: StemGroup, stem_name: str, stem: StemState, param: str) -> list[tuple[int, int, float]]:
+    target = f"stem-group:{group.id}:{stem_name}"
+    windows: list[tuple[int, int, float]] = []
+    for automation in [*stem.automations, *(item for item in session.automations if item.target == target)]:
+        if automation.param != param:
+            continue
+        points = sorted(automation.points, key=lambda point: point.at_ms)
+        if len(points) < 2:
+            continue
+        start_ms = max(0, points[0].at_ms - group.start_ms)
+        end_ms = max(0, points[-1].at_ms - group.start_ms)
+        if end_ms <= start_ms:
+            continue
+        value = points[0].value
+        if param in {"mute", "solo"}:
+            value = 1.0 if bool(value) else 0.0
+        windows.append((start_ms, end_ms, float(value)))
     return sorted(windows, key=lambda item: item[0])
 
 
@@ -385,6 +477,26 @@ def clip_crossfader_windows(session: MixSession, clip: Clip) -> list[tuple[int, 
     return sorted(windows, key=lambda item: item[0])
 
 
+def group_crossfader_windows(session: MixSession, group: StemGroup) -> list[tuple[int, int, float, float]]:
+    side = session.fader_routing.get(group.deck, "THRU").upper()
+    if side == "THRU":
+        return []
+    windows: list[tuple[int, int, float, float]] = []
+    for absolute_start_ms, absolute_end_ms, start_position, end_position in crossfader_position_segments(session):
+        overlap_start_ms = max(absolute_start_ms, group.start_ms)
+        overlap_end_ms = absolute_end_ms if group.end_ms is None else min(absolute_end_ms, group.end_ms)
+        if overlap_end_ms <= overlap_start_ms:
+            continue
+        absolute_segment = (absolute_start_ms, absolute_end_ms, start_position, end_position, 0)
+        overlap_start_position = interpolate_crossfader_position(absolute_segment, overlap_start_ms)
+        overlap_end_position = interpolate_crossfader_position(absolute_segment, overlap_end_ms)
+        start_ms = max(0, overlap_start_ms - group.start_ms)
+        end_ms = max(0, overlap_end_ms - group.start_ms)
+        for split_start, split_end, split_left, split_right in split_crossfader_segment(start_ms, end_ms, overlap_start_position, overlap_end_position):
+            windows.append((split_start, split_end, crossfader_gain(split_left, side), crossfader_gain(split_right, side)))
+    return sorted(windows, key=lambda item: item[0])
+
+
 def clip_effect_filters(session: MixSession, clip: Clip) -> str:
     filters: list[str] = []
     for effect in session.effects:
@@ -432,6 +544,71 @@ def effect_target_clips(session: MixSession, effect: EffectEvent) -> list[Clip]:
     if effect.target in {"master", "all"}:
         return [clip for clip in session.clips if clip.start_ms < effect.end_ms and effect.start_ms < (clip.end_ms or clip.start_ms)]
     return [clip for clip in session.clips if clip.id == effect.target]
+
+
+def manifest_stem_paths(group: StemGroup) -> dict[str, str]:
+    if not group.manifest_path:
+        return {}
+    manifest_path = Path(group.manifest_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stems = payload.get("stems") or {}
+    result: dict[str, str] = {}
+    for stem_name, stem_payload in stems.items():
+        if not isinstance(stem_payload, dict) or not stem_payload.get("path"):
+            continue
+        path = Path(str(stem_payload["path"]))
+        result[str(stem_name)] = str(path if path.is_absolute() else manifest_path.parent / path)
+    return result
+
+
+def stem_group_inputs(group: StemGroup) -> list[tuple[str, StemState, str, bool]]:
+    manifest_paths = manifest_stem_paths(group)
+    active_items = [(name, stem) for name, stem in group.stems.items() if stem.enabled and not stem.mute]
+    solo_items = [(name, stem) for name, stem in active_items if stem.solo]
+    selected = solo_items or active_items
+    inputs: list[tuple[str, StemState, str, bool]] = []
+    for stem_name, stem in selected:
+        path = stem.path or manifest_paths.get(stem_name)
+        if path:
+            inputs.append((stem_name, stem, path, False))
+    if inputs:
+        return inputs
+    return [("full", StemState(path=group.source_path), group.source_path, True)]
+
+
+def stem_static_filters(stem: StemState) -> list[str]:
+    filters: list[str] = []
+    if stem.lowpass_hz is not None:
+        filters.append(f"lowpass=f={stem.lowpass_hz:.3f}")
+    if stem.highpass_hz is not None:
+        filters.append(f"highpass=f={stem.highpass_hz:.3f}")
+    if stem.eq_low_db:
+        filters.append(f"bass=g={stem.eq_low_db:.3f}:f=120:w=0.7")
+    if stem.eq_mid_db:
+        filters.append(f"equalizer=f=1000:t=q:w=1.0:g={stem.eq_mid_db:.3f}")
+    if stem.eq_high_db:
+        filters.append(f"treble=g={stem.eq_high_db:.3f}:f=6500:w=0.7")
+    return filters
+
+
+def stem_dynamic_filters(session: MixSession, group: StemGroup, stem_name: str, stem: StemState) -> list[str]:
+    filters: list[str] = []
+    for start_ms, end_ms, lowpass_hz in stem_automation_windows(session, group, stem_name, stem, "lowpass_hz"):
+        filters.append(f"lowpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={lowpass_hz:.3f}")
+    for start_ms, end_ms, highpass_hz in stem_automation_windows(session, group, stem_name, stem, "highpass_hz"):
+        filters.append(f"highpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={highpass_hz:.3f}")
+    for start_ms, end_ms, eq_low_db in stem_automation_windows(session, group, stem_name, stem, "eq_low_db"):
+        filters.append(f"bass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':g={eq_low_db:.3f}:f=120:w=0.7")
+    for start_ms, end_ms, eq_mid_db in stem_automation_windows(session, group, stem_name, stem, "eq_mid_db"):
+        filters.append(f"equalizer=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f=1000:t=q:w=1.0:g={eq_mid_db:.3f}")
+    for start_ms, end_ms, eq_high_db in stem_automation_windows(session, group, stem_name, stem, "eq_high_db"):
+        filters.append(f"treble=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':g={eq_high_db:.3f}:f=6500:w=0.7")
+    for start_ms, end_ms, gain_db in stem_automation_windows(session, group, stem_name, stem, "gain_db"):
+        filters.append(f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={gain_multiplier(gain_db):.6f}")
+    for start_ms, end_ms, muted in stem_automation_windows(session, group, stem_name, stem, "mute"):
+        if muted:
+            filters.append(f"volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume=0.000000")
+    return filters
 
 
 ZITA_REVERB_LADSPA = "/usr/lib/ladspa/zita-reverbs.so"
@@ -586,6 +763,7 @@ def build_filter_complex(
     channels: int,
     output_duration_ms: int | None = None,
     clip_input_indices: dict[int, int] | None = None,
+    stem_group_input_indices: dict[tuple[int, str], int] | None = None,
     first_lean_input_index: int | None = None,
 ) -> str:
     active_lean_in_ids = set(lean_in_audio)
@@ -625,6 +803,83 @@ def build_filter_complex(
             f"[{label}]"
         )
         music_labels.append(f"[{label}]")
+
+    for group_index, group in enumerate(session.stem_groups):
+        stem_labels: list[str] = []
+        for stem_name, stem, _path, is_fallback in stem_group_inputs(group):
+            if stem_group_input_indices is None:
+                input_index = len(session.clips) + len(stem_labels)
+            else:
+                input_index = stem_group_input_indices[(group_index, stem_name)]
+            source_duration = source_duration_ms(group)
+            duration = f":duration={seconds(source_duration)}" if source_duration is not None else ""
+            label = f"stem{group_index}{stem_name}"
+            volume = gain_multiplier(group.gain_db) * gain_multiplier(stem.gain_db)
+            fade_filters = ""
+            if group.fade_in_ms:
+                fade_filters += f"afade=t=in:st=0:d={seconds(group.fade_in_ms)},"
+            if group.fade_out_ms and group.duration_ms is not None:
+                fade_start_ms = max(0, group.duration_ms - group.fade_out_ms)
+                fade_filters += f"afade=t=out:st={seconds(fade_start_ms)}:d={seconds(group.fade_out_ms)},"
+            retime_filters = ",".join(time_pitch_filters(group, sample_rate))
+            retime_filters = f"{retime_filters}," if retime_filters else ""
+            reverse_filter = "areverse," if group.reverse else ""
+            stem_filters = [] if is_fallback else [*stem_static_filters(stem), *stem_dynamic_filters(session, group, stem_name, stem)]
+            stem_filter_text = ",".join(stem_filters)
+            stem_filter_text = f"{stem_filter_text}," if stem_filter_text else ""
+            filters.append(
+                f"[{input_index}:a]"
+                f"atrim=start={seconds(group.trim_start_ms)}{duration},"
+                "asetpts=PTS-STARTPTS,"
+                f"{reverse_filter}"
+                f"{retime_filters}"
+                f"{fade_filters}"
+                f"{stem_filter_text}"
+                f"volume={volume:.6f},"
+                f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
+                f"[{label}]"
+            )
+            stem_labels.append(f"[{label}]")
+        if not stem_labels:
+            continue
+        group_label = f"stemgroup{group_index}"
+        if len(stem_labels) == 1:
+            filters.append(f"{stem_labels[0]}anull[{group_label}sum]")
+            current_group = f"{group_label}sum"
+        else:
+            filters.append(f"{''.join(stem_labels)}amix=inputs={len(stem_labels)}:duration=longest:normalize=0[{group_label}sum]")
+            current_group = f"{group_label}sum"
+        for start_ms, end_ms, gain_db in group_automation_windows(session, group, "gain_db"):
+            out = f"{group_label}gain{start_ms}"
+            filters.append(f"[{current_group}]volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={gain_multiplier(gain_db):.6f}[{out}]")
+            current_group = out
+        for start_ms, end_ms, lowpass_hz in group_automation_windows(session, group, "lowpass_hz"):
+            out = f"{group_label}lp{start_ms}"
+            filters.append(f"[{current_group}]lowpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={lowpass_hz:.3f}[{out}]")
+            current_group = out
+        for start_ms, end_ms, highpass_hz in group_automation_windows(session, group, "highpass_hz"):
+            out = f"{group_label}hp{start_ms}"
+            filters.append(f"[{current_group}]highpass=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':f={highpass_hz:.3f}[{out}]")
+            current_group = out
+        for start_ms, end_ms, start_gain, end_gain in group_crossfader_windows(session, group):
+            out = f"{group_label}xf{start_ms}"
+            if abs(start_gain - end_gain) < 0.000001:
+                volume_expr = f"{start_gain:.6f}"
+                eval_mode = ""
+            else:
+                duration_ms = max(1, end_ms - start_ms)
+                slope = (end_gain - start_gain) / (duration_ms / 1000)
+                volume_expr = f"'{start_gain:.6f}+({slope:.9f})*(t-{seconds(start_ms)})'"
+                eval_mode = ":eval=frame"
+            filters.append(f"[{current_group}]volume=enable='between(t,{seconds(start_ms)},{seconds(end_ms)})':volume={volume_expr}{eval_mode}[{out}]")
+            current_group = out
+        out_label = f"musicstemgroup{group_index}"
+        filters.append(
+            f"[{current_group}]adelay={group.start_ms}:all=1,"
+            f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}"
+            f"[{out_label}]"
+        )
+        music_labels.append(f"[{out_label}]")
 
     effect_index = 0
     for effect in session.effects:
@@ -699,6 +954,7 @@ def ffmpeg_command(
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     input_paths: list[str] = []
     clip_input_indices: dict[int, int] = {}
+    stem_group_input_indices: dict[tuple[int, str], int] = {}
     for clip_index, clip in enumerate(session.clips):
         try:
             input_index = input_paths.index(clip.path)
@@ -707,6 +963,15 @@ def ffmpeg_command(
             input_paths.append(clip.path)
             command.extend(["-i", clip.path])
         clip_input_indices[clip_index] = input_index
+    for group_index, group in enumerate(session.stem_groups):
+        for stem_name, _stem, path, _is_fallback in stem_group_inputs(group):
+            try:
+                input_index = input_paths.index(path)
+            except ValueError:
+                input_index = len(input_paths)
+                input_paths.append(path)
+                command.extend(["-i", path])
+            stem_group_input_indices[(group_index, stem_name)] = input_index
     for lean_in in session.mic_lean_ins:
         audio_path = lean_in_audio.get(lean_in.id)
         if audio_path is not None:
@@ -714,7 +979,7 @@ def ffmpeg_command(
     command.extend(
         [
             "-filter_complex",
-            build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms, clip_input_indices, len(input_paths)),
+            build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms, clip_input_indices, stem_group_input_indices, len(input_paths)),
             "-map",
             "[out]",
             *output_codec_args(output, output_format, sample_rate, channels, mp3_bitrate),

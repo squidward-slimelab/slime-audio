@@ -298,6 +298,7 @@ def clips_in_window(session: MixSession, start_ms: int, end_ms: int) -> list[Cli
 
 def next_event_start_ms(session: MixSession, playhead_ms: int) -> int | None:
     starts = [clip.start_ms for clip in session.clips if clip.start_ms >= playhead_ms]
+    starts.extend(group.start_ms for group in session.stem_groups if group.start_ms >= playhead_ms)
     starts.extend(lean.start_ms for lean in session.mic_lean_ins if lean.start_ms >= playhead_ms)
     return min(starts) if starts else None
 

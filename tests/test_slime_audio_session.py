@@ -94,6 +94,53 @@ def write_cue_db(db_path: Path, track: Path, *, kind: str, at_ms: int, confidenc
 
 
 class SlimeAudioSessionTests(unittest.TestCase):
+    def test_load_session_accepts_stem_group_with_stem_automation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "stem_groups": [
+                            {
+                                "id": "hook",
+                                "deck": "deck-1",
+                                "source_path": "/music/source.flac",
+                                "start": "00:08.000",
+                                "trim_start": "00:32.000",
+                                "duration": "00:16.000",
+                                "stems": {
+                                    "vocals": {
+                                        "enabled": True,
+                                        "path": "/stems/vocals.wav",
+                                        "gain_db": -3,
+                                        "automations": [
+                                            {
+                                                "param": "highpass_hz",
+                                                "points": [
+                                                    {"at": "00:08.000", "value": 180},
+                                                    {"at": "00:24.000", "value": 220},
+                                                ],
+                                            }
+                                        ],
+                                    },
+                                    "drums": {"enabled": False},
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            session = load_session(session_path)
+            summary = session_summary(session)
+
+        self.assertEqual(len(session.stem_groups), 1)
+        self.assertEqual(session.stem_groups[0].stems["vocals"].gain_db, -3)
+        self.assertEqual(summary["stem_group_count"], 1)
+
     def test_parse_ms_accepts_clock_strings(self):
         self.assertEqual(parse_ms("01:02.500", "time"), 62_500)
         self.assertEqual(parse_ms("1:02:03", "time"), 3_723_000)

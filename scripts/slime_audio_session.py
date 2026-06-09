@@ -49,6 +49,21 @@ AUTOMATABLE_PARAMS = {
     "send_reverb",
     "duck_volume",
     "position",
+    "mute",
+    "solo",
+}
+STEM_NAMES = {"vocals", "drums", "bass", "other"}
+STEM_AUTOMATABLE_PARAMS = {
+    "gain_db",
+    "mute",
+    "solo",
+    "eq_low_db",
+    "eq_mid_db",
+    "eq_high_db",
+    "lowpass_hz",
+    "highpass_hz",
+    "send_echo",
+    "send_reverb",
 }
 FADER_SIDES = {"A", "B", "THRU"}
 DEFAULT_FADER_ASSIGNMENTS = {
@@ -92,6 +107,50 @@ class Clip:
     kind: str = "song"
     attached_deck: str | None = None
     effect_parent_clip_id: str | None = None
+    automations: list[Automation] = field(default_factory=list)
+
+    @property
+    def end_ms(self) -> int | None:
+        if self.duration_ms is None:
+            return None
+        return self.start_ms + self.duration_ms
+
+
+@dataclass(frozen=True)
+class StemState:
+    path: str | None = None
+    enabled: bool = True
+    gain_db: float = 0.0
+    mute: bool = False
+    solo: bool = False
+    eq_low_db: float = 0.0
+    eq_mid_db: float = 0.0
+    eq_high_db: float = 0.0
+    lowpass_hz: float | None = None
+    highpass_hz: float | None = None
+    send_echo: float = 0.0
+    send_reverb: float = 0.0
+    automations: list[Automation] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class StemGroup:
+    id: str
+    deck: str
+    source_path: str
+    start_ms: int
+    trim_start_ms: int = 0
+    duration_ms: int | None = None
+    stem_set_id: str | None = None
+    manifest_path: str | None = None
+    gain_db: float = 0.0
+    tempo_shift_pct: float = 0.0
+    pitch_shift_semitones: int = 0
+    fade_in_ms: int = 0
+    fade_out_ms: int = 0
+    reverse: bool = False
+    playback_rate: float = 1.0
+    stems: dict[str, StemState] = field(default_factory=dict)
     automations: list[Automation] = field(default_factory=list)
 
     @property
@@ -233,6 +292,7 @@ class MixSession:
     version: int
     decks: list[str]
     clips: list[Clip]
+    stem_groups: list[StemGroup]
     mic_lean_ins: list[MicLeanIn]
     effects: list[EffectEvent]
     automations: list[Automation]
@@ -244,6 +304,7 @@ class MixSession:
     def event_ids(self) -> set[str]:
         return (
             {clip.id for clip in self.clips}
+            | {group.id for group in self.stem_groups}
             | {lean_in.id for lean_in in self.mic_lean_ins}
             | {effect.id for effect in self.effects}
             | {event.id for event in self.slip_events}
@@ -342,6 +403,74 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         ],
     )
     return clip
+
+
+def parse_stem_state(group_id: str, stem_name: str, payload: dict[str, Any] | bool) -> StemState:
+    if stem_name not in STEM_NAMES:
+        raise ValueError(f"stem group {group_id} has unsupported stem {stem_name}")
+    if isinstance(payload, bool):
+        payload = {"enabled": payload}
+    if not isinstance(payload, dict):
+        raise ValueError(f"stem group {group_id} stem {stem_name} must be an object or boolean")
+    return StemState(
+        path=str(payload["path"]) if payload.get("path") else None,
+        enabled=bool(payload.get("enabled", True)),
+        gain_db=float(payload.get("gain_db", 0.0)),
+        mute=bool(payload.get("mute", False)),
+        solo=bool(payload.get("solo", False)),
+        eq_low_db=float(payload.get("eq_low_db", 0.0)),
+        eq_mid_db=float(payload.get("eq_mid_db", 0.0)),
+        eq_high_db=float(payload.get("eq_high_db", 0.0)),
+        lowpass_hz=float(payload["lowpass_hz"]) if payload.get("lowpass_hz") is not None else None,
+        highpass_hz=float(payload["highpass_hz"]) if payload.get("highpass_hz") is not None else None,
+        send_echo=float(payload.get("send_echo", 0.0)),
+        send_reverb=float(payload.get("send_reverb", 0.0)),
+        automations=[
+            parse_automation(item, default_target=f"stem-group:{group_id}:{stem_name}")
+            for item in payload.get("automations", [])
+        ],
+    )
+
+
+def parse_stem_group(payload: dict[str, Any]) -> StemGroup:
+    group_id = str(payload.get("id") or "").strip()
+    deck = str(payload.get("deck") or "").strip()
+    source_path = str(payload.get("source_path") or payload.get("path") or "").strip()
+    if not group_id:
+        raise ValueError("stem group id is required")
+    if not deck:
+        raise ValueError(f"stem group {group_id} deck is required")
+    if not source_path:
+        raise ValueError(f"stem group {group_id} source_path is required")
+    duration = payload.get("duration_ms", payload.get("duration"))
+    stems_payload = payload.get("stems") or {}
+    if not isinstance(stems_payload, dict):
+        raise ValueError(f"stem group {group_id} stems must be an object")
+    return StemGroup(
+        id=group_id,
+        deck=deck,
+        source_path=source_path,
+        stem_set_id=str(payload["stem_set_id"]) if payload.get("stem_set_id") else None,
+        manifest_path=str(payload["manifest_path"]) if payload.get("manifest_path") else None,
+        start_ms=parse_ms(payload.get("start_ms", payload.get("start", 0)), f"stem group {group_id} start"),
+        trim_start_ms=parse_ms(payload.get("trim_start_ms", payload.get("trim_start", 0)), f"stem group {group_id} trim_start"),
+        duration_ms=parse_ms(duration, f"stem group {group_id} duration") if duration is not None else None,
+        gain_db=float(payload.get("gain_db", 0.0)),
+        tempo_shift_pct=float(payload.get("tempo_shift_pct", 0.0)),
+        pitch_shift_semitones=int(payload.get("pitch_shift_semitones", 0)),
+        fade_in_ms=parse_ms(payload.get("fade_in_ms", 0), f"stem group {group_id} fade_in_ms"),
+        fade_out_ms=parse_ms(payload.get("fade_out_ms", 0), f"stem group {group_id} fade_out_ms"),
+        reverse=bool(payload.get("reverse", False)),
+        playback_rate=float(payload.get("playback_rate", 1.0)),
+        stems={
+            stem_name: parse_stem_state(group_id, stem_name, stem_payload)
+            for stem_name, stem_payload in stems_payload.items()
+        },
+        automations=[
+            parse_automation(item, default_target=group_id)
+            for item in payload.get("automations", [])
+        ],
+    )
 
 
 def parse_mic_lean_in(payload: dict[str, Any]) -> MicLeanIn:
@@ -737,6 +866,7 @@ def parse_session(payload: dict[str, Any]) -> MixSession:
         version=int(payload.get("version", 1)),
         decks=decks,
         clips=[parse_clip(item) for item in payload.get("clips", [])],
+        stem_groups=[parse_stem_group(item) for item in payload.get("stem_groups", payload.get("stemGroups", []))],
         mic_lean_ins=[parse_mic_lean_in(item) for item in payload.get("mic_lean_ins", payload.get("micLeanIns", []))],
         effects=[parse_effect_event(item) for item in payload.get("effects", [])],
         automations=[parse_automation(item) for item in payload.get("automations", [])],
@@ -764,7 +894,7 @@ def validate_session(session: MixSession) -> None:
             errors.append(f"fader routing uses unknown deck {deck}")
         if side not in FADER_SIDES:
             errors.append(f"fader routing for {deck} must be A, B, or THRU")
-    for event_id in [clip.id for clip in session.clips] + [lean_in.id for lean_in in session.mic_lean_ins] + [effect.id for effect in session.effects] + [event.id for event in session.slip_events]:
+    for event_id in [clip.id for clip in session.clips] + [group.id for group in session.stem_groups] + [lean_in.id for lean_in in session.mic_lean_ins] + [effect.id for effect in session.effects] + [event.id for event in session.slip_events]:
         if event_id in seen_ids:
             errors.append(f"duplicate event id: {event_id}")
         seen_ids.add(event_id)
@@ -789,12 +919,38 @@ def validate_session(session: MixSession) -> None:
         for automation in clip.automations:
             validate_automation(automation, session.event_ids, deck_set, errors, prefix=f"clip {clip.id}", allow_deck_targets=False)
 
+    for group in session.stem_groups:
+        if group.deck not in deck_set:
+            errors.append(f"stem group {group.id} uses unknown deck {group.deck}")
+        if group.start_ms < 0:
+            errors.append(f"stem group {group.id} starts before zero")
+        if group.trim_start_ms < 0:
+            errors.append(f"stem group {group.id} trim starts before zero")
+        if group.duration_ms is not None and group.duration_ms <= 0:
+            errors.append(f"stem group {group.id} duration must be positive")
+        if group.playback_rate <= 0:
+            errors.append(f"stem group {group.id} playback_rate must be positive")
+        if not group.stems:
+            errors.append(f"stem group {group.id} must include at least one stem")
+        for stem_name, stem in group.stems.items():
+            if stem_name not in STEM_NAMES:
+                errors.append(f"stem group {group.id} has unsupported stem {stem_name}")
+            if not stem.enabled:
+                continue
+            if not stem.path and not group.manifest_path and not group.stem_set_id:
+                errors.append(f"stem group {group.id} stem {stem_name} has no path, manifest_path, or stem_set_id")
+            for automation in stem.automations:
+                validate_automation(automation, session.event_ids, deck_set, errors, prefix=f"stem group {group.id}", allow_deck_targets=False)
+        for automation in group.automations:
+            validate_automation(automation, session.event_ids, deck_set, errors, prefix=f"stem group {group.id}", allow_deck_targets=False)
+
     for deck in session.decks:
-        clips = sorted(
-            [clip for clip in session.clips if clip.deck == deck and clip.end_ms is not None and clip.kind != "effect-track"],
-            key=lambda clip: clip.start_ms,
+        deck_events = sorted(
+            [clip for clip in session.clips if clip.deck == deck and clip.end_ms is not None and clip.kind != "effect-track"]
+            + [group for group in session.stem_groups if group.deck == deck and group.end_ms is not None],
+            key=lambda event: event.start_ms,
         )
-        for left, right in zip(clips, clips[1:]):
+        for left, right in zip(deck_events, deck_events[1:]):
             if left.end_ms is not None and left.end_ms > right.start_ms:
                 errors.append(f"clips {left.id} and {right.id} overlap on {deck}")
 
@@ -854,6 +1010,13 @@ def validate_automation(
     *,
     allow_deck_targets: bool,
 ) -> None:
+    if automation.target.startswith("stem-group:"):
+        parts = automation.target.split(":")
+        if len(parts) != 3 or parts[1] not in event_ids or parts[2] not in STEM_NAMES:
+            errors.append(f"{prefix} automation target does not exist: {automation.target}")
+        if automation.param not in STEM_AUTOMATABLE_PARAMS:
+            errors.append(f"{prefix} automation {automation.target}.{automation.param} is not an automatable stem param")
+        return
     if automation.param not in AUTOMATABLE_PARAMS:
         errors.append(f"{prefix} automation {automation.target}.{automation.param} is not an automatable param")
     target_ok = (
@@ -896,11 +1059,31 @@ def session_summary(session: MixSession) -> dict[str, Any]:
         ]
         for deck in session.decks
     }
+    stem_groups_by_deck = {
+        deck: [
+            {
+                "id": group.id,
+                "source_path": group.source_path,
+                "stem_set_id": group.stem_set_id,
+                "start_ms": group.start_ms,
+                "trim_start_ms": group.trim_start_ms,
+                "duration_ms": group.duration_ms,
+                "end_ms": group.end_ms,
+                "stems": {
+                    name: {"enabled": stem.enabled, "mute": stem.mute, "solo": stem.solo, "path": stem.path}
+                    for name, stem in group.stems.items()
+                },
+            }
+            for group in sorted((item for item in session.stem_groups if item.deck == deck), key=lambda item: item.start_ms)
+        ]
+        for deck in session.decks
+    }
     return {
         "version": session.version,
         "decks": session.decks,
         "fader_routing": session.fader_routing,
         "clip_count": len(session.clips),
+        "stem_group_count": len(session.stem_groups),
         "mic_lean_in_count": len(session.mic_lean_ins),
         "effect_count": len(session.effects),
         "slip_event_count": len(session.slip_events),
@@ -908,9 +1091,11 @@ def session_summary(session: MixSession) -> dict[str, Any]:
             len(session.automations)
             + len(session.deck_automations)
             + sum(len(clip.automations) for clip in session.clips)
+            + sum(len(group.automations) + sum(len(stem.automations) for stem in group.stems.values()) for group in session.stem_groups)
             + sum(len(lean_in.effects) for lean_in in session.mic_lean_ins)
         ),
         "clips_by_deck": clips_by_deck,
+        "stem_groups_by_deck": stem_groups_by_deck,
     }
 
 

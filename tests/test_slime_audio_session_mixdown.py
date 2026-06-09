@@ -124,6 +124,73 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("[0:a]atrim=start=0.000:duration=1.000", filters)
         self.assertIn("[0:a]atrim=start=0.000:duration=1.000", filters)
 
+    def test_ffmpeg_command_expands_stem_group_inputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "stem_groups": [
+                            {
+                                "id": "stem-hook",
+                                "deck": "deck-1",
+                                "source_path": "/music/source.flac",
+                                "start": 2_000,
+                                "trim_start": 1_000,
+                                "duration": 4_000,
+                                "gain_db": -3,
+                                "stems": {
+                                    "vocals": {"path": "/stems/vocals.wav", "gain_db": -6, "highpass_hz": 180},
+                                    "bass": {"path": "/stems/bass.wav", "mute": True},
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+            command = ffmpeg_command(session, {}, Path("/tmp/out.wav"), 48_000, 2)
+            filters = command[command.index("-filter_complex") + 1]
+
+        self.assertIn("/stems/vocals.wav", command)
+        self.assertNotIn("/stems/bass.wav", command)
+        self.assertIn("atrim=start=1.000:duration=4.000", filters)
+        self.assertIn("highpass=f=180.000", filters)
+        self.assertIn("adelay=2000:all=1", filters)
+
+    def test_stem_group_falls_back_to_source_when_stem_paths_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "stem_groups": [
+                            {
+                                "id": "fallback",
+                                "deck": "deck-1",
+                                "source_path": "/music/source.flac",
+                                "start": 0,
+                                "duration": 1_000,
+                                "stem_set_id": "missing",
+                                "stems": {"vocals": {"enabled": True}},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+            command = ffmpeg_command(session, {}, Path("/tmp/out.wav"), 48_000, 2)
+
+        self.assertIn("/music/source.flac", command)
+
     def test_mixdown_filter_includes_lean_in_duck_and_lowpass(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"

@@ -14,6 +14,29 @@ import slime_audio_sets as sets
 
 
 class SlimeAudioWebTests(unittest.TestCase):
+    def test_session_events_include_stem_groups(self):
+        events = web.session_events(
+            {
+                "version": 1,
+                "decks": ["deck-1"],
+                "stem_groups": [
+                    {
+                        "id": "stem-hook",
+                        "deck": "deck-1",
+                        "source_path": "/music/source.flac",
+                        "start": 1_000,
+                        "duration": 8_000,
+                        "stems": {"vocals": {"enabled": True, "gain_db": -3, "path": "/stems/vocals.wav"}, "bass": {"enabled": False}},
+                    }
+                ],
+            }
+        )
+
+        stem_event = next(event for event in events if event["kind"] == "stem-group")
+
+        self.assertEqual(stem_event["id"], "stem-hook")
+        self.assertEqual(stem_event["stems"]["vocals"]["gain_db"], -3)
+
     def test_session_dashboard_includes_now_and_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "state.json"
