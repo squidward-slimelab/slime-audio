@@ -229,6 +229,10 @@ h2 {
   border-left-color: var(--violet);
 }
 
+.mini-event.stem-group {
+  border-left-color: var(--violet);
+}
+
 .mini-event.automation {
   border-left-color: var(--yellow);
 }

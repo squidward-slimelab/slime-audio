@@ -918,6 +918,7 @@ function renderSummary() {
     ["mode", session.timeline_mode || "native"],
     ["duration", fmtMs(session.duration_ms)],
     ["songs", counts.song || 0],
+    ["stem groups", counts["stem-group"] || 0],
     ["fx clips", counts["effect-track"] || 0],
     ["effects", counts.effect || 0],
     ["slip", counts.slip || 0],
