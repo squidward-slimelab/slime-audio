@@ -9,12 +9,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_session import load_session
 from slime_audio_session_mixdown import (
+    balance_bed_candidates,
     build_filter_complex,
     crossfader_gain,
     ffmpeg_command,
     prepare_lean_in_audio,
     routine_taste_report,
     routine_window,
+    session_with_only_clip_ids,
     session_duration_ms,
     shift_session_window,
     spill_filter_complex_to_script,
@@ -22,6 +24,79 @@ from slime_audio_session_mixdown import (
 
 
 class SlimeAudioSessionMixdownTests(unittest.TestCase):
+    def test_balance_audit_candidates_use_payload_planner_metadata(self):
+        payload = {
+            "clips": [
+                {
+                    "id": "lead",
+                    "deck": "deck-1",
+                    "path": "/music/lead.flac",
+                    "start_ms": 0,
+                    "duration_ms": 60_000,
+                    "planner_role": "lead",
+                },
+                {
+                    "id": "bed",
+                    "deck": "deck-2",
+                    "path": "/music/bed.flac",
+                    "start_ms": 10_000,
+                    "duration_ms": 30_000,
+                    "planner_role": "rhythm-bed",
+                    "gain_db": -8,
+                },
+            ],
+            "deck_automations": [
+                {
+                    "target": "deck-2",
+                    "param": "lowpass_hz",
+                    "source_clip_id": "bed",
+                    "points": [{"at_ms": 10_000, "value": 900}, {"at_ms": 30_000, "value": 2400}],
+                },
+                {
+                    "target": "deck-2",
+                    "param": "gain_db",
+                    "source_clip_id": "bed",
+                    "points": [{"at_ms": 10_000, "value": -8}, {"at_ms": 40_000, "value": -6}],
+                },
+            ],
+        }
+
+        candidates = balance_bed_candidates(payload, 0, 60_000)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["id"], "bed")
+        self.assertEqual(candidates[0]["audit_start_ms"], 10_000)
+        self.assertEqual(candidates[0]["audit_duration_ms"], 30_000)
+        self.assertEqual(candidates[0]["filter_spans"]["lowpass_hz"]["range"], 1500)
+        self.assertEqual(candidates[0]["filter_spans"]["gain_db"]["min"], -8)
+
+    def test_session_with_only_clip_ids_keeps_requested_clip_and_drops_others(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {"id": "lead", "deck": "deck-1", "path": "/music/lead.flac", "start": 0, "duration": 10_000},
+                            {"id": "bed", "deck": "deck-2", "path": "/music/bed.flac", "start": 0, "duration": 10_000},
+                        ],
+                        "effects": [
+                            {"id": "lead-echo", "type": "echo", "target": "lead", "start_ms": 1_000, "duration_ms": 1_000},
+                            {"id": "deck-effect", "type": "echo", "target": "deck:deck-2", "start_ms": 1_000, "duration_ms": 1_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        solo = session_with_only_clip_ids(session, {"bed"})
+
+        self.assertEqual([clip.id for clip in solo.clips], ["bed"])
+        self.assertEqual([effect.id for effect in solo.effects], ["deck-effect"])
+
     def test_mixdown_filter_combines_static_trim_and_fader_gain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"

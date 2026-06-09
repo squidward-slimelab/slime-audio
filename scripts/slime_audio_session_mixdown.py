@@ -14,6 +14,9 @@ from pathlib import Path
 from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, SlipEvent, StemGroup, StemState, load_payload, load_session, parse_ms
 
 
+BED_ROLE_NAMES = {"rhythm-bed", "bed", "mashup-bed"}
+
+
 def seconds(ms: int) -> str:
     return f"{ms / 1000:.3f}"
 
@@ -1082,6 +1085,209 @@ def rendered_audio_report(output: Path) -> dict[str, float | int | bool | None]:
     }
 
 
+def payload_clip_start_end(clip: dict) -> tuple[int, int | None]:
+    start_ms = parse_ms(clip.get("start_ms", clip.get("start", 0)), f"clip {clip.get('id', '<unknown>')} start")
+    duration = clip.get("duration_ms", clip.get("duration"))
+    if duration is None:
+        return start_ms, None
+    return start_ms, start_ms + parse_ms(duration, f"clip {clip.get('id', '<unknown>')} duration")
+
+
+def is_balance_bed_clip(clip: dict) -> bool:
+    role = str(clip.get("planner_role") or clip.get("role") or "").strip().lower()
+    if role in BED_ROLE_NAMES:
+        return True
+    if clip.get("bed_under"):
+        return True
+    clip_id = str(clip.get("id") or "").lower()
+    return "-bed-" in clip_id or clip_id.startswith("bed-") or clip_id.endswith("-bed")
+
+
+def automation_value_span(payload: dict, clip: dict, params: set[str]) -> dict[str, dict[str, float | int] | None]:
+    clip_id = str(clip.get("id") or "")
+    deck = str(clip.get("deck") or "")
+    spans: dict[str, list[float]] = {param: [] for param in params}
+    for automation in [*clip.get("automations", []), *payload.get("automations", []), *payload.get("deck_automations", [])]:
+        if automation.get("param") not in params:
+            continue
+        target = str(automation.get("target") or "")
+        source_clip_id = str(automation.get("source_clip_id") or "")
+        if target not in {clip_id, deck} and source_clip_id != clip_id:
+            continue
+        for point in automation.get("points", []):
+            try:
+                spans[str(automation["param"])].append(float(point["value"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return {
+        param: (
+            {
+                "min": min(values),
+                "max": max(values),
+                "range": max(values) - min(values),
+                "points": len(values),
+            }
+            if values
+            else None
+        )
+        for param, values in spans.items()
+    }
+
+
+def balance_bed_candidates(payload: dict, from_ms: int, duration_ms: int | None) -> list[dict]:
+    window_end_ms = from_ms + duration_ms if duration_ms is not None else None
+    candidates: list[dict] = []
+    for clip in payload.get("clips", []):
+        if not isinstance(clip, dict) or not is_balance_bed_clip(clip):
+            continue
+        start_ms, end_ms = payload_clip_start_end(clip)
+        if end_ms is None:
+            continue
+        if end_ms <= from_ms:
+            continue
+        if window_end_ms is not None and start_ms >= window_end_ms:
+            continue
+        audit_start_ms = max(start_ms, from_ms)
+        audit_end_ms = min(end_ms, window_end_ms) if window_end_ms is not None else end_ms
+        if audit_end_ms <= audit_start_ms:
+            continue
+        candidates.append(
+            {
+                "id": clip.get("id"),
+                "path": clip.get("path"),
+                "deck": clip.get("deck"),
+                "planner_role": clip.get("planner_role"),
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "audit_start_ms": audit_start_ms,
+                "audit_duration_ms": audit_end_ms - audit_start_ms,
+                "gain_db": float(clip.get("gain_db", 0.0)),
+                "filter_spans": automation_value_span(payload, clip, {"gain_db", "lowpass_hz", "highpass_hz", "eq_low_db", "eq_mid_db", "eq_high_db"}),
+            }
+        )
+    return candidates
+
+
+def session_with_only_clip_ids(session: MixSession, clip_ids: set[str]) -> MixSession:
+    return replace(
+        session,
+        clips=[clip for clip in session.clips if clip.id in clip_ids],
+        stem_groups=[],
+        mic_lean_ins=[],
+        effects=[effect for effect in session.effects if effect.target in clip_ids or effect.target.startswith("deck:")],
+    )
+
+
+def render_report_for_session(
+    session: MixSession,
+    output: Path,
+    temp_dir: Path,
+    sample_rate: int,
+    channels: int,
+    output_duration_ms: int | None,
+    output_format: str,
+    mp3_bitrate: str,
+) -> dict[str, float | int | bool | None]:
+    command = ffmpeg_command(session, {}, output, sample_rate, channels, output_duration_ms, output_format, mp3_bitrate)
+    command = spill_filter_complex_to_script(command, temp_dir / f"{output.stem}-filter-complex.ffmpeg")
+    subprocess.run(command, check=True)
+    verify_rendered_audio(output)
+    return rendered_audio_report(output)
+
+
+def rendered_balance_audit(
+    payload: dict,
+    source_session: MixSession,
+    temp_dir: Path,
+    *,
+    from_ms: int,
+    duration_ms: int | None,
+    sample_rate: int,
+    channels: int,
+    output_format: str,
+    mp3_bitrate: str,
+    min_bed_vs_full_db: float,
+    min_filter_sweep_hz: float,
+) -> dict:
+    findings: list[dict] = []
+    bed_reports: list[dict] = []
+    candidates = balance_bed_candidates(payload, from_ms, duration_ms)
+    for index, candidate in enumerate(candidates, start=1):
+        audit_start_ms = int(candidate["audit_start_ms"])
+        audit_duration_ms = int(candidate["audit_duration_ms"])
+        full_session = shift_session_window(source_session, audit_start_ms, audit_duration_ms)
+        bed_session = session_with_only_clip_ids(full_session, {str(candidate["id"])})
+        full_report = render_report_for_session(
+            full_session,
+            temp_dir / f"balance-full-{index}.wav",
+            temp_dir,
+            sample_rate,
+            channels,
+            audit_duration_ms,
+            output_format="wav",
+            mp3_bitrate=mp3_bitrate,
+        )
+        bed_report = render_report_for_session(
+            bed_session,
+            temp_dir / f"balance-bed-{index}.wav",
+            temp_dir,
+            sample_rate,
+            channels,
+            audit_duration_ms,
+            output_format="wav",
+            mp3_bitrate=mp3_bitrate,
+        )
+        full_mean = full_report.get("mean_volume_db")
+        bed_mean = bed_report.get("mean_volume_db")
+        bed_vs_full_db = None if full_mean is None or bed_mean is None else float(bed_mean) - float(full_mean)
+        lowpass_span = candidate["filter_spans"].get("lowpass_hz") if isinstance(candidate.get("filter_spans"), dict) else None
+        highpass_span = candidate["filter_spans"].get("highpass_hz") if isinstance(candidate.get("filter_spans"), dict) else None
+        filter_range_hz = max(
+            float(lowpass_span.get("range", 0.0)) if lowpass_span else 0.0,
+            float(highpass_span.get("range", 0.0)) if highpass_span else 0.0,
+        )
+        bed_entry = {
+            **candidate,
+            "full_audio": full_report,
+            "bed_audio": bed_report,
+            "bed_vs_full_db": bed_vs_full_db,
+            "filter_range_hz": filter_range_hz,
+        }
+        if bed_vs_full_db is None:
+            findings.append({"kind": "unmeasurable_bed_balance", "id": candidate["id"]})
+        elif bed_vs_full_db < min_bed_vs_full_db:
+            findings.append(
+                {
+                    "kind": "buried_rhythm_bed",
+                    "id": candidate["id"],
+                    "bed_vs_full_db": bed_vs_full_db,
+                    "threshold_db": min_bed_vs_full_db,
+                }
+            )
+        if filter_range_hz < min_filter_sweep_hz:
+            findings.append(
+                {
+                    "kind": "static_or_token_filter",
+                    "id": candidate["id"],
+                    "filter_range_hz": filter_range_hz,
+                    "threshold_hz": min_filter_sweep_hz,
+                }
+            )
+        bed_reports.append(bed_entry)
+    return {
+        "accepted": not findings,
+        "from_ms": from_ms,
+        "duration_ms": duration_ms,
+        "bed_count": len(bed_reports),
+        "beds": bed_reports,
+        "findings": findings,
+        "thresholds": {
+            "min_bed_vs_full_db": min_bed_vs_full_db,
+            "min_filter_sweep_hz": min_filter_sweep_hz,
+        },
+    }
+
+
 def clip_start_end_payload(clip: dict) -> tuple[int, int | None]:
     start_ms = parse_ms(clip.get("start_ms", clip.get("start", 0)), "clip start")
     duration = clip.get("duration_ms", clip.get("duration"))
@@ -1235,6 +1441,10 @@ def main() -> int:
     parser.add_argument("--routine-pad-ms", type=int, default=5_000)
     parser.add_argument("--report-output", type=Path, help="Write a machine-readable audition/render verification report.")
     parser.add_argument("--force-routine-risk", action="store_true", help="Render even if routine taste checks report errors.")
+    parser.add_argument("--audit-balance", action="store_true", help="Render solo bed windows and compare their loudness against the full overlap.")
+    parser.add_argument("--fail-balance-audit", action="store_true", help="Exit non-zero when --audit-balance finds buried beds or token filters.")
+    parser.add_argument("--min-bed-vs-full-db", type=float, default=-16.0, help="Minimum acceptable rendered bed mean loudness relative to the full overlap.")
+    parser.add_argument("--min-filter-sweep-hz", type=float, default=300.0, help="Minimum low/high-pass movement before a bed filter is treated as token/static.")
     parser.add_argument("--skip-tts", action="store_true", help="Use tiny silent lean-in placeholders; useful for command validation.")
     parser.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True, help="Probe rendered duration and reject silent output.")
     parser.add_argument("--dry-run", action="store_true")
@@ -1291,9 +1501,24 @@ def main() -> int:
         command = spill_filter_complex_to_script(command, Path(temp) / "filter-complex.ffmpeg")
         subprocess.run(command, check=True)
         audio_report = None
+        balance_report = None
         if args.verify:
             verify_rendered_audio(args.output)
             audio_report = rendered_audio_report(args.output)
+        if args.audit_balance:
+            balance_report = rendered_balance_audit(
+                payload,
+                load_session(args.session),
+                Path(temp),
+                from_ms=render_start_ms,
+                duration_ms=duration_ms,
+                sample_rate=args.sample_rate,
+                channels=args.channels,
+                output_format=args.format,
+                mp3_bitrate=args.mp3_bitrate,
+                min_bed_vs_full_db=args.min_bed_vs_full_db,
+                min_filter_sweep_hz=args.min_filter_sweep_hz,
+            )
         if args.report_output:
             args.report_output.write_text(
                 json.dumps(
@@ -1302,12 +1527,18 @@ def main() -> int:
                         "render": {"from_ms": render_start_ms, "duration_ms": duration_ms},
                         "routine": routine_report,
                         "audio": audio_report,
+                        "balance": balance_report,
                     },
                     indent=2,
                     sort_keys=True,
                 )
                 + "\n",
                 encoding="utf-8",
+            )
+        if args.audit_balance and args.fail_balance_audit and balance_report is not None and not balance_report["accepted"]:
+            raise ValueError(
+                "rendered balance audit failed: "
+                + ", ".join(f"{finding['kind']}:{finding.get('id')}" for finding in balance_report["findings"])
             )
     print(f"rendered {args.output}")
     return 0
