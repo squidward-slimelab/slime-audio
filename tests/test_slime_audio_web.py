@@ -208,6 +208,45 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(event["planner_role"], "instant-double")
         self.assertEqual(event["display_meta"], "stabs routine of a")
 
+    def test_feedback_records_structured_timeline_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            feedback_log = Path(temp_dir) / "feedback.jsonl"
+            entry = web.record_feedback(
+                {
+                    "category": "transition",
+                    "rating": "bad",
+                    "note": "handoff felt late",
+                    "context": {
+                        "session_path": "/tmp/session.json",
+                        "transport": {"playhead_ms": 42_000},
+                        "active_set": {"slug": "set-a", "title": "Set A"},
+                        "event": {
+                            "id": "clip-a",
+                            "kind": "song",
+                            "lane": "deck-1",
+                            "title": "Clip A",
+                            "start_ms": 30_000,
+                            "end_ms": 60_000,
+                        },
+                    },
+                },
+                feedback_log=feedback_log,
+            )
+
+            recent = web.feedback_recent(feedback_log=feedback_log)
+
+        self.assertEqual(entry["category"], "transition")
+        self.assertEqual(entry["rating"], "bad")
+        self.assertEqual(entry["playhead_ms"], 42_000)
+        self.assertEqual(entry["active_set"]["slug"], "set-a")
+        self.assertEqual(entry["event"]["id"], "clip-a")
+        self.assertEqual(recent[0]["note"], "handoff felt late")
+
+    def test_feedback_requires_note_or_rating(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "note or quick rating"):
+                web.record_feedback({"category": "selection"}, feedback_log=Path(temp_dir) / "feedback.jsonl")
+
     def test_dashboard_places_attached_effect_tracks_under_source_deck(self):
         payload = {
             "version": 1,

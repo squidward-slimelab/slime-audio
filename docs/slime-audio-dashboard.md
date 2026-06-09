@@ -20,6 +20,7 @@ The same server also exposes `/tv` for the living-room TV on SPONGEBOT. That vie
 - Now panel: current clip title, source context, status, and whole-session progress.
 - Upcoming panels: future song clips, commentary lean-ins, and runner/receiver health.
 - Arrangement timeline: absolute mix timeline with stable deck lanes ordered `3 1 2 4`, plus utility lanes for voice and automation.
+- Feedback panel: quick category/rating controls and a note field for song-selection, transition, effects, vibe, and technical feedback. Notes default to the live playhead/current event; clicking a timeline item targets the note to that specific clip/effect.
 - Details below the timeline: upcoming automation and session summary.
 
 The first desktop viewport should show the transport, now/next/commentary/health row, and the start of the arrangement timeline without scrolling. Narrow screens should remain readable and stack status panels before the timeline.
@@ -39,6 +40,8 @@ The dashboard view model includes:
 - `health`: runner state, current clips, and receiver telemetry when available.
 
 The frontend should render this view model directly instead of reconstructing timeline semantics from raw session JSON.
+
+`/api/feedback` stores operator feedback in `runtime/dashboard-feedback.jsonl` as append-only JSONL. Each entry includes `created_at`, category, optional rating/note, playhead, active set, session path, and the selected normalized timeline event so future selector/planner fixes can use concrete evidence instead of vague complaints.
 
 ## Verification
 

@@ -110,6 +110,51 @@
         <div id="crossfader-strip" class="crossfader-strip"></div>
       </section>
 
+      <section class="feedback-panel" aria-label="DJ feedback">
+        <div class="timeline-toolbar">
+          <div>
+            <p class="label">feedback</p>
+            <h2 id="feedback-target">current playhead</h2>
+          </div>
+          <span id="feedback-status" class="feedback-status">ready</span>
+        </div>
+        <form id="feedback-form" class="feedback-form">
+          <div class="feedback-controls" role="group" aria-label="feedback category">
+            <label>
+              <input type="radio" name="category" value="selection" checked />
+              selection
+            </label>
+            <label>
+              <input type="radio" name="category" value="transition" />
+              transition
+            </label>
+            <label>
+              <input type="radio" name="category" value="effects" />
+              effects
+            </label>
+            <label>
+              <input type="radio" name="category" value="vibe" />
+              vibe
+            </label>
+            <label>
+              <input type="radio" name="category" value="technical" />
+              technical
+            </label>
+          </div>
+          <div class="feedback-rating" role="group" aria-label="quick rating">
+            <button type="button" data-rating="good">good</button>
+            <button type="button" data-rating="bad">bad</button>
+            <button type="button" data-rating="interesting">interesting</button>
+          </div>
+          <textarea id="feedback-note" rows="3" placeholder="what should change about this selection, transition, or effect?"></textarea>
+          <div class="feedback-actions">
+            <button id="feedback-now" type="button">use playhead</button>
+            <button type="submit">send feedback</button>
+          </div>
+        </form>
+        <div id="feedback-list" class="feedback-list"></div>
+      </section>
+
       <section class="lower-grid">
         <article class="status-panel">
           <p class="label">automation</p>

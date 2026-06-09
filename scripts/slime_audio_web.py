@@ -35,6 +35,7 @@ WEB_ROOT = REPO_ROOT / "web" / "slime-audio"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 DEFAULT_WAVEFORM_CACHE = REPO_ROOT / "runtime" / "waveform-cache.json"
+DEFAULT_FEEDBACK_LOG = REPO_ROOT / "runtime" / "dashboard-feedback.jsonl"
 DECK_ORDER = ["deck-3", "deck-1", VOCAL_DECK, "deck-2", "deck-4"]
 LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
@@ -824,6 +825,72 @@ def waveform_payload(path: Path, trim_start_ms: int = 0, duration_ms: int | None
     return {**payload, "cache": "miss"}
 
 
+def feedback_recent(limit: int = 12, feedback_log: Path = DEFAULT_FEEDBACK_LOG) -> list[dict[str, Any]]:
+    if not feedback_log.exists():
+        return []
+    lines = feedback_log.read_text(encoding="utf-8").splitlines()
+    items: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            items.append(payload)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def record_feedback(body: dict[str, Any], feedback_log: Path = DEFAULT_FEEDBACK_LOG) -> dict[str, Any]:
+    category = str(body.get("category") or "").strip().lower()
+    allowed_categories = {"selection", "transition", "effects", "vibe", "technical", "other"}
+    if category not in allowed_categories:
+        raise ValueError(f"category must be one of {', '.join(sorted(allowed_categories))}")
+    note = str(body.get("note") or "").strip()
+    rating = str(body.get("rating") or "").strip().lower()
+    if not note and not rating:
+        raise ValueError("feedback needs a note or quick rating")
+    if rating and rating not in {"good", "bad", "interesting"}:
+        raise ValueError("rating must be good, bad, or interesting")
+
+    context = body.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    event = context.get("event")
+    if not isinstance(event, dict):
+        event = None
+    transport = context.get("transport")
+    if not isinstance(transport, dict):
+        transport = {}
+    active_set = context.get("active_set")
+    if not isinstance(active_set, dict):
+        active_set = {}
+
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    seed = json.dumps(body, sort_keys=True, default=str) + now
+    entry = {
+        "id": hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16],
+        "created_at": now,
+        "category": category,
+        "rating": rating or None,
+        "note": note,
+        "playhead_ms": transport.get("playhead_ms"),
+        "session_path": context.get("session_path"),
+        "active_set": {
+            "slug": active_set.get("slug"),
+            "title": active_set.get("title"),
+        },
+        "event": event,
+    }
+    feedback_log.parent.mkdir(parents=True, exist_ok=True)
+    with feedback_log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    return entry
+
+
 class SlimeAudioHandler(BaseHTTPRequestHandler):
     server: "SlimeAudioServer"
 
@@ -869,6 +936,14 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
                 self.send_json(waveform_payload(Path(path_text), trim_start_ms, duration_ms, bins))
             except Exception as ex:
                 self.send_json({"available": False, "peaks": [], "error": str(ex)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if parsed.path == "/api/feedback":
+            params = parse_qs(parsed.query)
+            try:
+                limit = int(params.get("limit", ["12"])[0])
+                self.send_json({"feedback": feedback_recent(max(1, min(50, limit)))})
+            except Exception as ex:
+                self.send_json({"error": str(ex)}, status=HTTPStatus.BAD_REQUEST)
             return
         if parsed.path.startswith("/api/"):
             self.send_json({"error": f"unknown endpoint: {parsed.path}"}, status=HTTPStatus.NOT_FOUND)
@@ -922,6 +997,9 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if parsed.path == "/api/feedback":
+                self.send_json({"ok": True, "feedback": record_feedback(body)}, status=HTTPStatus.CREATED)
+                return
         except Exception as ex:
             self.send_json({"error": str(ex)}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -964,7 +1042,7 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         message = format % args
-        if " /api/state " in message or " /api/sets" in message or " /api/waveform" in message:
+        if " /api/state " in message or " /api/sets" in message or " /api/waveform" in message or " /api/feedback" in message:
             return
         print(f"{self.address_string()} - {message}")
 

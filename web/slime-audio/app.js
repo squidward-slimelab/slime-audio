@@ -10,6 +10,9 @@ const dashboardState = {
   activeSet: null,
   selectedSet: null,
   waveformCache: new Map(),
+  feedback: [],
+  feedbackTarget: null,
+  feedbackRating: "",
   lastMixerFrame: 0,
   lastSetsRefresh: 0,
   tickInFlight: false,
@@ -50,6 +53,12 @@ const els = {
   followPlayhead: document.querySelector("#follow-playhead"),
   mixerChannels: document.querySelector("#mixer-channels"),
   crossfaderStrip: document.querySelector("#crossfader-strip"),
+  feedbackForm: document.querySelector("#feedback-form"),
+  feedbackTarget: document.querySelector("#feedback-target"),
+  feedbackStatus: document.querySelector("#feedback-status"),
+  feedbackNote: document.querySelector("#feedback-note"),
+  feedbackNow: document.querySelector("#feedback-now"),
+  feedbackList: document.querySelector("#feedback-list"),
 };
 
 const MIN_STAGE_WIDTH = 1600;
@@ -160,6 +169,50 @@ function eventSignature(dashboard) {
       event.points,
     ])
   );
+}
+
+function feedbackEventSnapshot(event) {
+  if (!event) return null;
+  return {
+    id: event.id || null,
+    kind: event.kind || null,
+    lane: event.lane || null,
+    status: event.status || null,
+    start_ms: event.start_ms ?? null,
+    end_ms: event.end_ms ?? null,
+    title: event.display_title || event.title || null,
+    meta: event.display_meta || null,
+    path: event.path || null,
+    target: event.target || null,
+    param: event.param || null,
+    routine_recipe: event.routine_recipe || null,
+  };
+}
+
+function feedbackTargetLabel(target) {
+  if (!target) return `playhead ${fmtMs(livePlayheadMs())}`;
+  const event = target.event || target;
+  const title = event.display_title || event.title || event.id || "timeline event";
+  const lane = event.lane ? `${event.lane} | ` : "";
+  const start = event.start_ms !== null && event.start_ms !== undefined ? fmtMs(event.start_ms) : fmtMs(livePlayheadMs());
+  return `${lane}${start} | ${title}`;
+}
+
+function currentFeedbackEvent() {
+  const target = dashboardState.feedbackTarget?.event;
+  if (target) return target;
+  const playhead = livePlayheadMs();
+  const events = dashboardState.dashboard?.events || [];
+  return (
+    events.find((event) => event.is_timed && playhead !== null && event.start_ms <= playhead && playhead < event.end_ms && event.kind !== "automation") ||
+    dashboardState.dashboard?.now ||
+    null
+  );
+}
+
+function setFeedbackTarget(event = null) {
+  dashboardState.feedbackTarget = event ? { event } : null;
+  if (els.feedbackTarget) els.feedbackTarget.textContent = feedbackTargetLabel(dashboardState.feedbackTarget);
 }
 
 function statusLabel(value) {
@@ -861,6 +914,29 @@ function renderSummary() {
   }
 }
 
+function renderFeedback() {
+  if (!els.feedbackList) return;
+  if (!dashboardState.feedbackTarget) setFeedbackTarget(null);
+  els.feedbackList.replaceChildren();
+  if (!dashboardState.feedback.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = "no feedback logged yet";
+    els.feedbackList.append(empty);
+    return;
+  }
+  for (const item of dashboardState.feedback.slice(0, 5)) {
+    const row = document.createElement("div");
+    row.className = "feedback-row";
+    const head = [item.category, item.rating].filter(Boolean).join(" | ");
+    const event = item.event || {};
+    const target = event.title ? `${fmtMs(item.playhead_ms)} | ${event.title}` : fmtMs(item.playhead_ms);
+    row.innerHTML = `<strong>${head || "feedback"}</strong><span>${target}</span><p></p>`;
+    row.querySelector("p").textContent = item.note || "";
+    els.feedbackList.append(row);
+  }
+}
+
 function renderArchive() {
   const selected = dashboardState.selectedSet;
   const activeSlug = dashboardState.activeSet?.slug;
@@ -979,6 +1055,7 @@ function renderTimeline() {
       el.style.left = `${(start / scale.duration) * scale.stageWidth}px`;
       el.style.width = `${Math.max(18, ((end - start) / scale.duration) * scale.stageWidth)}px`;
       el.title = `${event.display_title}\n${fmtMs(start)} - ${fmtMs(end)}\n${event.display_meta || shortPath(event.path)}`;
+      el.addEventListener("click", () => setFeedbackTarget(event));
       renderEventWaveform(el, event);
       const eventTitle = document.createElement("span");
       eventTitle.textContent = event.display_title || "event";
@@ -1035,6 +1112,7 @@ function render() {
   renderHealth();
   renderSummary();
   renderMixer();
+  renderFeedback();
   els.timelineTitle.textContent = dashboard.session?.timeline_mode || "native mix session";
   const signature = eventSignature(dashboard);
   if (signature !== dashboardState.signature) {
@@ -1079,6 +1157,13 @@ async function refreshSets() {
   renderArchive();
 }
 
+async function refreshFeedback() {
+  const response = await fetch("/api/feedback?limit=8", { cache: "no-store" });
+  const payload = await readJsonResponse(response);
+  dashboardState.feedback = payload.feedback || [];
+  renderFeedback();
+}
+
 async function postJson(url, body = {}) {
   const response = await fetch(url, {
     method: "POST",
@@ -1105,6 +1190,7 @@ async function tick(options = {}) {
     const now = Date.now();
     if (options.forceSets || !dashboardState.lastSetsRefresh || now - dashboardState.lastSetsRefresh > SETS_POLL_MS) {
       await refreshSets();
+      await refreshFeedback();
       dashboardState.lastSetsRefresh = now;
     }
     await refresh();
@@ -1173,6 +1259,52 @@ els.followPlayhead.addEventListener("change", (event) => {
   updatePlayhead();
 });
 els.timelineScroll.addEventListener("scroll", syncAxis, { passive: true });
+
+if (els.feedbackNow) {
+  els.feedbackNow.addEventListener("click", () => setFeedbackTarget(null));
+}
+
+document.querySelectorAll(".feedback-rating button[data-rating]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const rating = button.dataset.rating || "";
+    dashboardState.feedbackRating = dashboardState.feedbackRating === rating ? "" : rating;
+    document.querySelectorAll(".feedback-rating button[data-rating]").forEach((item) => {
+      item.classList.toggle("selected", item.dataset.rating === dashboardState.feedbackRating);
+    });
+  });
+});
+
+if (els.feedbackForm) {
+  els.feedbackForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(els.feedbackForm);
+    const feedbackEvent = currentFeedbackEvent();
+    const transport = dashboardState.dashboard?.transport || {};
+    const playhead = livePlayheadMs();
+    const body = {
+      category: form.get("category") || "selection",
+      rating: dashboardState.feedbackRating || "",
+      note: els.feedbackNote.value,
+      context: {
+        session_path: dashboardState.dashboard?.session_path || "",
+        active_set: dashboardState.dashboard?.viewed_set || dashboardState.dashboard?.active_set || {},
+        transport: { ...transport, playhead_ms: playhead },
+        event: feedbackEventSnapshot(feedbackEvent),
+      },
+    };
+    try {
+      els.feedbackStatus.textContent = "sending";
+      await postJson("/api/feedback", body);
+      els.feedbackNote.value = "";
+      dashboardState.feedbackRating = "";
+      document.querySelectorAll(".feedback-rating button[data-rating]").forEach((item) => item.classList.remove("selected"));
+      els.feedbackStatus.textContent = "logged";
+      await refreshFeedback();
+    } catch (error) {
+      els.feedbackStatus.textContent = error.message;
+    }
+  });
+}
 
 tick({ forceSets: true });
 setInterval(tick, DASHBOARD_POLL_MS);

@@ -12,6 +12,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 - Draw clip waveforms in timeline blocks through the lazy `/api/waveform` endpoint. The endpoint decodes a trimmed clip segment with `ffmpeg`, returns normalized bass/mid/high peak bands, and caches results under `runtime/waveform-cache.json` keyed by file identity plus trim/duration/bin count. The frontend requests bins from clip pixel width so waveform bar density stays visually consistent across short and long timeline blocks, and renders bass/mid/high as red/green/blue overlays.
 - Keep dashboard traffic conservative while playback is active: `/api/state` polls are non-overlapping and intentionally slow, archive/set refreshes are less frequent, waveform hydration is capped to a small batch, and noisy high-frequency API request logs are suppressed.
 - Expose named set archive browsing without loading archived sets into playback.
+- Capture operator feedback about song selection, transitions, effects, vibe, and technical issues from the dashboard. Feedback is timeline-aware: it defaults to the live playhead/current event and timeline event clicks can retarget the note to a specific clip, effect, or automation.
 - Provide a compact operational view of what the native session runner is about to play.
 - Treat `runtime/active-set.json` as the single active-playback pointer for both native session runner playback and direct `slime_audio_stream.py` fallback playback. The frontend should not require manual pointer edits after audio starts.
 - Serve `/tv` as the living-room display view. It consumes the same `/api/state` payload, avoids archive/edit controls, and renders a full-screen animated canvas driven by the current clip waveform from `/api/waveform`, with large now-playing, progress, upcoming, and runner-signal overlays for a TV attached to SPONGEBOT.
@@ -52,6 +53,8 @@ Direct stream playback writes `runtime/active-stream-state.json`, `runtime/activ
 Unknown `/api/*` routes must return JSON errors, not static HTML. The frontend should parse responses defensively and report endpoint/status details when a response is not JSON.
 
 `/api/waveform?path=...&trim_start_ms=...&duration_ms=...&bins=...` returns `{available, peaks, bands}` JSON, where `bands.low`, `bands.mid`, and `bands.high` are normalized arrays used for red/green/blue waveform rendering. Missing files or decode failures should return a JSON payload with `available: false`, not break the timeline.
+
+`POST /api/feedback` appends one JSON object per line to `runtime/dashboard-feedback.jsonl`. The request body uses `category`, optional `rating`, optional `note`, and a `context` object with `session_path`, `active_set`, `transport.playhead_ms`, and the selected normalized timeline event. `GET /api/feedback?limit=8` returns recent feedback for the operator panel. This file is runtime data for later selector/planner review and should not be committed.
 
 ## Verification
 
