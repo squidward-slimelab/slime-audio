@@ -16,6 +16,37 @@ from slime_music_library import DEFAULT_DB, connect, normalize, rows_to_dicts
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
 DEFAULT_CONSTRAINTS = REPO_ROOT / "runtime" / "live-set-constraints.json"
+VIBE_STOP_WORDS = {
+    "current",
+    "every",
+    "flow",
+    "allow",
+    "avoid",
+    "beds",
+    "callbacks",
+    "comfort",
+    "doubles",
+    "fallback",
+    "genuinely",
+    "good",
+    "intentional",
+    "loops",
+    "metadata",
+    "musical",
+    "overdoing",
+    "played",
+    "music",
+    "pick",
+    "reasons",
+    "records",
+    "repeats",
+    "right",
+    "room",
+    "strong",
+    "stuff",
+    "track",
+    "tracks",
+}
 
 
 @dataclass(frozen=True)
@@ -225,12 +256,25 @@ def candidate_rows(
     limit: int,
     query: str | None = None,
     include_untagged: bool = False,
+    pool_limit: int | None = None,
+    randomize_pool: bool = False,
 ) -> list[dict[str, Any]]:
     recent_plays = recent_play_index(conn, history_path, recent_limit)
     filters = [
         "preferred_path IS NOT NULL",
         "lower(preferred_path) NOT LIKE '%/separated/%'",
         "lower(title_guess) NOT IN ('bass', 'drums', 'other', 'vocals')",
+        "lower(title_guess) NOT GLOB 'bass [0-9]*'",
+        "lower(title_guess) NOT GLOB 'drums [0-9]*'",
+        "lower(title_guess) NOT GLOB 'other [0-9]*'",
+        "lower(title_guess) NOT GLOB 'vocals [0-9]*'",
+        "normalized_title NOT GLOB 'bass [0-9]*'",
+        "normalized_title NOT GLOB 'drums [0-9]*'",
+        "normalized_title NOT GLOB 'other [0-9]*'",
+        "normalized_title NOT GLOB 'vocals [0-9]*'",
+        "lower(title_guess || ' ' || locations) NOT LIKE '%withoutdrums%'",
+        "lower(title_guess || ' ' || locations) NOT LIKE '%withoutbass%'",
+        "lower(title_guess || ' ' || locations) NOT LIKE '%withoutvocals%'",
     ]
     if not include_untagged:
         filters.extend(["normalized_artist != ''", "normalized_title != ''"])
@@ -247,6 +291,7 @@ def candidate_rows(
         params.extend([normalized, normalized, f"%{query}%"])
 
     where = " AND ".join(filters)
+    order_by = "ORDER BY random()" if randomize_pool else "ORDER BY preferred_quality_score DESC, copies DESC, server_count DESC"
     rows = conn.execute(
         f"""
         SELECT
@@ -268,9 +313,10 @@ def candidate_rows(
             tunebat_happiness
         FROM tracks
         WHERE {where}
+        {order_by}
         LIMIT ?
         """,
-        params + [max(limit * 20, 200)],
+        params + [pool_limit or max(limit * 20, 200)],
     ).fetchall()
 
     candidates = []
@@ -329,13 +375,15 @@ def score_candidate(row: dict[str, Any], constraints: SetConstraints, *, play_me
         energy_score = max(0.0, 0.30 - distance)
         score += energy_score
         reasons.append(f"energy {float(energy):.2f} vs target {constraints.energy_target:.2f}")
+        if distance > 0.35:
+            score -= min(0.20, (distance - 0.35) * 0.5)
     elif energy is not None:
         score += 0.05
         reasons.append(f"energy {float(energy):.2f}")
     if constraints.vibe:
-        haystack = " ".join(str(row.get(key) or "") for key in ("title_guess", "artist_guess", "album_guess")).casefold()
+        haystack = set(normalize(" ".join(str(row.get(key) or "") for key in ("title_guess", "artist_guess", "album_guess"))).split())
         for word in normalize(constraints.vibe).split():
-            if len(word) >= 4 and word in haystack:
+            if len(word) >= 4 and word not in VIBE_STOP_WORDS and word in haystack:
                 score += 0.05
                 reasons.append(f"vibe word {word}")
                 break
@@ -392,6 +440,8 @@ def parse_args() -> argparse.Namespace:
     candidate_parser.add_argument("--limit", type=int, default=20)
     candidate_parser.add_argument("--recent-limit", type=int, default=30)
     candidate_parser.add_argument("--include-untagged", action="store_true")
+    candidate_parser.add_argument("--pool-limit", type=int)
+    candidate_parser.add_argument("--randomize-pool", action="store_true")
     return parser.parse_args()
 
 
@@ -433,6 +483,8 @@ def main() -> int:
                     limit=args.limit,
                     query=args.query,
                     include_untagged=args.include_untagged,
+                    pool_limit=args.pool_limit,
+                    randomize_pool=args.randomize_pool,
                 ),
             }
         )
