@@ -30,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME = REPO_ROOT / "runtime"
 DEFAULT_TARGETS = ["192.168.0.123:47777", "192.168.0.163:47777"]
 DEFAULT_MIN_RUNWAY_MS = 35 * 60 * 1000
-DEFAULT_MAX_TRACKS = 10
+DEFAULT_MAX_TRACKS = 24
 AUTODJ_LOCK = Path("/tmp/slime-audio-autodj.lock")
 DEFAULT_SKIP_TERMS = [
     "christmas",
@@ -283,7 +283,8 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace) -> 
     cursor_ms = 0
     lead_clips: list[dict[str, Any]] = []
     for index, track in enumerate(leads[: args.max_tracks]):
-        duration_ms = track.duration_ms or args.default_track_ms
+        source_duration_ms = track.duration_ms or args.default_track_ms
+        duration_ms = min(source_duration_ms, args.max_lead_clip_ms)
         clip = {
             "id": f"lead-{index + 1:03d}-{slugify(track.title)[:40]}",
             "deck": "deck-2" if index % 2 == 0 else "deck-3",
@@ -312,10 +313,11 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace) -> 
     payload["notes"] = {
         "created_at": iso_now(),
         "intent": args.intent,
-        "selection_process": "database candidates plus play-history freshness penalties; arranged as lead clips plus filtered rhythm beds",
+        "selection_process": "database candidates plus play-history freshness penalties; arranged as short lead sections plus real handoffs/beds/effects",
         "selected_material": [asdict(track) for track in selected],
         "lead_count": len(lead_clips),
         "bed_count": 0,
+        "max_lead_clip_ms": args.max_lead_clip_ms,
     }
     parse_session(payload)
     return payload
@@ -436,62 +438,6 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
     return {"added": len(added), "beds": added}
 
 
-def add_lead_filter_rides(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
-    payload = load_session_payload(session_path)
-    clips = sorted(
-        [clip for clip in payload.get("clips", []) if clip.get("planner_role") == "lead" and clip_duration_ms(clip) >= args.min_vanilla_check_ms],
-        key=clip_start_ms,
-    )
-    deck_automations = payload.setdefault("deck_automations", [])
-    existing = {
-        str(automation.get("planner_role"))
-        + ":"
-        + str(automation.get("source_clip_id"))
-        + ":"
-        + str(automation.get("param"))
-        + ":"
-        + str(event_start_ms(automation))
-        for automation in deck_automations
-    }
-    added: list[dict[str, Any]] = []
-    for clip in clips:
-        lead_start = clip_start_ms(clip)
-        lead_end = clip_end_ms(clip)
-        cursor = lead_start + args.lead_activity_interval_ms
-        while cursor < lead_end - 12_000:
-            ride_start = max(lead_start, cursor - 6_000)
-            ride_peak = cursor
-            ride_end = min(lead_end, cursor + 10_000)
-            automation = {
-                "target": str(clip.get("deck") or ""),
-                "param": "highpass_hz",
-                "source_clip_id": clip["id"],
-                "planner_role": "autodj-lead-filter-ride",
-                "points": [
-                    {"at_ms": ride_start, "value": 30},
-                    {"at_ms": ride_peak, "value": args.lead_activity_highpass_hz},
-                    {"at_ms": ride_end, "value": 30},
-                ],
-            }
-            key = (
-                str(automation.get("planner_role"))
-                + ":"
-                + str(automation.get("source_clip_id"))
-                + ":"
-                + str(automation.get("param"))
-                + ":"
-                + str(event_start_ms(automation))
-            )
-            if automation["target"] and key not in existing:
-                deck_automations.append(automation)
-                existing.add(key)
-                added.append({"clip": clip["id"], "deck": automation["target"], "start_ms": ride_start, "end_ms": ride_end})
-            cursor += args.lead_activity_interval_ms
-    if added:
-        write_payload(session_path, payload)
-    return {"added": len(added), "rides": added}
-
-
 def clip_start_ms(clip: dict[str, Any]) -> int:
     return int(clip.get("start_ms", clip.get("start", 0)) or 0)
 
@@ -592,6 +538,8 @@ def validate_no_vanilla_leads(session_path: Path, args: argparse.Namespace) -> d
             if effect.get("target") == lead_id:
                 record_move_window(windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
         for automation in automations:
+            if automation.get("planner_role") == "autodj-lead-filter-ride":
+                continue
             target = str(automation.get("target") or "")
             if target in {lead_id, str(lead.get("deck") or ""), "crossfader", "master", "all"}:
                 start = event_start_ms(automation)
@@ -838,7 +786,6 @@ def continue_set(args: argparse.Namespace) -> int:
         planner = run_planner(session_path, args)
         structural = add_structural_beds(session_path, selected, args)
         creative = apply_creative_pass(session_path, args)
-        activity = add_lead_filter_rides(session_path, args)
         vanilla_guard = validate_no_vanilla_leads(session_path, args)
         validate = subprocess.run(
             [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -862,7 +809,6 @@ def continue_set(args: argparse.Namespace) -> int:
             "planner": planner,
             "structural": structural,
             "creative": creative,
-            "activity": activity,
             "vanilla_guard": vanilla_guard,
             "tracks": [asdict(track) for track in selected],
         }
@@ -900,6 +846,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--min-score", type=float, default=0.20)
     cont.add_argument("--default-track-ms", type=int, default=240_000)
     cont.add_argument("--min-track-ms", type=int, default=90_000)
+    cont.add_argument("--max-lead-clip-ms", type=int, default=90_000)
     cont.add_argument("--base-overlap-ms", type=int, default=8_000)
     cont.add_argument("--fade-in-ms", type=int, default=2_500)
     cont.add_argument("--fade-out-ms", type=int, default=5_000)
@@ -914,8 +861,6 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--min-creative-moves", type=int, default=2)
     cont.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
     cont.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
-    cont.add_argument("--lead-activity-interval-ms", type=int, default=75_000)
-    cont.add_argument("--lead-activity-highpass-hz", type=float, default=220.0)
     cont.add_argument("--no-creative-pass", action="store_true")
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)

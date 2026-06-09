@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_autodj import add_lead_filter_rides, validate_no_vanilla_leads
+from slime_audio_autodj import SelectedTrack, session_payload, validate_no_vanilla_leads
 
 
 class SlimeAudioAutodjTests(unittest.TestCase):
@@ -41,7 +41,36 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                     SimpleNamespace(min_vanilla_check_ms=90_000, max_vanilla_lead_ms=90_000),
                 )
 
-    def test_lead_activity_rides_satisfy_vanilla_guard(self):
+    def test_session_payload_caps_leads_to_short_sections(self):
+        track = SelectedTrack(
+            path="/music/lead.flac",
+            artist="Artist",
+            title="Long Lead",
+            album="Album",
+            score=1.0,
+            duration_ms=240_000,
+            last_played_at=None,
+            plays_seen=0,
+            reasons=[],
+        )
+        args = SimpleNamespace(
+            max_tracks=1,
+            default_track_ms=240_000,
+            max_lead_clip_ms=90_000,
+            fade_in_ms=2_500,
+            fade_out_ms=5_000,
+            base_overlap_ms=8_000,
+            title="test",
+            intent="test",
+            min_tracks=1,
+        )
+
+        payload = session_payload([track], args)
+
+        self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
+        self.assertEqual(payload["notes"]["max_lead_clip_ms"], 90_000)
+
+    def test_legacy_filter_rides_do_not_satisfy_vanilla_guard(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
             session_path.write_text(
@@ -59,23 +88,29 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                                 "planner_role": "lead",
                             }
                         ],
-                        "deck_automations": [],
+                        "deck_automations": [
+                            {
+                                "target": "deck-2",
+                                "param": "highpass_hz",
+                                "source_clip_id": "lead",
+                                "planner_role": "autodj-lead-filter-ride",
+                                "points": [
+                                    {"at_ms": 69_000, "value": 30},
+                                    {"at_ms": 75_000, "value": 220},
+                                    {"at_ms": 85_000, "value": 30},
+                                ],
+                            }
+                        ],
                     }
                 ),
                 encoding="utf-8",
             )
-            args = SimpleNamespace(
-                min_vanilla_check_ms=90_000,
-                max_vanilla_lead_ms=90_000,
-                lead_activity_interval_ms=75_000,
-                lead_activity_highpass_hz=220.0,
-            )
 
-            activity = add_lead_filter_rides(session_path, args)
-            guard = validate_no_vanilla_leads(session_path, args)
-
-        self.assertEqual(activity["added"], 3)
-        self.assertEqual(guard["checked"], 1)
+            with self.assertRaises(SystemExit):
+                validate_no_vanilla_leads(
+                    session_path,
+                    SimpleNamespace(min_vanilla_check_ms=90_000, max_vanilla_lead_ms=90_000),
+                )
 
 
 if __name__ == "__main__":
