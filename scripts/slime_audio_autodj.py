@@ -239,6 +239,206 @@ def run_planner(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
     return {"command": command, "returncode": result.returncode, "stdout": result.stdout[-4000:], "stderr": result.stderr[-4000:]}
 
 
+def load_session_payload(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def clip_start_ms(clip: dict[str, Any]) -> int:
+    return int(clip.get("start_ms", clip.get("start", 0)) or 0)
+
+
+def clip_duration_ms(clip: dict[str, Any]) -> int:
+    return int(clip.get("duration_ms", clip.get("duration", 0)) or 0)
+
+
+def clip_end_ms(clip: dict[str, Any]) -> int:
+    return clip_start_ms(clip) + clip_duration_ms(clip)
+
+
+def run_session_edit(command_args: list[str]) -> dict[str, Any]:
+    command = [sys.executable, "scripts/slime_audio_session.py", *command_args]
+    result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+    return {
+        "command": command,
+        "returncode": result.returncode,
+        "stdout": result.stdout[-2000:],
+        "stderr": result.stderr[-2000:],
+    }
+
+
+def creative_source_score(clip: dict[str, Any]) -> int:
+    haystack = normalize(" ".join(str(clip.get(key) or "") for key in ("id", "path")))
+    score = 0
+    for word in ("techno", "breakbeat", "dubstep", "industrial", "function", "jungle", "garage"):
+        if word in haystack:
+            score += 2
+    if clip_duration_ms(clip) >= 120_000:
+        score += 1
+    return score
+
+
+def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    if args.no_creative_pass:
+        return {"required": False, "moves": [], "skipped": "disabled"}
+
+    payload = load_session_payload(session_path)
+    clips = sorted(
+        [clip for clip in payload.get("clips", []) if clip.get("id") and clip.get("path") and clip_duration_ms(clip) > 0],
+        key=clip_start_ms,
+    )
+    moves: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    if len(clips) < 3:
+        raise SystemExit("creative pass needs at least 3 clips")
+
+    # Crossfader movement across future handoffs: a basic DJ gesture that every
+    # unattended set should have, even when deeper beatgrid metadata is sparse.
+    points: list[dict[str, float | int]] = []
+    for incoming in clips[1:4]:
+        start = clip_start_ms(incoming)
+        points.extend(
+            [
+                {"at_ms": max(0, start - 8_000), "value": -0.25},
+                {"at_ms": start + 2_000, "value": 0.25},
+                {"at_ms": start + 12_000, "value": 0.0},
+            ]
+        )
+    result = run_session_edit(["crossfader", str(session_path), "--points-json", json.dumps(points)])
+    if result["returncode"] == 0:
+        moves.append({"kind": "crossfader-motion", "result": result})
+    else:
+        failures.append({"kind": "crossfader-motion", "result": result})
+
+    echo_target = next((clip for clip in clips[1:] if clip_duration_ms(clip) >= 70_000), clips[1])
+    echo_start = max(clip_start_ms(echo_target), clip_end_ms(echo_target) - 12_000)
+    result = run_session_edit(
+        [
+            "add-effect",
+            str(session_path),
+            "--id",
+            f"autodj-echo-{echo_target['id']}",
+            "--type",
+            "echo",
+            "--target",
+            str(echo_target["id"]),
+            "--start",
+            str(echo_start),
+            "--duration",
+            "2500",
+            "--tail-ms",
+            "4500",
+            "--wet",
+            "0.34",
+            "--gain-db",
+            "-6",
+            "--delay-ms",
+            "330",
+            "--feedback",
+            "0.42",
+        ]
+    )
+    if result["returncode"] == 0:
+        moves.append({"kind": "echo-exit", "target": echo_target["id"], "result": result})
+    else:
+        failures.append({"kind": "echo-exit", "target": echo_target["id"], "result": result})
+
+    bed_source = max(clips, key=creative_source_score)
+    target = next((clip for clip in clips[2:] if str(clip.get("id")) != str(bed_source.get("id"))), clips[-1])
+    bed_start = clip_start_ms(target) + min(30_000, max(0, clip_duration_ms(target) // 4))
+    bed_duration = min(96_000, max(32_000, clip_end_ms(target) - bed_start - 2_000))
+    if bed_duration >= 32_000:
+        bed_id = f"autodj-bed-{slugify(str(bed_source['id']))[:32]}"
+        result = run_session_edit(
+            [
+                "add-clip",
+                str(session_path),
+                "--id",
+                bed_id,
+                "--deck",
+                "deck-4",
+                "--path",
+                str(bed_source["path"]),
+                "--start",
+                str(bed_start),
+                "--trim-start",
+                str(min(60_000, max(0, clip_duration_ms(bed_source) - bed_duration - 1_000))),
+                "--duration",
+                str(bed_duration),
+                "--gain-db",
+                "-6",
+                "--fade-in-ms",
+                "3000",
+                "--fade-out-ms",
+                "1500",
+            ]
+        )
+        if result["returncode"] == 0:
+            moves.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "result": result})
+            bed_result = run_session_edit(
+                [
+                    "mashup-bed",
+                    str(session_path),
+                    "--bed-id",
+                    bed_id,
+                    "--start",
+                    str(bed_start),
+                    "--end",
+                    str(bed_start + bed_duration),
+                    "--gain-db",
+                    "-6",
+                    "--lowpass-hz",
+                    "1800",
+                    "--highpass-hz",
+                    "90",
+                ]
+            )
+            if bed_result["returncode"] == 0:
+                moves.append({"kind": "bed-filter-carve", "source": bed_id, "result": bed_result})
+            else:
+                failures.append({"kind": "bed-filter-carve", "source": bed_id, "result": bed_result})
+        else:
+            failures.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "result": result})
+
+    routine_target = next((clip for clip in reversed(clips) if clip_duration_ms(clip) >= 120_000), clips[-1])
+    routine_start = clip_start_ms(routine_target) + min(45_000, max(8_000, clip_duration_ms(routine_target) // 3))
+    result = run_session_edit(
+        [
+            "instant-double-routine",
+            str(session_path),
+            "--source-id",
+            str(routine_target["id"]),
+            "--id",
+            f"autodj-loop-{slugify(str(routine_target['id']))[:28]}",
+            "--recipe",
+            "loop-roll",
+            "--start",
+            str(routine_start),
+        ]
+    )
+    if result["returncode"] == 0:
+        moves.append({"kind": "beatgrid-loop-roll", "target": routine_target["id"], "result": result})
+    else:
+        failures.append({"kind": "beatgrid-loop-roll", "target": routine_target["id"], "result": result})
+
+    validate = subprocess.run(
+        [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if validate.returncode != 0:
+        raise SystemExit(validate.stderr or validate.stdout or "creative session validation failed")
+    if len(moves) < args.min_creative_moves:
+        raise SystemExit(f"creative pass only added {len(moves)} move(s); refusing playlist-only autodj set")
+    return {
+        "required": True,
+        "moves": moves,
+        "failures": failures,
+        "validate": {"returncode": validate.returncode, "stdout": validate.stdout[-2000:], "stderr": validate.stderr[-2000:]},
+    }
+
+
 def launch_runner(session_path: Path, state_path: Path, args: argparse.Namespace) -> int:
     log_path = args.runtime / f"{args.slug}-runner.log"
     pid_path = args.runtime / f"{args.slug}-runner.pid"
@@ -288,6 +488,7 @@ def continue_set(args: argparse.Namespace) -> int:
         payload = session_payload(selected, args)
         write_payload(session_path, payload)
         planner = run_planner(session_path, args)
+        creative = apply_creative_pass(session_path, args)
         validate = subprocess.run(
             [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
             cwd=REPO_ROOT,
@@ -308,6 +509,7 @@ def continue_set(args: argparse.Namespace) -> int:
             "slug": args.slug,
             "intent": args.intent,
             "planner": planner,
+            "creative": creative,
             "tracks": [asdict(track) for track in selected],
         }
         plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -347,6 +549,8 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--fade-in-ms", type=int, default=2_500)
     cont.add_argument("--fade-out-ms", type=int, default=5_000)
     cont.add_argument("--routine-every", type=int, default=3)
+    cont.add_argument("--min-creative-moves", type=int, default=2)
+    cont.add_argument("--no-creative-pass", action="store_true")
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)
     cont.add_argument("--discover-timeout-ms", type=int, default=4000)
