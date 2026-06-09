@@ -18,11 +18,13 @@ from slime_audio_session_mixdown import session_duration_ms
 from slime_audio_stream import (
     SHARED_STREAM_START_MESSAGE,
     Receiver,
+    default_snapcast_fifo_path,
     discover_receivers,
     require_ffmpeg,
     require_snapserver,
     resolve_targets,
     send_control,
+    wait_for_snapclients,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +120,7 @@ class PersistentSnapcast:
         if not self.targets:
             raise SystemExit("no targets resolved")
         send_control(self.targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
+        wait_for_snapclients(self.targets, timeout_s=10.0, control_port=1705)
 
     def start_window(self, audio_path: Path) -> RunningWindow:
         if self.fifo_keepalive_fd is None:
@@ -242,6 +245,9 @@ def append_history(path: Path | None, event: dict[str, Any]) -> None:
 def write_runner_status(args: argparse.Namespace, status: str, **fields: Any) -> None:
     state = load_json(args.state)
     now = iso_now()
+    if status == "running":
+        for key in ("runner_exit_at", "runner_exit_reason", "signal", "traceback"):
+            state.pop(key, None)
     state.update(
         {
             "runner_pid": os.getpid(),
@@ -450,6 +456,8 @@ def write_window_state(
     now = iso_now()
     if not state.get("mix_started_at"):
         state["mix_started_at"] = now
+    for key in ("runner_exit_at", "runner_exit_reason", "signal", "traceback"):
+        state.pop(key, None)
     state.update(
         {
             "session": str(args.session),
@@ -576,6 +584,27 @@ def run_session(args: argparse.Namespace) -> int:
                 window = prepare_window(args, session, start_ms, end_ms)
                 active_clips = window.active_clips
 
+            if args.dry_run:
+                state = write_window_state(args, state, session=session, start_ms=start_ms, end_ms=end_ms, active_clips=active_clips)
+                append_history(
+                    args.history_log,
+                    {
+                        "event": "session_window_started",
+                        "session": str(args.session),
+                        "state": str(args.state),
+                        "timestamp": state["window_started_at"],
+                        "window_start_ms": start_ms,
+                        "window_end_ms": end_ms,
+                        "clips": [clip.id for clip in active_clips],
+                    },
+                )
+                stream = stream_command(args, window.output)
+                print(json.dumps({"render": window.render_command, "stream": stream, "clips": [clip.id for clip in active_clips]}, indent=2))
+                window.cleanup()
+                return 0
+
+            running, stream = start_window_stream(args, window, snapcast)
+            started_monotonic = time.monotonic()
             state = write_window_state(args, state, session=session, start_ms=start_ms, end_ms=end_ms, active_clips=active_clips)
             append_history(
                 args.history_log,
@@ -589,15 +618,6 @@ def run_session(args: argparse.Namespace) -> int:
                     "clips": [clip.id for clip in active_clips],
                 },
             )
-
-            if args.dry_run:
-                stream = stream_command(args, window.output)
-                print(json.dumps({"render": window.render_command, "stream": stream, "clips": [clip.id for clip in active_clips]}, indent=2))
-                window.cleanup()
-                return 0
-
-            running, stream = start_window_stream(args, window, snapcast)
-            started_monotonic = time.monotonic()
             returncode = 0
             while True:
                 polled = running.process.poll()
@@ -690,7 +710,7 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--delay-ms", type=int, default=0)
     parser.add_argument("--snapcast-port", type=int, default=1704)
     parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
-    parser.add_argument("--snapcast-fifo", type=Path, default=Path("/tmp/slime-audio-snapfifo"))
+    parser.add_argument("--snapcast-fifo", type=Path, default=None)
     parser.add_argument(
         "--persistent-snapcast",
         action=argparse.BooleanOptionalAction,
@@ -717,6 +737,8 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.target is None:
         args.target = ["all"]
+    if args.snapcast_fifo is None:
+        args.snapcast_fifo = default_snapcast_fifo_path()
     if args.window_ms <= 0:
         raise SystemExit("--window-ms must be positive")
     return args

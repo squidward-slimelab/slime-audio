@@ -244,6 +244,51 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(payload["runner_status"], "completed")
         self.assertIn("completed_at", payload)
 
+    def test_mark_active_stream_failed_records_exit_reason(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = Path(temp_dir) / "state.json"
+            state.write_text(json.dumps({"stream_pid": stream.os.getpid(), "runner_status": "streaming"}), encoding="utf-8")
+
+            stream.mark_active_stream_finished(state, dry_run=False, status="failed", reason="CalledProcessError: ffmpeg")
+
+            payload = json.loads(state.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["runner_status"], "failed")
+        self.assertEqual(payload["runner_exit_reason"], "CalledProcessError: ffmpeg")
+        self.assertIn("failed_at", payload)
+        self.assertNotIn("completed_at", payload)
+
+    def test_default_snapcast_fifo_is_process_scoped(self):
+        fifo = stream.default_snapcast_fifo_path()
+
+        self.assertEqual(fifo.name, f"slime-audio-snapfifo-{stream.os.getpid()}")
+
+    def test_connected_snapclient_ids_reads_snapserver_status(self):
+        status = {
+            "result": {
+                "server": {
+                    "groups": [
+                        {
+                            "clients": [
+                                {"id": "SPONGEBOT", "connected": True},
+                                {"id": "SPATULA", "connected": False},
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+
+        self.assertEqual(stream.connected_snapclient_ids(status), {"SPONGEBOT"})
+
+    def test_wait_for_snapclients_raises_when_expected_client_missing(self):
+        receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPATULA", "user", "0.4.28")
+
+        with patch.object(stream, "snapserver_status", return_value={"result": {"server": {"groups": []}}}):
+            with patch.object(stream.time, "sleep"):
+                with self.assertRaises(RuntimeError):
+                    stream.wait_for_snapclients([receiver], timeout_s=0.01)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -522,6 +522,34 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(health["runner_state"], "fatal")
         self.assertEqual(health["runner_exit_reason"], "RuntimeError: boom")
 
+    def test_dashboard_marks_dead_direct_stream_process(self):
+        with patch.object(web, "stream_process_alive", return_value=False):
+            health = web.runner_health(
+                {
+                    "runner_status": "streaming",
+                    "stream_pid": 456,
+                    "current": "/music/render.mp3",
+                },
+                {"status": "playing", "stale": False},
+            )
+
+        self.assertEqual(health["runner_state"], "dead")
+        self.assertFalse(health["stream_process_alive"])
+
+    def test_transport_status_surfaces_failed_stream(self):
+        status = web.transport_status(
+            {
+                "runner_status": "failed",
+                "failed_at": "2026-06-09T10:00:00-0400",
+                "current": "/music/render.mp3",
+            },
+            playhead_ms=1_000,
+            duration_ms=10_000,
+        )
+
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["failed_at"], "2026-06-09T10:00:00-0400")
+
     def test_choose_state_path_prefers_explicit_path(self):
         explicit = Path("/tmp/example-state.json")
 

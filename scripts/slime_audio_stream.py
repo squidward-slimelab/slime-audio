@@ -28,6 +28,10 @@ DEFAULT_ACTIVE_STREAM_SESSION = REPO_ROOT / "runtime" / "active-stream-session.j
 DEFAULT_ACTIVE_STREAM_STATE = REPO_ROOT / "runtime" / "active-stream-state.json"
 
 
+def default_snapcast_fifo_path() -> Path:
+    return Path(f"/tmp/slime-audio-snapfifo-{os.getpid()}")
+
+
 @dataclass(frozen=True)
 class Receiver:
     endpoint: str
@@ -199,6 +203,50 @@ def require_snapserver() -> str:
     return snapserver
 
 
+def snapserver_status(control_port: int = 1705, timeout_s: float = 1.0) -> dict:
+    with socket.create_connection(("127.0.0.1", control_port), timeout=timeout_s) as sock:
+        sock.sendall(b'{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}\n')
+        sock.settimeout(timeout_s)
+        raw = b""
+        while b"\n" not in raw:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            raw += chunk
+    return json.loads(raw.decode("utf-8"))
+
+
+def connected_snapclient_ids(status: dict) -> set[str]:
+    server = (status.get("result") or {}).get("server") or {}
+    connected: set[str] = set()
+    for group in server.get("groups") or []:
+        for client in group.get("clients") or []:
+            if client.get("connected"):
+                client_id = client.get("id")
+                if client_id:
+                    connected.add(str(client_id))
+    return connected
+
+
+def wait_for_snapclients(targets: list[Receiver], *, timeout_s: float = 10.0, control_port: int = 1705) -> None:
+    expected = {target.machine_name for target in targets if target.machine_name and target.machine_name != target.host}
+    if not expected:
+        time.sleep(min(timeout_s, 1.0))
+        return
+    deadline = time.monotonic() + timeout_s
+    last_connected: set[str] = set()
+    while time.monotonic() < deadline:
+        try:
+            last_connected = connected_snapclient_ids(snapserver_status(control_port=control_port))
+        except Exception:
+            last_connected = set()
+        if expected.issubset(last_connected):
+            return
+        time.sleep(0.25)
+    missing = ", ".join(sorted(expected - last_connected)) or "unknown"
+    raise RuntimeError(f"snapclients did not connect before stream start: {missing}")
+
+
 def iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -346,7 +394,7 @@ def publish_active_stream(
     )
 
 
-def mark_active_stream_completed(active_state: Path, *, dry_run: bool) -> None:
+def mark_active_stream_finished(active_state: Path, *, dry_run: bool, status: str, reason: str | None = None) -> None:
     if dry_run or not active_state.exists():
         return
     try:
@@ -356,10 +404,19 @@ def mark_active_stream_completed(active_state: Path, *, dry_run: bool) -> None:
     if payload.get("stream_pid") != os.getpid():
         return
     now = iso_now()
-    payload["completed_at"] = now
     payload["updated_at"] = now
-    payload["runner_status"] = "completed"
+    payload["runner_status"] = status
+    if status == "completed":
+        payload["completed_at"] = now
+    else:
+        payload["failed_at"] = now
+        if reason:
+            payload["runner_exit_reason"] = reason
     write_json(active_state, payload)
+
+
+def mark_active_stream_completed(active_state: Path, *, dry_run: bool) -> None:
+    mark_active_stream_finished(active_state, dry_run=dry_run, status="completed")
 
 
 def convert_with_ffmpeg(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
@@ -507,6 +564,7 @@ def run_snapcast_stream(
 
     try:
         send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
+        wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=1705)
         time.sleep(max(delay_ms, 0) / 1000)
         try:
             with fifo_path.open("wb") as fifo:
@@ -609,7 +667,7 @@ def main() -> int:
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--snapcast-port", type=int, default=1704)
     parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
-    parser.add_argument("--snapcast-fifo", type=Path, default=Path("/tmp/slime-audio-snapfifo"))
+    parser.add_argument("--snapcast-fifo", type=Path, default=None)
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--channels", type=int, default=2)
@@ -638,6 +696,8 @@ def main() -> int:
     parser.add_argument("--start-offset-ms", type=int, default=0, help="Start streaming this far into the file and publish that playhead to the dashboard.")
     parser.add_argument("--no-active-pointer", action="store_true", help="Do not publish this playback to the dashboard active pointer.")
     args = parser.parse_args()
+    if args.snapcast_fifo is None:
+        args.snapcast_fifo = default_snapcast_fifo_path()
 
     control_count = sum(
         1
@@ -754,9 +814,19 @@ def main() -> int:
                 args.channels,
                 args.start_offset_ms,
             )
-        finally:
+        except Exception as exc:
+            if not args.no_active_pointer:
+                mark_active_stream_finished(
+                    args.active_state,
+                    dry_run=args.dry_run,
+                    status="failed",
+                    reason=f"{exc.__class__.__name__}: {exc}",
+                )
+            raise
+        else:
             if not args.no_active_pointer:
                 mark_active_stream_completed(args.active_state, dry_run=args.dry_run)
+        finally:
             if args.stop_listeners_when_done:
                 send_control(targets, SHARED_STREAM_STOP_MESSAGE, "stopped listener")
         return 0
@@ -779,7 +849,16 @@ def main() -> int:
                 args.delay_ms,
                 args.start_offset_ms,
             )
-        finally:
+        except Exception as exc:
+            if not args.no_active_pointer:
+                mark_active_stream_finished(
+                    args.active_state,
+                    dry_run=args.dry_run,
+                    status="failed",
+                    reason=f"{exc.__class__.__name__}: {exc}",
+                )
+            raise
+        else:
             if not args.no_active_pointer:
                 mark_active_stream_completed(args.active_state, dry_run=args.dry_run)
         return 0

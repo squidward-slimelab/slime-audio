@@ -390,9 +390,13 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms: int) -> dict[str, Any]:
     updated_at = state.get("updated_at") or state.get("window_started_at") or state.get("started_at")
     completed_at = state.get("completed_at")
+    failed_at = state.get("failed_at")
     current = state.get("current")
+    runner_status = str(state.get("runner_status") or "")
     status = "idle"
-    if completed_at:
+    if runner_status in {"failed", "fatal", "stopped"} or failed_at:
+        status = "failed" if runner_status == "failed" or failed_at else runner_status
+    elif completed_at:
         status = "completed"
     elif current:
         status = "playing"
@@ -411,7 +415,7 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
         and window_end_ms > window_start_ms
     ):
         stale_after_ts = max(stale_after_ts or 0, window_started_ts + ((window_end_ms - window_start_ms) / 1000) + 30)
-    if stale_after_ts is not None and not completed_at and time.time() > stale_after_ts:
+    if stale_after_ts is not None and not completed_at and not failed_at and time.time() > stale_after_ts:
         stale = True
         status = "stale"
     return {
@@ -419,6 +423,7 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
         "stale": stale,
         "updated_at": updated_at,
         "completed_at": completed_at,
+        "failed_at": failed_at,
         "playhead_ms": min(playhead_ms, duration_ms) if playhead_ms is not None and duration_ms else playhead_ms,
         "duration_ms": duration_ms,
         "window": {
@@ -429,13 +434,13 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
     }
 
 
-def runner_process_alive(pid_value: object) -> bool | None:
+def process_alive_with_cmdline(pid_value: object, needle: str) -> bool | None:
     if not isinstance(pid_value, int) or pid_value <= 0:
         return None
     proc_cmdline = Path("/proc") / str(pid_value) / "cmdline"
     try:
         cmdline = proc_cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
-        return "slime_audio_session_runner.py" in cmdline
+        return needle in cmdline
     except FileNotFoundError:
         return False
     except OSError:
@@ -448,15 +453,27 @@ def runner_process_alive(pid_value: object) -> bool | None:
         return True
 
 
+def runner_process_alive(pid_value: object) -> bool | None:
+    return process_alive_with_cmdline(pid_value, "slime_audio_session_runner.py")
+
+
+def stream_process_alive(pid_value: object) -> bool | None:
+    return process_alive_with_cmdline(pid_value, "slime_audio_stream.py")
+
+
 def runner_health(state: dict[str, Any], transport: dict[str, Any]) -> dict[str, Any]:
     status = str(state.get("runner_status") or "")
     pid = state.get("runner_pid")
+    stream_pid = state.get("stream_pid")
     alive = runner_process_alive(pid)
+    stream_alive = stream_process_alive(stream_pid)
     health = "ok"
-    if status in {"fatal", "stopped"}:
+    if status in {"failed", "fatal", "stopped"}:
         health = status
     elif status == "completed" or transport.get("status") == "completed":
         health = "completed"
+    elif status == "streaming" and stream_alive is False:
+        health = "dead"
     elif alive is False and (state.get("current") or state.get("window_started_at")):
         health = "dead"
     elif transport.get("stale"):
@@ -465,6 +482,8 @@ def runner_health(state: dict[str, Any], transport: dict[str, Any]) -> dict[str,
         "runner_state": health,
         "runner_pid": pid,
         "runner_process_alive": alive,
+        "stream_pid": stream_pid,
+        "stream_process_alive": stream_alive,
         "runner_status": status or None,
         "runner_updated_at": state.get("runner_updated_at"),
         "runner_exit_at": state.get("runner_exit_at"),

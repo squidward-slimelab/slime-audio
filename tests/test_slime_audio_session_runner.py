@@ -154,6 +154,64 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertEqual(Path(pointer["active_state_path"]), state_path.resolve())
         self.assertEqual(pointer["slug"], "session")
 
+    def test_live_window_state_is_written_after_stream_starts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            state_path = temp / "state.json"
+            active_pointer = temp / "active-set.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(session_path),
+                    "--state",
+                    str(state_path),
+                    "--active-pointer",
+                    str(active_pointer),
+                    "--target",
+                    "SPONGEBOT",
+                    "--mode",
+                    "snapcast",
+                    "--no-persistent-snapcast",
+                    "--window-ms",
+                    "10000",
+                ]
+            )
+            process = Mock()
+            process.poll.side_effect = [0]
+            order = []
+            original_write_window_state = runner.write_window_state
+
+            def start_window_stream(*_args):
+                order.append("stream")
+                return runner.RunningWindow(process), ["stream"]
+
+            def write_window_state(*write_args, **write_kwargs):
+                order.append("state")
+                return original_write_window_state(*write_args, **write_kwargs)
+
+            with patch.object(runner, "render_window", return_value=["render"]):
+                with patch.object(runner, "start_window_stream", side_effect=start_window_stream):
+                    with patch.object(runner, "wait_window_stream", return_value=0):
+                        with patch.object(runner, "append_history"):
+                            with patch.object(runner, "playhead_ms_from_state", side_effect=[0, 20_000]):
+                                with patch.object(runner, "write_window_state", side_effect=write_window_state):
+                                    self.assertEqual(runner.run_session(args), 0)
+
+        self.assertEqual(order[:2], ["stream", "state"])
+
     def test_dry_run_does_not_update_active_pointer(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -220,6 +278,31 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertEqual(history[-1]["event"], "session_runner_exit")
         self.assertEqual(history[-1]["status"], "fatal")
         self.assertEqual(history[-1]["reason"], "RuntimeError: boom")
+
+    def test_running_status_clears_stale_runner_exit_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "state.json"
+            session_path = temp / "session.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "runner_status": "stopped",
+                        "runner_exit_at": "2026-06-09T10:00:00-0400",
+                        "runner_exit_reason": "signal:SIGTERM",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = runner.parse_args_from(["--session", str(session_path), "--state", str(state_path), "--target", "all"])
+
+            runner.write_runner_status(args, "running")
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(state["runner_status"], "running")
+        self.assertNotIn("runner_exit_at", state)
+        self.assertNotIn("runner_exit_reason", state)
 
     def test_signal_handler_records_stopped_exit_before_stopping_stream(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -308,6 +391,11 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertIs(second.handle, second_handle)
         self.assertEqual(popen.call_args_list[0].kwargs["stdout"], first_handle)
         self.assertEqual(popen.call_args_list[1].kwargs["stdout"], second_handle)
+
+    def test_default_snapcast_fifo_is_process_scoped(self):
+        args = runner.parse_args_from(["--target", "all", "--dry-run"])
+
+        self.assertEqual(args.snapcast_fifo.name, f"slime-audio-snapfifo-{runner.os.getpid()}")
 
     def test_fifo_keepalive_waits_for_snapserver_reader(self):
         path = Path("/tmp/slime-test-fifo")
