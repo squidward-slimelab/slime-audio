@@ -407,7 +407,6 @@ internal sealed class MulticastReceiver : IDisposable
                 var process = _process;
                 Interlocked.Exchange(ref _startedUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
                 Interlocked.Exchange(ref _lastExitCode, NoExitCode);
-                _lastExitStatus = null;
                 ClientTelemetry.Write("snapclient_started", new { serverHost, snapcastPort = _options.SnapcastPort, processId = process.Id, outputDevice = _settings.OutputDevice, command = _lastStartCommand });
                 process.EnableRaisingEvents = true;
                 process.ErrorDataReceived += (_, e) =>

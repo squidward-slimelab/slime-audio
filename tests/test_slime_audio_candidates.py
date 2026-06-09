@@ -7,12 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_candidates import candidate_rows, load_constraints, set_constraints
+from slime_audio_candidates import candidate_rows, load_constraints, recent_play_index, set_constraints
 from slime_music_library import Source, command_set_tunebat, connect, scan
 
 
 class SlimeAudioCandidateTests(unittest.TestCase):
-    def test_candidates_filter_recent_history_and_excluded_artists(self):
+    def test_candidates_penalize_recent_history_and_filter_excluded_artists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             root = temp / "music"
@@ -46,7 +46,14 @@ class SlimeAudioCandidateTests(unittest.TestCase):
                 )
             history = temp / "history.jsonl"
             history.write_text(
-                json.dumps({"event": "track_started", "resolved_track": str(played)}) + "\n",
+                json.dumps(
+                    {
+                        "event": "track_started",
+                        "resolved_track": str(played),
+                        "timestamp": "2026-06-09T05:00:00-0400",
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
             constraints_path = temp / "constraints.json"
@@ -64,8 +71,51 @@ class SlimeAudioCandidateTests(unittest.TestCase):
 
             candidates = candidate_rows(conn, constraints, history_path=history, recent_limit=10, limit=10)
 
-        self.assertEqual([candidate["title_guess"] for candidate in candidates], ["Keeper"])
+        self.assertEqual([candidate["title_guess"] for candidate in candidates], ["Keeper", "Played"])
         self.assertIn("energy 0.80 vs target 0.75", candidates[0]["reasons"])
+        self.assertEqual(candidates[1]["plays_seen"], 1)
+        self.assertTrue(any(reason.startswith("last played ") for reason in candidates[1]["reasons"]))
+
+    def test_session_window_history_counts_as_recent_play_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "music"
+            track = root / "Session Artist" / "Album" / "01 - Session Track.flac"
+            track.parent.mkdir(parents=True, exist_ok=True)
+            track.write_bytes(b"a" * 100)
+
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+
+            session = temp / "session.json"
+            session.write_text(json.dumps({"clips": [{"id": "clip-a", "path": str(track)}]}), encoding="utf-8")
+            history = temp / "history.jsonl"
+            history.write_text(
+                json.dumps(
+                    {
+                        "event": "session_window_started",
+                        "session": str(session),
+                        "clips": ["clip-a"],
+                        "timestamp": "2026-06-09T05:00:00-0400",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            recency = recent_play_index(conn, history, 10)
+            candidates = candidate_rows(
+                conn,
+                load_constraints(temp / "missing-constraints.json"),
+                history_path=history,
+                recent_limit=10,
+                limit=10,
+            )
+
+        self.assertEqual(len(recency), 1)
+        self.assertEqual(candidates[0]["title_guess"], "Session Track")
+        self.assertEqual(candidates[0]["plays_seen"], 1)
+        self.assertIsNotNone(candidates[0]["last_played_at"])
 
     def test_constraints_persist_change_reasons(self):
         with tempfile.TemporaryDirectory() as temp_dir:

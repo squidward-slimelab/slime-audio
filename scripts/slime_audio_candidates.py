@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import sqlite3
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -121,31 +123,97 @@ def set_constraints(
     return load_constraints(path)
 
 
-def recent_duplicate_keys(conn: sqlite3.Connection, history_path: Path, limit: int) -> set[str]:
+def parse_history_timestamp(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        try:
+            return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        except ValueError:
+            return None
+
+
+def recent_play_index(conn: sqlite3.Connection, history_path: Path, limit: int) -> dict[str, dict[str, Any]]:
     if limit <= 0:
-        return set()
+        return {}
     try:
         lines = history_path.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
-        return set()
-    paths: list[str] = []
+        return {}
+    path_stats: dict[str, dict[str, Any]] = {}
+    session_cache: dict[str, dict[str, str]] = {}
+
+    def add_path(path: Any, played_at: float | None) -> None:
+        if not isinstance(path, str) or not path:
+            return
+        stats = path_stats.setdefault(path, {"plays_seen": 0, "last_played_ts": None})
+        stats["plays_seen"] += 1
+        if played_at is not None and (stats["last_played_ts"] is None or played_at > stats["last_played_ts"]):
+            stats["last_played_ts"] = played_at
+
+    def session_clip_paths(session_ref: Any) -> dict[str, str]:
+        if not isinstance(session_ref, str) or not session_ref:
+            return {}
+        session_path = Path(session_ref)
+        if not session_path.is_absolute():
+            session_path = REPO_ROOT / session_path
+        cache_key = str(session_path)
+        if cache_key in session_cache:
+            return session_cache[cache_key]
+        try:
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            session_cache[cache_key] = {}
+            return {}
+        mapping = {
+            str(clip.get("id")): str(clip.get("path"))
+            for clip in payload.get("clips", [])
+            if isinstance(clip, dict) and clip.get("id") and clip.get("path")
+        }
+        session_cache[cache_key] = mapping
+        return mapping
+
     for line in reversed(lines):
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("event") not in {"track_started", "track_completed"}:
+        event_type = event.get("event")
+        if event_type not in {"track_started", "track_completed", "session_window_started", "session_window_completed"}:
             continue
-        path = event.get("resolved_track") or event.get("track")
-        if isinstance(path, str) and path not in paths:
-            paths.append(path)
-        if len(paths) >= limit:
+        played_at = parse_history_timestamp(event.get("timestamp"))
+        if event_type in {"track_started", "track_completed"}:
+            add_path(event.get("resolved_track") or event.get("track"), played_at)
+        elif event_type in {"session_window_started", "session_window_completed"}:
+            clip_paths = session_clip_paths(event.get("session"))
+            for clip_id in event.get("clips") or []:
+                add_path(clip_paths.get(str(clip_id)), played_at)
+        if len(path_stats) >= limit:
             break
-    if not paths:
-        return set()
+    if not path_stats:
+        return {}
+    paths = list(path_stats)
     placeholders = ",".join("?" for _ in paths)
-    rows = conn.execute(f"SELECT duplicate_key FROM files WHERE path IN ({placeholders})", paths).fetchall()
-    return {str(row["duplicate_key"]) for row in rows}
+    rows = conn.execute(f"SELECT path, duplicate_key FROM files WHERE path IN ({placeholders})", paths).fetchall()
+    by_key: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row["duplicate_key"])
+        stats = path_stats.get(str(row["path"]), {})
+        entry = by_key.setdefault(key, {"plays_seen": 0, "last_played_ts": None})
+        entry["plays_seen"] += int(stats.get("plays_seen") or 0)
+        played_at = stats.get("last_played_ts")
+        if played_at is not None and (entry["last_played_ts"] is None or played_at > entry["last_played_ts"]):
+            entry["last_played_ts"] = played_at
+    for entry in by_key.values():
+        played_at = entry.get("last_played_ts")
+        entry["last_played_at"] = datetime.fromtimestamp(played_at).isoformat() if played_at is not None else None
+    return by_key
+
+
+def recent_duplicate_keys(conn: sqlite3.Connection, history_path: Path, limit: int) -> set[str]:
+    return set(recent_play_index(conn, history_path, limit))
 
 
 def candidate_rows(
@@ -158,15 +226,15 @@ def candidate_rows(
     query: str | None = None,
     include_untagged: bool = False,
 ) -> list[dict[str, Any]]:
-    recent_keys = recent_duplicate_keys(conn, history_path, recent_limit)
-    filters = ["preferred_path IS NOT NULL"]
+    recent_plays = recent_play_index(conn, history_path, recent_limit)
+    filters = [
+        "preferred_path IS NOT NULL",
+        "lower(preferred_path) NOT LIKE '%/separated/%'",
+        "lower(title_guess) NOT IN ('bass', 'drums', 'other', 'vocals')",
+    ]
     if not include_untagged:
         filters.extend(["normalized_artist != ''", "normalized_title != ''"])
     params: list[Any] = []
-    if recent_keys:
-        placeholders = ",".join("?" for _ in recent_keys)
-        filters.append(f"duplicate_key NOT IN ({placeholders})")
-        params.extend(sorted(recent_keys))
     for artist in constraints.exclude_artists:
         filters.append("normalized_artist NOT LIKE ?")
         params.append(f"%{normalize(artist)}%")
@@ -202,20 +270,44 @@ def candidate_rows(
         WHERE {where}
         LIMIT ?
         """,
-        params + [max(limit * 4, limit)],
+        params + [max(limit * 20, 200)],
     ).fetchall()
 
     candidates = []
     for row in rows_to_dicts(rows):
-        score, reasons = score_candidate(row, constraints)
+        play_meta = recent_plays.get(str(row.get("duplicate_key"))) or {}
+        row["last_played_at"] = play_meta.get("last_played_at")
+        row["plays_seen"] = play_meta.get("plays_seen", 0)
+        score, reasons = score_candidate(row, constraints, play_meta=play_meta)
         row["score"] = score
         row["reasons"] = reasons
         candidates.append(row)
     candidates.sort(key=lambda item: (item["score"], item["copies"], item["preferred_quality_score"]), reverse=True)
-    return candidates[:limit]
+    return diversify_candidates(candidates, limit=limit)
 
 
-def score_candidate(row: dict[str, Any], constraints: SetConstraints) -> tuple[float, list[str]]:
+def diversify_candidates(candidates: list[dict[str, Any]], *, limit: int, per_artist: int = 2) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    artist_counts: Counter[str] = Counter()
+    for candidate in candidates:
+        raw_artist = str(candidate.get("artist_guess") or "").strip().lower()
+        artist_key = normalize(raw_artist) or raw_artist
+        if not artist_key or artist_counts[artist_key] < per_artist:
+            selected.append(candidate)
+            artist_counts[artist_key] += 1
+        else:
+            deferred.append(candidate)
+        if len(selected) >= limit:
+            return selected
+    for candidate in deferred:
+        selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def score_candidate(row: dict[str, Any], constraints: SetConstraints, *, play_meta: dict[str, Any] | None = None) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
     copies = int(row.get("copies") or 0)
@@ -247,6 +339,25 @@ def score_candidate(row: dict[str, Any], constraints: SetConstraints) -> tuple[f
                 score += 0.05
                 reasons.append(f"vibe word {word}")
                 break
+    if play_meta:
+        last_played_ts = play_meta.get("last_played_ts")
+        plays_seen = int(play_meta.get("plays_seen") or 0)
+        penalty = min(0.12, plays_seen * 0.03)
+        if isinstance(last_played_ts, (int, float)):
+            age_hours = max(0.0, (time.time() - float(last_played_ts)) / 3600)
+            if age_hours < 6:
+                penalty += 0.35
+            elif age_hours < 24:
+                penalty += 0.22
+            elif age_hours < 72:
+                penalty += 0.12
+            elif age_hours < 168:
+                penalty += 0.06
+            reasons.append(f"last played {age_hours:.1f}h ago")
+        if plays_seen:
+            reasons.append(f"recent plays {plays_seen}")
+        if penalty:
+            score -= penalty
     if not reasons:
         reasons.append("library candidate")
     return round(score, 4), reasons

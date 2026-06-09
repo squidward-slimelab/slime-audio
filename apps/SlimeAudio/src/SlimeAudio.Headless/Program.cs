@@ -258,7 +258,6 @@ internal sealed class HeadlessReceiver : IDisposable
         {
             var process = _multicastProcess;
             Interlocked.Exchange(ref _multicastStartedUnixTimeMs, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-            _multicastLastExitStatus = null;
             process.EnableRaisingEvents = true;
             process.ErrorDataReceived += (_, e) =>
             {
