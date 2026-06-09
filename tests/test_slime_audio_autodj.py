@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -13,9 +14,13 @@ from slime_audio_autodj import (
     SelectedTrack,
     ensure_utility_deck,
     filter_defensible_source_tracks,
+    is_downloaded_candidate,
+    load_taste_profile,
     rhythm_bed_score,
     session_payload,
+    select_tracks,
     stem_readiness_report,
+    taste_affinity,
     validate_no_vanilla_leads,
 )
 from slime_audio_dj import BeatGrid, StructureWindow, TrackAnalysis
@@ -39,6 +44,17 @@ def autodj_args(**overrides):
         "title": "test",
         "intent": "test",
         "min_tracks": 1,
+        "min_runway_ms": 0,
+        "selection_jitter": 0.0,
+        "skip_term": [],
+        "require_analysis": False,
+        "min_score": None,
+        "max_per_artist": 1,
+        "min_track_ms": 1,
+        "structured_source_only": False,
+        "taste_profile": Path("/missing/taste-profile.json"),
+        "downloaded_track_ratio": 0.10,
+        "leftfield_download_ratio": 0.10,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -82,6 +98,91 @@ def analysis(path="/music/lead.flac"):
 
 
 class SlimeAudioAutodjTests(unittest.TestCase):
+    def test_taste_profile_scores_top_artists_and_tracks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_path = Path(temp_dir) / "taste.json"
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "top_artists": [{"name": "Refused"}],
+                        "top_tracks": [{"artist": "The Killers", "title": "Mr. Brightside"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            profile = load_taste_profile(profile_path)
+
+        self.assertGreater(taste_affinity({"artist_guess": "Refused", "title_guess": "New Noise"}, profile), 0)
+        self.assertGreater(taste_affinity({"artist_guess": "The Killers", "title_guess": "Mr. Brightside"}, profile), 0.7)
+        self.assertEqual(taste_affinity({"artist_guess": "Unranked", "title_guess": "Deep Cut"}, profile), 0)
+
+    def test_select_tracks_reserves_download_and_leftfield_download_lanes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            taste_profile = temp / "taste.json"
+            taste_profile.write_text(json.dumps({"top_artists": ["Known Artist"]}), encoding="utf-8")
+            normal = temp / "library" / "Known Artist" / "Album" / "normal.flac"
+            known_download = temp / "_Slime Incoming" / "Known Artist" / "known.flac"
+            leftfield_download = temp / "_Slime Incoming" / "Odd Artist" / "odd.flac"
+            filler = temp / "library" / "Other Artist" / "Album" / "filler.flac"
+            for path in [normal, known_download, leftfield_download, filler]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"a")
+            rows = [
+                {
+                    "duplicate_key": "normal",
+                    "preferred_path": str(normal),
+                    "artist_guess": "Known Artist",
+                    "title_guess": "Normal",
+                    "album_guess": "Album",
+                    "score": 1.0,
+                    "reasons": [],
+                },
+                {
+                    "duplicate_key": "known-download",
+                    "preferred_path": str(known_download),
+                    "artist_guess": "Known Artist",
+                    "title_guess": "Known Download",
+                    "album_guess": "Album",
+                    "score": 0.9,
+                    "reasons": [],
+                },
+                {
+                    "duplicate_key": "leftfield-download",
+                    "preferred_path": str(leftfield_download),
+                    "artist_guess": "Odd Artist",
+                    "title_guess": "Odd",
+                    "album_guess": "Album",
+                    "score": 0.2,
+                    "reasons": [],
+                },
+                {
+                    "duplicate_key": "filler",
+                    "preferred_path": str(filler),
+                    "artist_guess": "Other Artist",
+                    "title_guess": "Filler",
+                    "album_guess": "Album",
+                    "score": 0.8,
+                    "reasons": [],
+                },
+            ]
+            args = autodj_args(
+                max_tracks=10,
+                max_per_artist=2,
+                taste_profile=taste_profile,
+                downloaded_track_ratio=0.20,
+                leftfield_download_ratio=0.50,
+            )
+            with patch("slime_audio_autodj.candidate_pool", return_value=rows), patch("slime_audio_autodj.probe_duration_ms", return_value=120_000):
+                selected = select_tracks(args)
+
+        reasons = [reason for track in selected for reason in track.reasons]
+        self.assertEqual(selected[0].title, "Normal")
+        self.assertTrue(any("downloaded material lane" in reason for reason in reasons))
+        self.assertTrue(any("spotify left-field download lane" in reason for reason in reasons))
+        self.assertTrue(is_downloaded_candidate({"preferred_path": str(leftfield_download)}))
+
     def test_vanilla_lead_guard_rejects_untouched_long_lead(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"

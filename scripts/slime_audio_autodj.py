@@ -38,6 +38,7 @@ from slime_music_library import DEFAULT_DB, connect, normalize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNTIME = REPO_ROOT / "runtime"
+DEFAULT_TASTE_PROFILE = DEFAULT_RUNTIME / "spotify-taste-profile.json"
 DEFAULT_TARGETS = ["192.168.0.123:47777", "192.168.0.163:47777"]
 DEFAULT_MIN_RUNWAY_MS = 35 * 60 * 1000
 DEFAULT_MAX_TRACKS = 24
@@ -137,6 +138,17 @@ class SourceWindow:
     structure_kind: str | None
 
 
+@dataclass(frozen=True)
+class TasteProfile:
+    source: str
+    top_artists: set[str]
+    top_tracks: set[tuple[str, str]]
+
+    @property
+    def available(self) -> bool:
+        return bool(self.top_artists or self.top_tracks)
+
+
 def iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -144,6 +156,75 @@ def iso_now() -> str:
 def slugify(value: str) -> str:
     normalized = normalize(value).replace(" ", "-")
     return "-".join(part for part in normalized.split("-") if part) or "autodj"
+
+
+def _profile_name(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        return str(item.get("name") or item.get("artist") or item.get("title") or "")
+    return ""
+
+
+def _profile_track(item: Any) -> tuple[str, str] | None:
+    if isinstance(item, dict):
+        artist = normalize(str(item.get("artist") or item.get("artists") or ""))
+        title = normalize(str(item.get("title") or item.get("name") or ""))
+        if artist and title:
+            return artist, title
+    if isinstance(item, str) and " - " in item:
+        artist, title = item.split(" - ", 1)
+        artist_key = normalize(artist)
+        title_key = normalize(title)
+        if artist_key and title_key:
+            return artist_key, title_key
+    return None
+
+
+def load_taste_profile(path: Path) -> TasteProfile:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return TasteProfile(source=str(path), top_artists=set(), top_tracks=set())
+    top_artists: set[str] = set()
+    for key in ("top_artists", "artists", "spotify_top_artists"):
+        for item in payload.get(key, []) if isinstance(payload, dict) else []:
+            name = normalize(_profile_name(item))
+            if name:
+                top_artists.add(name)
+    top_tracks: set[tuple[str, str]] = set()
+    for key in ("top_tracks", "tracks", "spotify_top_tracks"):
+        for item in payload.get(key, []) if isinstance(payload, dict) else []:
+            track = _profile_track(item)
+            if track:
+                top_tracks.add(track)
+                top_artists.add(track[0])
+    return TasteProfile(source=str(path), top_artists=top_artists, top_tracks=top_tracks)
+
+
+def row_artist_title(row: dict[str, Any]) -> tuple[str, str]:
+    return normalize(str(row.get("artist_guess") or "")), normalize(str(row.get("title_guess") or ""))
+
+
+def taste_affinity(row: dict[str, Any], profile: TasteProfile) -> float:
+    if not profile.available:
+        return 0.0
+    artist, title = row_artist_title(row)
+    score = 0.0
+    if artist and artist in profile.top_artists:
+        score += 0.35
+    if artist and title and (artist, title) in profile.top_tracks:
+        score += 0.45
+    return score
+
+
+def is_taste_anchor(row: dict[str, Any], profile: TasteProfile) -> bool:
+    return taste_affinity(row, profile) > 0
+
+
+def is_downloaded_candidate(row: dict[str, Any]) -> bool:
+    path = str(row.get("preferred_path") or "").casefold()
+    return "/_slime incoming/" in path or "/downloads/" in path or "/sldl/" in path or "-sldl/" in path
 
 
 def load_state() -> dict[str, Any]:
@@ -231,38 +312,70 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
     if not pool:
         raise SystemExit("no candidates available")
     rng = random.SystemRandom()
+    taste_profile = load_taste_profile(args.taste_profile)
     artist_counts: Counter[str] = Counter()
     title_counts: Counter[str] = Counter()
     selected: list[SelectedTrack] = []
+    selected_keys: set[str] = set()
     runway_ms = 0
     top_window = min(len(pool), max(args.max_tracks * 12, 120))
-    ranked = pool[:top_window]
+    for row in pool:
+        affinity = taste_affinity(row, taste_profile)
+        row["spotify_taste_affinity"] = affinity
+        if affinity:
+            row.setdefault("reasons", []).append(f"spotify taste affinity {affinity:.2f}")
+        if is_downloaded_candidate(row):
+            row["downloaded_material"] = True
+            row.setdefault("reasons", []).append("downloaded material lane")
+            if taste_profile.available and not is_taste_anchor(row, taste_profile):
+                row["spotify_leftfield_download"] = True
+                row.setdefault("reasons", []).append("spotify left-field download lane")
+    quota_ranked = list(pool)
+    rng.shuffle(quota_ranked)
+    quota_ranked.sort(
+        key=lambda item: float(item.get("score") or 0.0)
+        + float(item.get("spotify_taste_affinity") or 0.0)
+        + rng.uniform(0.0, args.selection_jitter),
+        reverse=True,
+    )
+    ranked = list(pool[:top_window])
     rng.shuffle(ranked)
-    ranked.sort(key=lambda item: float(item.get("score") or 0.0) + rng.uniform(0.0, args.selection_jitter), reverse=True)
+    ranked.sort(
+        key=lambda item: float(item.get("score") or 0.0)
+        + float(item.get("spotify_taste_affinity") or 0.0)
+        + rng.uniform(0.0, args.selection_jitter),
+        reverse=True,
+    )
 
-    for row in ranked:
+    def try_select(row: dict[str, Any]) -> bool:
+        nonlocal runway_ms
+        key = str(row.get("duplicate_key") or row.get("preferred_path") or "")
+        if key in selected_keys:
+            return False
+        if len(selected) >= args.max_tracks:
+            return False
         path = str(row.get("preferred_path") or "")
         if not path or not Path(path).exists():
-            continue
+            return False
         haystack = normalize(
             " ".join(str(row.get(key) or "") for key in ("title_guess", "artist_guess", "album_guess", "preferred_path"))
         )
         if any(normalize(term) in haystack for term in args.skip_term):
-            continue
+            return False
         if args.require_analysis and not (row.get("tunebat_bpm") or row.get("tunebat_energy") is not None):
-            continue
+            return False
         if args.min_score is not None and float(row.get("score") or 0.0) < args.min_score:
-            continue
+            return False
         artist = str(row.get("artist_guess") or "").strip()
         artist_key = normalize(artist) or artist.casefold()
         title_key = normalize(str(row.get("title_guess") or ""))
         if artist_key and artist_counts[artist_key] >= args.max_per_artist:
-            continue
+            return False
         if title_key and title_counts[title_key] >= 1:
-            continue
+            return False
         duration_ms = probe_duration_ms(path)
         if duration_ms is not None and duration_ms < args.min_track_ms:
-            continue
+            return False
         selected.append(
             SelectedTrack(
                 path=path,
@@ -276,20 +389,43 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
                 reasons=[str(reason) for reason in row.get("reasons") or []],
             )
         )
+        selected_keys.add(key)
         if artist_key:
             artist_counts[artist_key] += 1
         if title_key:
             title_counts[title_key] += 1
         runway_ms += duration_ms or args.default_track_ms
-        if len(selected) >= args.max_tracks:
+        return True
+
+    download_target = 0
+    if args.downloaded_track_ratio > 0 and args.max_tracks >= 10:
+        download_target = max(1, round(args.max_tracks * args.downloaded_track_ratio))
+    leftfield_download_target = 0
+    if taste_profile.available and download_target > 0 and args.leftfield_download_ratio > 0:
+        leftfield_download_target = max(1, round(download_target * args.leftfield_download_ratio))
+
+    for row in quota_ranked:
+        if sum(1 for track in selected if "spotify left-field download lane" in track.reasons) >= leftfield_download_target:
             break
-        if not args.structured_source_only and runway_ms >= args.min_runway_ms:
+        if row.get("spotify_leftfield_download"):
+            try_select(row)
+    for row in quota_ranked:
+        if sum(1 for track in selected if "downloaded material lane" in track.reasons) >= download_target:
             break
+        if row.get("downloaded_material"):
+            try_select(row)
+    for row in ranked:
+        if try_select(row):
+            if len(selected) >= args.max_tracks:
+                break
+            if not args.structured_source_only and runway_ms >= args.min_runway_ms:
+                break
 
     if len(selected) < args.min_tracks and runway_ms < args.min_runway_ms:
         raise SystemExit(
             f"only selected {len(selected)} tracks / {round(runway_ms / 60000, 1)} min; refusing weak autodj set"
         )
+    selected.sort(key=lambda track: track.score, reverse=True)
     return selected
 
 
@@ -671,20 +807,45 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
             }
         )
         end_ms = bed_start + bed_duration
-        for param, value in (
-            ("gain_db", args.bed_gain_db),
-            ("lowpass_hz", args.bed_lowpass_hz),
-            ("highpass_hz", args.bed_highpass_hz),
-        ):
-            deck_automations.append(
+        midpoint_ms = bed_start + max(1, bed_duration // 2)
+        deck_automations.extend(
+            [
                 {
                     "target": "deck-4",
-                    "param": param,
+                    "param": "gain_db",
                     "source_clip_id": bed_id,
                     "planner_role": "bed-filter-carve",
-                    "points": [{"at_ms": bed_start, "value": value}, {"at_ms": end_ms, "value": value}],
-                }
-            )
+                    "points": [
+                        {"at_ms": bed_start, "value": args.bed_gain_db - 3.0},
+                        {"at_ms": bed_start + min(8_000, bed_duration // 4), "value": args.bed_gain_db},
+                        {"at_ms": max(bed_start, end_ms - 8_000), "value": args.bed_gain_db - 1.0},
+                        {"at_ms": end_ms, "value": args.bed_gain_db - 4.0},
+                    ],
+                },
+                {
+                    "target": "deck-4",
+                    "param": "lowpass_hz",
+                    "source_clip_id": bed_id,
+                    "planner_role": "bed-filter-carve",
+                    "points": [
+                        {"at_ms": bed_start, "value": max(500.0, args.bed_lowpass_hz * 0.45)},
+                        {"at_ms": midpoint_ms, "value": max(args.bed_lowpass_hz + 800.0, args.bed_lowpass_hz * 1.75)},
+                        {"at_ms": end_ms, "value": args.bed_lowpass_hz},
+                    ],
+                },
+                {
+                    "target": "deck-4",
+                    "param": "highpass_hz",
+                    "source_clip_id": bed_id,
+                    "planner_role": "bed-filter-carve",
+                    "points": [
+                        {"at_ms": bed_start, "value": max(args.bed_highpass_hz, 170.0)},
+                        {"at_ms": midpoint_ms, "value": args.bed_highpass_hz},
+                        {"at_ms": end_ms, "value": max(args.bed_highpass_hz + 120.0, 180.0)},
+                    ],
+                },
+            ]
+        )
         added.append({"id": bed_id, "source": source.path, "under": lead.get("id"), "start_ms": bed_start, "duration_ms": bed_duration})
 
     payload["clips"] = sorted(
@@ -958,7 +1119,7 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
                 "--duration",
                 str(bed_duration),
                 "--gain-db",
-                "-6",
+                str(args.bed_gain_db),
                 "--fade-in-ms",
                 "3000",
                 "--fade-out-ms",
@@ -978,7 +1139,7 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
                     "--end",
                     str(bed_start + bed_duration),
                     "--gain-db",
-                    "-6",
+                    str(args.bed_gain_db),
                     "--lowpass-hz",
                     "1800",
                     "--highpass-hz",
@@ -1098,6 +1259,12 @@ def continue_set(args: argparse.Namespace) -> int:
             "tracks": [asdict(track) for track in selected],
             "structure_rejections": structure_rejections,
             "analysis_coverage": {"selected": len(selected), "available": len(analyses)},
+            "selection_policy": {
+                "taste_profile": str(args.taste_profile),
+                "taste_profile_available": load_taste_profile(args.taste_profile).available,
+                "downloaded_track_ratio": args.downloaded_track_ratio,
+                "leftfield_download_ratio": args.leftfield_download_ratio,
+            },
         }
         plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(plan, indent=2, sort_keys=True))
@@ -1114,6 +1281,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--constraints", type=Path, default=DEFAULT_CONSTRAINTS)
     cont.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
     cont.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    cont.add_argument("--taste-profile", type=Path, default=DEFAULT_TASTE_PROFILE)
     cont.add_argument("--analysis-cache", type=Path, default=DEFAULT_ANALYSIS_CACHE)
     cont.add_argument("--analysis-backend", choices=["auto", "ffmpeg"], default="ffmpeg")
     cont.add_argument("--analysis-sample-rate", type=int, default=44_100)
@@ -1136,6 +1304,8 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--include-broad-pool", action="store_true")
     cont.add_argument("--remix-focus", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--stem-aware-remix", action=argparse.BooleanOptionalAction, default=False)
+    cont.add_argument("--downloaded-track-ratio", type=float, default=0.10)
+    cont.add_argument("--leftfield-download-ratio", type=float, default=0.10)
     cont.add_argument("--selection-jitter", type=float, default=0.12)
     cont.add_argument("--skip-term", action="append", default=list(DEFAULT_SKIP_TERMS))
     cont.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
@@ -1152,7 +1322,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--fade-out-ms", type=int, default=5_000)
     cont.add_argument("--bed-duration-ms", type=int, default=96_000)
     cont.add_argument("--bed-trim-start-ms", type=int, default=60_000)
-    cont.add_argument("--bed-gain-db", type=float, default=-6.0)
+    cont.add_argument("--bed-gain-db", type=float, default=-3.0)
     cont.add_argument("--bed-fade-in-ms", type=int, default=3_000)
     cont.add_argument("--bed-fade-out-ms", type=int, default=1_500)
     cont.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
