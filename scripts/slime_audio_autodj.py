@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sqlite3
 import json
 import os
 import random
@@ -88,6 +89,31 @@ DEFAULT_QUERY_LANES = [
     "dance-punk",
     "post-hardcore",
 ]
+REMIX_QUERY_LANES = [
+    "hard techno",
+    "drum and bass",
+    "dnb",
+    "dubstep",
+    "riddim",
+    "bass music",
+    "neurofunk",
+    "jungle",
+    "breakbeat",
+    "techno vocal",
+    "vocal",
+    "acapella",
+]
+REMIX_RHYTHM_LANES = {
+    "hard techno",
+    "drum and bass",
+    "dnb",
+    "dubstep",
+    "riddim",
+    "bass music",
+    "neurofunk",
+    "jungle",
+    "breakbeat",
+}
 
 
 @dataclass(frozen=True)
@@ -162,6 +188,7 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
     constraints = load_constraints(args.constraints)
     conn = connect(args.db)
     seen: set[str] = set()
+    by_key: dict[str, dict[str, Any]] = {}
     pool: list[dict[str, Any]] = []
     queries = [None] if args.include_broad_pool else []
     source_words: list[str] = []
@@ -169,6 +196,8 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
         if len(word) >= 4 and word not in VIBE_STOP_WORDS:
             source_words.append(word)
     queries.extend(source_words[: args.query_count])
+    if args.remix_focus:
+        queries.extend(REMIX_QUERY_LANES)
     queries.extend(DEFAULT_QUERY_LANES)
     for query in queries:
         rows = candidate_rows(
@@ -184,9 +213,14 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
         )
         for row in rows:
             key = str(row.get("duplicate_key") or row.get("preferred_path"))
+            if args.remix_focus and query in REMIX_RHYTHM_LANES:
+                row.setdefault("reasons", []).append(f"rhythm lane query: {query}")
             if key in seen:
+                if args.remix_focus and query in REMIX_RHYTHM_LANES and key in by_key:
+                    by_key[key].setdefault("reasons", []).append(f"rhythm lane query: {query}")
                 continue
             seen.add(key)
+            by_key[key] = row
             pool.append(row)
     pool.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
     return pool
@@ -260,8 +294,19 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
 
 
 def material_score(track: SelectedTrack, words: tuple[str, ...]) -> int:
-    haystack = normalize(" ".join([track.path, track.artist, track.title, track.album]))
+    haystack = normalize(" ".join([track.path, track.artist, track.title, track.album, *track.reasons]))
     return sum(1 for word in words if word in haystack)
+
+
+def track_bpm(track: SelectedTrack) -> float | None:
+    for reason in track.reasons:
+        if not reason.startswith("bpm "):
+            continue
+        try:
+            return float(reason.split(" ", 1)[1])
+        except (IndexError, ValueError):
+            return None
+    return None
 
 
 def rhythm_bed_score(track: SelectedTrack) -> int:
@@ -276,22 +321,84 @@ def rhythm_bed_score(track: SelectedTrack) -> int:
             "garage",
             "drum and bass",
             "jungle",
-            "club",
             "bass",
+            "hard techno",
+            "riddim",
+            "neurofunk",
+            "dnb",
         ),
     )
+    bpm = track_bpm(track)
+    has_rhythm_lane = material_score(track, ("rhythm lane query",)) > 0
+    if bpm is not None and (128 <= bpm <= 180) and has_rhythm_lane:
+        score += 1
     if score > 0 and track.duration_ms and track.duration_ms >= 120_000:
         score += 1
     return score
 
 
 def lead_score(track: SelectedTrack) -> int:
-    score = material_score(track, ("vocal", "rap", "hip hop", "punk", "feat", "with", "song"))
+    score = material_score(track, ("vocal", "rap", "hip hop", "punk", "feat", "with", "song", "acapella", "hook"))
     if rhythm_bed_score(track) > 1:
         score -= 2
     if track.duration_ms and track.duration_ms >= 90_000:
         score += 1
     return score
+
+
+def stem_readiness_report(selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
+    if not args.stem_aware_remix:
+        return {"required": False}
+    try:
+        conn = connect(args.db)
+        conn.execute("SELECT 1 FROM track_stem_sets LIMIT 1")
+    except (sqlite3.Error, OSError) as exc:
+        return {"required": True, "ready": 0, "checked": 0, "error": str(exc)}
+    tracks: list[dict[str, Any]] = []
+    ready_count = 0
+    for track in selected:
+        stem_set = conn.execute(
+            """
+            SELECT id, artifact_root
+            FROM track_stem_sets
+            WHERE source_path = ? AND status = 'ready'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (track.path,),
+        ).fetchone()
+        windows: list[dict[str, Any]] = []
+        if stem_set is not None:
+            ready_count += 1
+            rows = conn.execute(
+                """
+                SELECT stem_name, kind, start_ms, end_ms, confidence
+                FROM track_stem_windows
+                WHERE stem_set_id = ?
+                  AND kind IN ('vocal_present', 'vocal_absent', 'instrumental_pocket', 'bass_active', 'drums_active')
+                ORDER BY start_ms
+                LIMIT 24
+                """,
+                (stem_set["id"],),
+            ).fetchall()
+            windows = [dict(row) for row in rows]
+        tracks.append(
+            {
+                "path": track.path,
+                "artist": track.artist,
+                "title": track.title,
+                "ready": stem_set is not None,
+                "stem_set_id": stem_set["id"] if stem_set is not None else None,
+                "windows": windows,
+            }
+        )
+    return {
+        "required": True,
+        "checked": len(selected),
+        "ready": ready_count,
+        "policy": "use ready vocal/bass/drum stem windows for vocal remixes; avoid vocal-on-vocal and keep one bass stem active unless chopping/trading",
+        "tracks": tracks,
+    }
 
 
 def load_or_analyze_selected(selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, TrackAnalysis]:
@@ -459,6 +566,12 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         "created_at": iso_now(),
         "intent": args.intent,
         "selection_process": "database candidates plus play-history freshness penalties; arranged as short lead sections plus real handoffs/beds/effects",
+        "remix_focus": bool(args.remix_focus),
+        "remix_policy": (
+            "hard-techno/dnb/dubstep vocal remix lane: pair vocal/hook leads with rhythm/bass beds, prefer drop/build anchors, avoid vocal clashes, keep one sub/bass source active"
+            if args.remix_focus
+            else None
+        ),
         "selected_material": [asdict(track) for track in selected],
         "lead_count": len(lead_clips),
         "bed_count": 0,
@@ -712,6 +825,20 @@ def run_session_edit(command_args: list[str]) -> dict[str, Any]:
     }
 
 
+def ensure_utility_deck(session_path: Path, deck: str = "deck-4") -> None:
+    payload = load_session_payload(session_path)
+    decks = [str(item) for item in payload.get("decks", []) if str(item)]
+    if deck not in decks:
+        decks.append(deck)
+        payload["decks"] = decks
+    routing = payload.setdefault("fader_routing", {}).setdefault("deck_assignments", {})
+    routing.setdefault("deck-1", "A")
+    routing.setdefault("deck-2", "A")
+    routing.setdefault("deck-3", "B")
+    routing.setdefault(deck, "THRU")
+    write_payload(session_path, payload)
+
+
 def creative_source_score(clip: dict[str, Any]) -> int:
     haystack = normalize(" ".join(str(clip.get(key) or "") for key in ("id", "path")))
     score = 0
@@ -812,6 +939,7 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
     bed_start = clip_start_ms(target) + min(30_000, max(0, clip_duration_ms(target) // 4))
     bed_duration = min(96_000, max(32_000, clip_end_ms(target) - bed_start - 2_000))
     if bed_duration >= 32_000:
+        ensure_utility_deck(session_path, "deck-4")
         bed_id = f"autodj-bed-{slugify(str(bed_source['id']))[:32]}"
         result = run_session_edit(
             [
@@ -938,6 +1066,11 @@ def continue_set(args: argparse.Namespace) -> int:
         structural = add_structural_beds(session_path, selected, args)
         creative = apply_creative_pass(session_path, args)
         vanilla_guard = validate_no_vanilla_leads(session_path, args)
+        stem_readiness = stem_readiness_report(selected, args)
+        if args.remix_focus:
+            move_kinds = {str(move.get("kind") or "") for move in creative.get("moves", [])}
+            if int(structural.get("added") or 0) < 1 and not ({"rhythm-bed", "structural-rhythm-bed", "bed-filter-carve"} & move_kinds):
+                raise SystemExit("remix-focus set has no rhythm/stem bed; refusing generic handoff-only mix")
         validate = subprocess.run(
             [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
             cwd=REPO_ROOT,
@@ -961,6 +1094,7 @@ def continue_set(args: argparse.Namespace) -> int:
             "structural": structural,
             "creative": creative,
             "vanilla_guard": vanilla_guard,
+            "stem_readiness": stem_readiness,
             "tracks": [asdict(track) for track in selected],
             "structure_rejections": structure_rejections,
             "analysis_coverage": {"selected": len(selected), "available": len(analyses)},
@@ -1000,6 +1134,8 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--sql-pool-limit", type=int, default=600)
     cont.add_argument("--query-count", type=int, default=0)
     cont.add_argument("--include-broad-pool", action="store_true")
+    cont.add_argument("--remix-focus", action=argparse.BooleanOptionalAction, default=False)
+    cont.add_argument("--stem-aware-remix", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--selection-jitter", type=float, default=0.12)
     cont.add_argument("--skip-term", action="append", default=list(DEFAULT_SKIP_TERMS))
     cont.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)

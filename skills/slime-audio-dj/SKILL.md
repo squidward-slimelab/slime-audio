@@ -298,6 +298,33 @@ For most requested sets, aim for this shape unless the operator explicitly asks 
 - Add a healthy amount of TTS vocal drops. They should be short, spaced out, and about what is happening in the songs: texture, groove, genre lineage, energy, transition intent, a hook, or why the next layer fits.
 - The dashboard should visibly show the arrangement: main decks, bed/utility decks, attached `deck-N-fx` lanes, the `deck-5` vocal lane, effects, fader motion, automation, and mic lean-ins. If it visually looks like one song after another, the set is not done.
 
+### Hard Techno/DNB/Dubstep Vocal Remix Lane
+
+Use this as the default "cool mix" lane when the operator asks for more energetic or intentional DJ work and has not requested another genre direction. The musical target is vocal/hook-forward songs rebuilt over hard-techno, dnb, dubstep, bass, jungle, breakbeat, or related rhythm material.
+
+Planning rules:
+
+- Pick one strong vocal/hook lead and one rhythm/bass bed idea before filling the rest of the block.
+- Prefer cached `drop`, `hook`, `build`, and `breakdown` anchors over intro-only windows. Short detected drop/build markers are valid cue anchors when extended into a phrase-safe source window.
+- Use 32-beat pre-drop cueing for dnb/dubstep drops when metadata supports it. For fakeouts, use 4/8-bar phrase lengths and resolve into a real drop, hard cut, echo throw, or bass trade.
+- Double drops need compatible BPM, key/Camelot, phrase position, and low-end ownership. If both sources have active bass/sub, only one keeps the low end unless the routine deliberately chops or trades bass.
+- Do not lay full vocals over full vocals. Use stem `vocal_absent` or `instrumental_pocket` windows, or chop/gate the borrowed vocal so it reads as a routine rather than clutter.
+- Prefer stem or acapella prep for vocal remix work: split/analyze/verify stems, inherit the full-track beatgrid, then use `stem_groups` as one conceptual deck with individually balanced vocals/drums/bass/other.
+- A valid remix block should contain at least one audible rhythm bed or stem group, one phrase-resolved drop/fakeout/handoff, and one additional intentional move such as a hook tease, echo throw, double, chop, brake, or filter/EQ performance.
+- If stem coverage is missing, build a rhythm-bed/drop-anchor mix now and queue stem splitting/backfill in the background. Do not block live audio on Demucs.
+
+For autodj/heartbeat continuations, prefer:
+
+```bash
+python3 scripts/slime_audio_autodj.py continue \
+  --remix-focus \
+  --stem-aware-remix \
+  --structured-source-only \
+  --no-analyze-missing-sections
+```
+
+Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron job so the cached cue pool grows without decoding audio on the live recovery path.
+
 ### Build Sequence
 
 1. Check receiver/session state and recent history so the new set does not repeat stale material:

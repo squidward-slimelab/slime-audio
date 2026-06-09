@@ -9,7 +9,15 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_autodj import SelectedTrack, filter_defensible_source_tracks, session_payload, validate_no_vanilla_leads
+from slime_audio_autodj import (
+    SelectedTrack,
+    ensure_utility_deck,
+    filter_defensible_source_tracks,
+    rhythm_bed_score,
+    session_payload,
+    stem_readiness_report,
+    validate_no_vanilla_leads,
+)
 from slime_audio_dj import BeatGrid, StructureWindow, TrackAnalysis
 
 
@@ -23,6 +31,8 @@ def autodj_args(**overrides):
         "min_anchor_section_ms": 8_000,
         "min_section_confidence": 0.45,
         "require_section_analysis": False,
+        "remix_focus": False,
+        "stem_aware_remix": False,
         "fade_in_ms": 2_500,
         "fade_out_ms": 5_000,
         "base_overlap_ms": 8_000,
@@ -136,6 +146,57 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         self.assertEqual(payload["clips"][0]["trim_start_ms"], 80_000)
         self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
         self.assertEqual(payload["clips"][0]["source_window_reason"], "structure:drop")
+
+    def test_session_payload_records_remix_focus_policy(self):
+        track = selected_track()
+        args = autodj_args(remix_focus=True)
+
+        payload = session_payload([track], args)
+
+        self.assertTrue(payload["notes"]["remix_focus"])
+        self.assertIn("hard-techno", payload["notes"]["remix_policy"])
+
+    def test_stem_readiness_report_is_optional_without_stem_aware_mode(self):
+        track = selected_track()
+        args = autodj_args(stem_aware_remix=False)
+
+        report = stem_readiness_report([track], args)
+
+        self.assertEqual(report, {"required": False})
+
+    def test_rhythm_bed_score_uses_candidate_bpm_reason(self):
+        track = selected_track()
+        track = replace(track, reasons=["bpm 172.0", "rhythm lane query: drum and bass"])
+
+        self.assertGreater(rhythm_bed_score(track), 0)
+
+    def test_ensure_utility_deck_adds_deck_and_routing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-2", "deck-3"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-2",
+                                "path": "/music/lead.flac",
+                                "start_ms": 0,
+                                "duration_ms": 60_000,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            ensure_utility_deck(session_path, "deck-4")
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+
+        self.assertIn("deck-4", payload["decks"])
+        self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-4"], "THRU")
 
     def test_session_payload_requires_structure_when_configured(self):
         track = selected_track()
