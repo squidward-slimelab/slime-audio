@@ -20,6 +20,7 @@ def autodj_args(**overrides):
         "max_lead_clip_ms": 90_000,
         "max_fast_lead_clip_ms": 64_000,
         "min_section_clip_ms": 32_000,
+        "min_anchor_section_ms": 8_000,
         "min_section_confidence": 0.45,
         "require_section_analysis": False,
         "fade_in_ms": 2_500,
@@ -116,7 +117,24 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         payload = session_payload([track], args, {track.path: analysis()})
 
         self.assertEqual(payload["clips"][0]["trim_start_ms"], 64_000)
-        self.assertEqual(payload["clips"][0]["duration_ms"], 64_000)
+        self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
+        self.assertEqual(payload["clips"][0]["source_window_reason"], "structure:drop")
+
+    def test_session_payload_extends_short_drop_anchor_to_phrase_window(self):
+        track = selected_track()
+        args = autodj_args(require_section_analysis=True)
+        short_drop = replace(
+            analysis(),
+            structure=[
+                StructureWindow("intro", 0, 32_000, 0.8, "opening"),
+                StructureWindow("drop", 80_000, 90_000, 0.9, "short drop marker"),
+            ],
+        )
+
+        payload = session_payload([track], args, {track.path: short_drop})
+
+        self.assertEqual(payload["clips"][0]["trim_start_ms"], 80_000)
+        self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
         self.assertEqual(payload["clips"][0]["source_window_reason"], "structure:drop")
 
     def test_session_payload_requires_structure_when_configured(self):

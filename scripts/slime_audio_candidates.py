@@ -268,6 +268,7 @@ def candidate_rows(
     pool_limit: int | None = None,
     randomize_pool: bool = False,
     require_structure: bool = False,
+    min_structure_ms: int = 8_000,
 ) -> list[dict[str, Any]]:
     recent_plays = recent_play_index(conn, history_path, recent_limit)
     filters = [
@@ -312,10 +313,11 @@ def candidate_rows(
                   AND s.kind != 'outro'
                   AND s.confidence >= 0.45
                   AND s.end_ms > s.start_ms
-                  AND s.end_ms - s.start_ms >= 32000
+                  AND s.end_ms - s.start_ms >= ?
             )
             """
         )
+        params.append(min_structure_ms)
 
     where = " AND ".join(filters)
     order_by = "ORDER BY random()" if randomize_pool else "ORDER BY preferred_quality_score DESC, copies DESC, server_count DESC"

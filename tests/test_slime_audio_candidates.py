@@ -226,6 +226,47 @@ class SlimeAudioCandidateTests(unittest.TestCase):
 
         self.assertEqual([candidate["title_guess"] for candidate in candidates], ["Keep"])
 
+    def test_require_structure_accepts_short_drop_anchor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "music"
+            keep = root / "Artist" / "Album" / "01 - Drop Anchor.flac"
+            reject = root / "Artist Two" / "Album" / "01 - No Structure.flac"
+            for path in [keep, reject]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"a" * 100)
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+            stat = keep.stat()
+            conn.execute(
+                """
+                INSERT INTO track_dj_analysis(
+                    path, file_size, file_mtime_ns, duration_s, sample_rate, channels,
+                    energy, loudness_db, updated_at
+                )
+                VALUES (?, ?, ?, 180.0, 44100, 2, 0.7, -12.0, 1)
+                """,
+                (str(keep), stat.st_size, stat.st_mtime_ns),
+            )
+            conn.execute(
+                """
+                INSERT INTO track_dj_structure(path, kind, start_ms, end_ms, confidence, reason)
+                VALUES (?, 'drop', 64000, 74000, 0.9, 'test short drop')
+                """,
+                (str(keep),),
+            )
+
+            candidates = candidate_rows(
+                conn,
+                load_constraints(temp / "missing-constraints.json"),
+                history_path=temp / "missing-history.jsonl",
+                recent_limit=10,
+                limit=10,
+                require_structure=True,
+            )
+
+        self.assertEqual([candidate["title_guess"] for candidate in candidates], ["Drop Anchor"])
+
 
 if __name__ == "__main__":
     unittest.main()

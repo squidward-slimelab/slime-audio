@@ -321,6 +321,7 @@ def source_window_for_track(track: SelectedTrack, analysis: TrackAnalysis | None
     source_duration_ms = track.duration_ms or args.default_track_ms
     max_clip_ms = args.max_fast_lead_clip_ms if fast_mode else args.max_lead_clip_ms
     min_clip_ms = min(args.min_section_clip_ms, max_clip_ms)
+    min_anchor_ms = min(args.min_anchor_section_ms, min_clip_ms)
     if analysis is not None:
         windows = [
             window
@@ -332,10 +333,12 @@ def source_window_for_track(track: SelectedTrack, analysis: TrackAnalysis | None
         candidates: list[SourceWindow] = []
         for window in windows:
             duration_ms = window.end_ms - window.start_ms
-            if duration_ms < min_clip_ms:
+            required_ms = min_clip_ms if window.kind == "intro" else min_anchor_ms
+            if duration_ms < required_ms:
                 continue
-            clipped_duration_ms = min(duration_ms, max_clip_ms)
-            if duration_ms > max_clip_ms and not fast_mode:
+            source_remaining_ms = source_duration_ms - window.start_ms
+            clipped_duration_ms = min(source_remaining_ms, max_clip_ms)
+            if clipped_duration_ms < min_clip_ms:
                 continue
             candidates.append(
                 SourceWindow(
@@ -355,13 +358,17 @@ def source_window_for_track(track: SelectedTrack, analysis: TrackAnalysis | None
             if cue.kind in {"drop", "hook", "clean_intro", "safe_loop"}
             and cue.end_ms is not None
             and cue.end_ms > cue.at_ms
-            and cue.end_ms - cue.at_ms >= min_clip_ms
+            and cue.end_ms - cue.at_ms >= (min_clip_ms if cue.kind in {"clean_intro", "safe_loop"} else min_anchor_ms)
         ]
         if cues:
             cue = sorted(cues, key=lambda item: (item.kind not in {"drop", "hook"}, item.at_ms))[0]
+            source_remaining_ms = source_duration_ms - cue.at_ms
+            duration_ms = min(source_remaining_ms, max_clip_ms)
+            if duration_ms < min_clip_ms:
+                raise SystemExit(f"no defensible structure window for {track.artist} - {track.title}")
             return SourceWindow(
                 trim_start_ms=cue.at_ms,
-                duration_ms=min(cue.end_ms - cue.at_ms, max_clip_ms),
+                duration_ms=duration_ms,
                 reason=f"cue:{cue.kind}",
                 structure_kind=cue.kind,
             )
@@ -1002,6 +1009,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--max-lead-clip-ms", type=int, default=90_000)
     cont.add_argument("--max-fast-lead-clip-ms", type=int, default=64_000)
     cont.add_argument("--min-section-clip-ms", type=int, default=32_000)
+    cont.add_argument("--min-anchor-section-ms", type=int, default=8_000)
     cont.add_argument("--min-section-confidence", type=float, default=0.45)
     cont.add_argument("--base-overlap-ms", type=int, default=8_000)
     cont.add_argument("--fade-in-ms", type=int, default=2_500)
