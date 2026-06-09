@@ -117,6 +117,45 @@ class SlimeAudioCandidateTests(unittest.TestCase):
         self.assertEqual(candidates[0]["plays_seen"], 1)
         self.assertIsNotNone(candidates[0]["last_played_at"])
 
+    def test_autodj_selection_history_counts_as_recent_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "music"
+            track = root / "Selected Artist" / "Album" / "01 - Selected Track.flac"
+            track.parent.mkdir(parents=True, exist_ok=True)
+            track.write_bytes(b"a" * 100)
+
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+
+            history = temp / "history.jsonl"
+            history.write_text(
+                json.dumps(
+                    {
+                        "event": "autodj_material_selected",
+                        "dry_run": True,
+                        "paths": [str(track)],
+                        "timestamp": "2026-06-09T05:00:00-0400",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            recency = recent_play_index(conn, history, 10)
+            candidates = candidate_rows(
+                conn,
+                load_constraints(temp / "missing-constraints.json"),
+                history_path=history,
+                recent_limit=10,
+                limit=10,
+            )
+
+        self.assertEqual(len(recency), 1)
+        self.assertEqual(candidates[0]["title_guess"], "Selected Track")
+        self.assertEqual(candidates[0]["plays_seen"], 1)
+        self.assertIsNotNone(candidates[0]["last_played_at"])
+
     def test_constraints_persist_change_reasons(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "constraints.json"

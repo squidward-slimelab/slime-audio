@@ -255,8 +255,9 @@ def rhythm_bed_score(track: SelectedTrack) -> int:
             "industrial",
             "garage",
             "drum and bass",
-            "skrillex",
-            "activator",
+            "jungle",
+            "club",
+            "bass",
         ),
     )
     if score > 0 and track.duration_ms and track.duration_ms >= 120_000:
@@ -340,11 +341,26 @@ def load_session_payload(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def append_selection_history(selected: list[SelectedTrack], args: argparse.Namespace, *, session_path: Path, dry_run: bool) -> None:
+    if args.history is None:
+        return
+    args.history.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "event": "autodj_material_selected",
+        "dry_run": dry_run,
+        "paths": [track.path for track in selected],
+        "session": str(session_path),
+        "timestamp": iso_now(),
+        "title": args.title,
+    }
+    with args.history.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
 def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
     payload = load_session_payload(session_path)
-    rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
-    if not rhythm_sources:
-        rhythm_sources = sorted(selected, key=rhythm_bed_score, reverse=True)[:1]
+    lead_paths = {str(clip.get("path") or "") for clip in payload.get("clips", []) if clip.get("planner_role") == "lead"}
+    rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0 and track.path not in lead_paths]
     leads = sorted(
         [clip for clip in payload.get("clips", []) if clip.get("planner_role") == "lead"],
         key=lambda clip: int(clip.get("start_ms", clip.get("start", 0)) or 0),
@@ -659,6 +675,7 @@ def continue_set(args: argparse.Namespace) -> int:
         plan_path = args.runtime / f"{args.slug}-plan.json"
         payload = session_payload(selected, args)
         write_payload(session_path, payload)
+        append_selection_history(selected, args, session_path=session_path, dry_run=args.dry_run)
         planner = run_planner(session_path, args)
         structural = add_structural_beds(session_path, selected, args)
         creative = apply_creative_pass(session_path, args)

@@ -212,11 +212,20 @@ def recent_play_index(conn: sqlite3.Connection, history_path: Path, limit: int) 
         except json.JSONDecodeError:
             continue
         event_type = event.get("event")
-        if event_type not in {"track_started", "track_completed", "session_window_started", "session_window_completed"}:
+        if event_type not in {
+            "track_started",
+            "track_completed",
+            "session_window_started",
+            "session_window_completed",
+            "autodj_material_selected",
+        }:
             continue
         played_at = parse_history_timestamp(event.get("timestamp"))
         if event_type in {"track_started", "track_completed"}:
             add_path(event.get("resolved_track") or event.get("track"), played_at)
+        elif event_type == "autodj_material_selected":
+            for path in event.get("paths") or []:
+                add_path(path, played_at)
         elif event_type in {"session_window_started", "session_window_completed"}:
             clip_paths = session_clip_paths(event.get("session"))
             for clip_id in event.get("clips") or []:
