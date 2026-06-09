@@ -1,9 +1,10 @@
 import unittest
 
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import json
 
 
@@ -135,6 +136,14 @@ class SlimeAudioStreamTests(unittest.TestCase):
 
     def test_output_device_control_message_prefix_is_stable(self):
         self.assertEqual(OUTPUT_DEVICE_MESSAGE_PREFIX, b"SLIME_AUDIO_OUTPUT_DEVICE_V1 ")
+
+    def test_pause_file_blocks_file_stream_start(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pause_file = Path(temp_dir) / "dj-watchdog.paused"
+            pause_file.write_text("paused for structure work", encoding="utf-8")
+
+            self.assertTrue(stream.playback_start_paused(pause_file, ignore_pause=False))
+            self.assertFalse(stream.playback_start_paused(pause_file, ignore_pause=True))
 
     def test_publish_active_stream_writes_synthetic_dashboard_state(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -280,6 +289,41 @@ class SlimeAudioStreamTests(unittest.TestCase):
         }
 
         self.assertEqual(stream.connected_snapclient_ids(status), {"SPONGEBOT"})
+
+    def test_snapserver_stream_ids_reads_status_streams(self):
+        status = {"result": {"server": {"streams": [{"id": "slime-audio"}, {"id": "other"}]}}}
+
+        self.assertEqual(stream.snapserver_stream_ids(status), {"slime-audio", "other"})
+
+    def test_ensure_snapcast_ports_free_rejects_busy_port(self):
+        with patch.object(stream, "tcp_port_accepts", side_effect=lambda port: port == 1705):
+            with self.assertRaisesRegex(RuntimeError, "1705"):
+                stream.ensure_snapcast_ports_free(1704)
+
+    def test_wait_for_snapserver_ready_rejects_live_process_without_control_status(self):
+        process = Mock()
+        process.poll.return_value = None
+
+        with patch.object(stream, "snapserver_status", side_effect=ConnectionRefusedError("refused")):
+            with patch.object(stream.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "did not become ready"):
+                    stream.wait_for_snapserver_ready(process, timeout_s=0.01)
+
+    def test_wait_for_snapserver_ready_rejects_exited_server(self):
+        process = Mock()
+        process.poll.return_value = 1
+        process.returncode = 1
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            stream.wait_for_snapserver_ready(process, timeout_s=0.01)
+
+    def test_wait_for_snapserver_ready_accepts_control_status_with_stream(self):
+        process = Mock()
+        process.poll.return_value = None
+        status = {"result": {"server": {"streams": [{"id": "slime-audio", "status": "idle"}]}}}
+
+        with patch.object(stream, "snapserver_status", return_value=status):
+            self.assertEqual(stream.wait_for_snapserver_ready(process, timeout_s=0.01), status)
 
     def test_wait_for_snapclients_raises_when_expected_client_missing(self):
         receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPATULA", "user", "0.4.28")

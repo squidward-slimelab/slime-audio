@@ -20,10 +20,12 @@ from slime_audio_stream import (
     Receiver,
     default_snapcast_fifo_path,
     discover_receivers,
+    ensure_snapcast_ports_free,
     require_ffmpeg,
     require_snapserver,
     resolve_targets,
     send_control,
+    wait_for_snapserver_ready,
     wait_for_snapclients,
 )
 
@@ -32,6 +34,7 @@ DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
 DEFAULT_ACTIVE_SET = REPO_ROOT / "runtime" / "active-set.json"
+DEFAULT_DJ_PAUSE_FILE = REPO_ROOT / "runtime" / "dj-watchdog.paused"
 _active_stream: subprocess.Popen[bytes] | None = None
 
 
@@ -82,6 +85,7 @@ class PersistentSnapcast:
             self.args.snapcast_fifo.unlink()
         except FileNotFoundError:
             pass
+        ensure_snapcast_ports_free(self.args.snapcast_port)
         os.mkfifo(self.args.snapcast_fifo)
         self.server = subprocess.Popen(
             [
@@ -111,9 +115,7 @@ class PersistentSnapcast:
                 "*:warning",
             ],
         )
-        time.sleep(0.8)
-        if self.server.poll() is not None:
-            raise subprocess.CalledProcessError(self.server.returncode or 1, "snapserver")
+        wait_for_snapserver_ready(self.server, control_port=1705)
         self.fifo_keepalive_fd = open_fifo_writer_when_reader_ready(self.args.snapcast_fifo)
         discovered = discover_receivers(47777, self.args.discover_timeout_ms)
         self.targets = resolve_targets(self.args.target, discovered, 47777, include_muted=False)
@@ -280,6 +282,39 @@ def record_runner_exit(args: argparse.Namespace, *, status: str, reason: str, **
             "timestamp": now,
             **fields,
         },
+    )
+
+
+def should_block_playback_start(args: argparse.Namespace) -> bool:
+    return bool(args.pause_file and args.pause_file.exists() and not args.ignore_pause)
+
+
+def record_paused_start_block(args: argparse.Namespace, *, component: str) -> None:
+    now = iso_now()
+    pause_file = str(args.pause_file)
+    append_history(
+        args.history_log,
+        {
+            "event": "playback_start_blocked",
+            "component": component,
+            "pause_file": pause_file,
+            "pid": os.getpid(),
+            "session": str(args.session),
+            "state": str(args.state),
+            "timestamp": now,
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "status": "paused",
+                "component": component,
+                "pause_file": pause_file,
+                "session": str(args.session),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
     )
 
 
@@ -522,6 +557,10 @@ def prepare_window(args: argparse.Namespace, session: MixSession, start_ms: int,
 
 
 def run_session(args: argparse.Namespace) -> int:
+    if should_block_playback_start(args):
+        record_paused_start_block(args, component="session_runner")
+        return 0
+
     install_signal_handlers(args)
     state = load_json(args.state)
     has_playhead = any(key in state for key in ("playhead_ms", "mix_playhead_ms", "window_started_at", "mix_started_at"))
@@ -735,6 +774,13 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
         help="Directory for prerendered runner windows. Defaults to the system temp directory.",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--pause-file",
+        type=Path,
+        default=DEFAULT_DJ_PAUSE_FILE,
+        help="If present, refuse to start playback unless --ignore-pause is set.",
+    )
+    parser.add_argument("--ignore-pause", action="store_true", help="Start playback even when the DJ pause file exists.")
     args = parser.parse_args(argv)
     if args.target is None:
         args.target = ["all"]

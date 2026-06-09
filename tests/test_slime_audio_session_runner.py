@@ -16,6 +16,14 @@ import slime_audio_session_runner as runner
 
 
 class SlimeAudioSessionRunnerTests(unittest.TestCase):
+    def setUp(self):
+        self._default_pause_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._default_pause_dir.cleanup)
+        pause_path = Path(self._default_pause_dir.name) / "missing-dj-watchdog.paused"
+        patcher = patch.object(runner, "DEFAULT_DJ_PAUSE_FILE", pause_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_window_selects_overlapping_clips(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
@@ -87,6 +95,44 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertIsInstance(state["runner_pid"], int)
         self.assertIn("runner_started_at", state)
         self.assertIn("runner_updated_at", state)
+
+    def test_pause_file_blocks_runner_before_active_pointer_or_state_write(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            state_path = temp / "state.json"
+            active_pointer = temp / "active-set.json"
+            history_path = temp / "history.jsonl"
+            pause_file = temp / "dj-watchdog.paused"
+            session_path.write_text('{"version": 1, "decks": [], "clips": []}', encoding="utf-8")
+            pause_file.write_text("paused for structure work", encoding="utf-8")
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(session_path),
+                    "--state",
+                    str(state_path),
+                    "--active-pointer",
+                    str(active_pointer),
+                    "--history-log",
+                    str(history_path),
+                    "--pause-file",
+                    str(pause_file),
+                    "--target",
+                    "all",
+                ]
+            )
+
+            with redirect_stdout(StringIO()) as stdout:
+                self.assertEqual(runner.run_session(args), 0)
+
+            history = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertFalse(active_pointer.exists())
+        self.assertFalse(state_path.exists())
+        self.assertEqual(history[-1]["event"], "playback_start_blocked")
+        self.assertEqual(history[-1]["component"], "session_runner")
+        self.assertEqual(json.loads(stdout.getvalue())["status"], "paused")
 
     def test_stream_command_targets_snapcast_without_legacy_delay(self):
         args = runner.parse_args_from(["--target", "all", "--mode", "snapcast", "--dry-run"])

@@ -11,7 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 DISCOVER_MESSAGE = b"SLIME_AUDIO_DISCOVER_V1"
 SHARED_STREAM_START_MESSAGE = b"SLIME_AUDIO_SHARED_STREAM_START_V1"
@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ACTIVE_SET = REPO_ROOT / "runtime" / "active-set.json"
 DEFAULT_ACTIVE_STREAM_SESSION = REPO_ROOT / "runtime" / "active-stream-session.json"
 DEFAULT_ACTIVE_STREAM_STATE = REPO_ROOT / "runtime" / "active-stream-state.json"
+DEFAULT_DJ_PAUSE_FILE = REPO_ROOT / "runtime" / "dj-watchdog.paused"
 
 
 def default_snapcast_fifo_path() -> Path:
@@ -214,6 +215,58 @@ def snapserver_status(control_port: int = 1705, timeout_s: float = 1.0) -> dict:
                 break
             raw += chunk
     return json.loads(raw.decode("utf-8"))
+
+
+def tcp_port_accepts(port: int, host: str = "127.0.0.1", timeout_s: float = 0.2) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_snapcast_ports_free(stream_port: int, control_port: int = 1705) -> None:
+    busy = [port for port in (control_port, stream_port) if tcp_port_accepts(port)]
+    if busy:
+        ports = ", ".join(str(port) for port in busy)
+        raise RuntimeError(f"snapcast port already in use before startup: {ports}")
+
+
+def snapserver_stream_ids(status: dict) -> set[str]:
+    server = (status.get("result") or {}).get("server") or {}
+    stream_ids: set[str] = set()
+    for stream in server.get("streams") or []:
+        stream_id = stream.get("id")
+        if stream_id:
+            stream_ids.add(str(stream_id))
+    return stream_ids
+
+
+def wait_for_snapserver_ready(
+    process: subprocess.Popen[bytes],
+    *,
+    control_port: int = 1705,
+    stream_id: str = "slime-audio",
+    timeout_s: float = 3.0,
+) -> dict:
+    deadline = time.monotonic() + timeout_s
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise subprocess.CalledProcessError(process.returncode or 1, "snapserver")
+        try:
+            status = snapserver_status(control_port=control_port)
+            stream_ids = snapserver_stream_ids(status)
+            if stream_id in stream_ids:
+                return status
+            last_error = RuntimeError(f"snapserver missing stream {stream_id!r}; streams={sorted(stream_ids)}")
+        except Exception as exc:
+            last_error = exc
+        time.sleep(0.1)
+    if process.poll() is not None:
+        raise subprocess.CalledProcessError(process.returncode or 1, "snapserver")
+    detail = f": {last_error}" if last_error is not None else ""
+    raise RuntimeError(f"snapserver did not become ready on control port {control_port}{detail}")
 
 
 def connected_snapclient_ids(status: dict) -> set[str]:
@@ -419,6 +472,10 @@ def mark_active_stream_completed(active_state: Path, *, dry_run: bool) -> None:
     mark_active_stream_finished(active_state, dry_run=dry_run, status="completed")
 
 
+def playback_start_paused(pause_file: Path | None, *, ignore_pause: bool) -> bool:
+    return bool(pause_file and pause_file.exists() and not ignore_pause)
+
+
 def convert_with_ffmpeg(input_path: Path, output_path: Path, sample_rate: int, channels: int) -> None:
     subprocess.run(
         [
@@ -527,11 +584,13 @@ def run_snapcast_stream(
     buffer_ms: int,
     delay_ms: int,
     start_offset_ms: int = 0,
+    on_ready: Callable[[], None] | None = None,
 ) -> None:
     try:
         fifo_path.unlink()
     except FileNotFoundError:
         pass
+    ensure_snapcast_ports_free(port)
     os.mkfifo(fifo_path)
     server = subprocess.Popen(
         [
@@ -558,14 +617,14 @@ def run_snapcast_stream(
             "*:warning",
         ],
     )
-    time.sleep(0.8)
-    if server.poll() is not None:
-        raise subprocess.CalledProcessError(server.returncode or 1, "snapserver")
 
     try:
+        wait_for_snapserver_ready(server, control_port=1705)
         send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
         wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=1705)
         time.sleep(max(delay_ms, 0) / 1000)
+        if on_ready is not None:
+            on_ready()
         try:
             with fifo_path.open("wb") as fifo:
                 seek_args = ["-ss", f"{start_offset_ms / 1000:.3f}"] if start_offset_ms > 0 else []
@@ -690,6 +749,13 @@ def main() -> int:
     parser.add_argument("--active-pointer", type=Path, default=DEFAULT_ACTIVE_SET)
     parser.add_argument("--active-session", type=Path, default=DEFAULT_ACTIVE_STREAM_SESSION)
     parser.add_argument("--active-state", type=Path, default=DEFAULT_ACTIVE_STREAM_STATE)
+    parser.add_argument(
+        "--pause-file",
+        type=Path,
+        default=DEFAULT_DJ_PAUSE_FILE,
+        help="If present, refuse to start a file stream unless --ignore-pause is set.",
+    )
+    parser.add_argument("--ignore-pause", action="store_true", help="Start a file stream even when the DJ pause file exists.")
     parser.add_argument("--source-session", type=Path, help="Existing session JSON that describes this rendered stream.")
     parser.add_argument("--dashboard-title", help="Title shown by the dashboard for this stream.")
     parser.add_argument("--dashboard-slug", help="Slug shown by the dashboard for this stream.")
@@ -773,13 +839,30 @@ def main() -> int:
         )
         return 0
 
+    if playback_start_paused(args.pause_file, ignore_pause=args.ignore_pause):
+        print(
+            json.dumps(
+                {
+                    "status": "paused",
+                    "component": "stream",
+                    "pause_file": str(args.pause_file),
+                    "file": str(args.file) if args.file is not None else None,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return 0
+
     if args.file is None:
         raise SystemExit("file is required unless --start-listeners or --stop-listeners is set")
 
     if not args.file.exists():
         raise SystemExit(f"file not found: {args.file}")
 
-    if not args.no_active_pointer:
+    def publish_ready_stream() -> None:
+        if args.no_active_pointer:
+            return
         publish_active_stream(
             input_path=args.file,
             targets=targets,
@@ -796,6 +879,7 @@ def main() -> int:
         )
 
     if args.mode == "multicast":
+        publish_ready_stream()
         if not args.no_auto_listeners:
             send_control(targets, SHARED_STREAM_START_MESSAGE, "started listener")
             time.sleep(max(args.delay_ms, 0) / 1000)
@@ -848,6 +932,7 @@ def main() -> int:
                 args.snapcast_buffer_ms,
                 args.delay_ms,
                 args.start_offset_ms,
+                on_ready=publish_ready_stream,
             )
         except Exception as exc:
             if not args.no_active_pointer:
