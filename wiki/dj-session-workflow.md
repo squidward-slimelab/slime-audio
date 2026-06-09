@@ -30,6 +30,8 @@ Common clip controls:
 - `tempo_shift_pct` and `pitch_shift_semitones` are rendered beat/key correction controls. Keep them conservative and intentional.
 - `reverse`, `playback_rate`, and `scratch_motion` are record-motion/scratch controls where speed and pitch move together.
 
+Stem-heavy sessions can add top-level `stem_groups`. A stem group is one conceptual deck event with child `vocals`, `drums`, `bass`, and `other` streams that share timing, trim, tempo, pitch, reverse/rate, deck automation, and crossfader routing. Use this for vocal hooks, acapellas, and bass-controlled doubles instead of pretending full-band EQ is a real stem split. Details live in [Stem management](stem-management.md).
+
 Deck convention for creative sets:
 
 - Main full tracks normally alternate on `deck-2` and `deck-3`.

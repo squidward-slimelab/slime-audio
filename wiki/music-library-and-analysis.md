@@ -57,6 +57,10 @@ Analysis rows are reused from SQLite when files have not changed. File size or m
 
 Persistent DJ analysis currently includes beatgrid, phrase-grid, structure, drop candidates, and named cue rows. `runtime/dj-analysis-cache.json` remains a compatibility mirror for older live-edit commands.
 
+## Stem Analysis
+
+Stem artifacts and planner windows are managed by `scripts/slime_audio_stems.py` and stored in the same SQLite database. See [Stem management](stem-management.md) for Demucs splitting, manifest layout, stem-window kinds, and session usage.
+
 ## TuneBat Metadata
 
 TuneBat-backed database facts are the authority for beat/key planning when available. Fill missing local metadata with:
