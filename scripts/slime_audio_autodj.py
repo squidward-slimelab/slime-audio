@@ -23,7 +23,7 @@ from slime_audio_candidates import (
     constraints_to_payload,
     load_constraints,
 )
-from slime_audio_session import playlist_to_session_payload, probe_duration_ms, write_payload
+from slime_audio_session import parse_session, probe_duration_ms, write_payload
 from slime_music_library import DEFAULT_DB, connect, normalize
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -239,26 +239,84 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
     return selected
 
 
-def session_payload(selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
-    payload = playlist_to_session_payload(
-        [track.path for track in selected],
-        start_ms=0,
-        decks=["deck-1", "deck-2", "deck-3", "deck-4"],
-        gap_ms=0,
-        overlap_ms=args.base_overlap_ms,
-        default_duration_ms=args.default_track_ms,
-        probe=True,
+def material_score(track: SelectedTrack, words: tuple[str, ...]) -> int:
+    haystack = normalize(" ".join([track.path, track.artist, track.title, track.album]))
+    return sum(1 for word in words if word in haystack)
+
+
+def rhythm_bed_score(track: SelectedTrack) -> int:
+    score = material_score(
+        track,
+        (
+            "techno",
+            "electronic",
+            "breakbeat",
+            "dubstep",
+            "industrial",
+            "garage",
+            "drum and bass",
+            "skrillex",
+            "activator",
+        ),
     )
-    for index, clip in enumerate(payload.get("clips", [])):
-        clip["fade_in_ms"] = 0 if index == 0 else args.fade_in_ms
-        clip["fade_out_ms"] = args.fade_out_ms
+    if score > 0 and track.duration_ms and track.duration_ms >= 120_000:
+        score += 1
+    return score
+
+
+def lead_score(track: SelectedTrack) -> int:
+    score = material_score(track, ("vocal", "rap", "hip hop", "punk", "feat", "with", "song"))
+    if rhythm_bed_score(track) > 1:
+        score -= 2
+    if track.duration_ms and track.duration_ms >= 90_000:
+        score += 1
+    return score
+
+
+def session_payload(selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
+    rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
+    leads = [track for track in selected if track not in rhythm_sources]
+    if len(leads) < args.min_tracks:
+        leads = sorted(selected, key=lead_score, reverse=True)
+
+    cursor_ms = 0
+    lead_clips: list[dict[str, Any]] = []
+    for index, track in enumerate(leads[: args.max_tracks]):
+        duration_ms = track.duration_ms or args.default_track_ms
+        clip = {
+            "id": f"lead-{index + 1:03d}-{slugify(track.title)[:40]}",
+            "deck": "deck-2" if index % 2 == 0 else "deck-3",
+            "path": track.path,
+            "start_ms": cursor_ms,
+            "trim_start_ms": 0,
+            "duration_ms": duration_ms,
+            "fade_in_ms": 0 if index == 0 else args.fade_in_ms,
+            "fade_out_ms": args.fade_out_ms,
+            "planner_role": "lead",
+        }
+        lead_clips.append(clip)
+        cursor_ms += max(1, duration_ms - args.base_overlap_ms)
+
+    payload = {
+        "version": 1,
+        "timeline_mode": "autodj-arrangement",
+        "decks": ["deck-1", "deck-2", "deck-3"],
+        "clips": sorted(lead_clips, key=lambda clip: (int(clip.get("start_ms") or 0), str(clip.get("id") or ""))),
+        "mic_lean_ins": [],
+        "automations": [],
+        "deck_automations": [],
+        "fader_routing": {"deck_assignments": {"deck-1": "A", "deck-2": "A", "deck-3": "B"}},
+    }
     payload["title"] = args.title
     payload["notes"] = {
         "created_at": iso_now(),
         "intent": args.intent,
-        "selection_process": "database candidates plus play-history freshness penalties; no hardcoded tracks",
-        "tracks": [asdict(track) for track in selected],
+        "selection_process": "database candidates plus play-history freshness penalties; arranged as lead clips plus filtered rhythm beds",
+        "selected_material": [asdict(track) for track in selected],
+        "lead_count": len(lead_clips),
+        "bed_count": 0,
     }
+    parse_session(payload)
     return payload
 
 
@@ -280,6 +338,86 @@ def run_planner(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
 
 def load_session_payload(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
+    payload = load_session_payload(session_path)
+    rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
+    if not rhythm_sources:
+        rhythm_sources = sorted(selected, key=rhythm_bed_score, reverse=True)[:1]
+    leads = sorted(
+        [clip for clip in payload.get("clips", []) if clip.get("planner_role") == "lead"],
+        key=lambda clip: int(clip.get("start_ms", clip.get("start", 0)) or 0),
+    )
+    if not rhythm_sources or len(leads) < 2:
+        return {"added": 0, "reason": "not enough lead/rhythm material"}
+
+    decks = [str(deck) for deck in payload.get("decks", []) if str(deck)]
+    if "deck-4" not in decks:
+        decks.append("deck-4")
+    payload["decks"] = decks
+    routing = payload.setdefault("fader_routing", {}).setdefault("deck_assignments", {})
+    routing.setdefault("deck-1", "A")
+    routing.setdefault("deck-2", "A")
+    routing.setdefault("deck-3", "B")
+    routing["deck-4"] = "THRU"
+
+    added: list[dict[str, Any]] = []
+    deck_automations = payload.setdefault("deck_automations", [])
+    bed_targets = leads[1::2][: len(rhythm_sources)]
+    for index, lead in enumerate(bed_targets, start=1):
+        source = rhythm_sources[(index - 1) % len(rhythm_sources)]
+        lead_start = int(lead.get("start_ms", lead.get("start", 0)) or 0)
+        lead_duration = int(lead.get("duration_ms", lead.get("duration", 0)) or 0)
+        if lead_duration <= 0:
+            continue
+        bed_start = lead_start + min(24_000, max(0, lead_duration // 5))
+        bed_duration = min(args.bed_duration_ms, max(32_000, lead_duration - (bed_start - lead_start) - 4_000))
+        if bed_duration < 32_000:
+            continue
+        source_duration = source.duration_ms or args.default_track_ms
+        trim_start = min(args.bed_trim_start_ms, max(0, source_duration - bed_duration - 1_000))
+        bed_id = f"bed-{index:03d}-{slugify(source.title)[:40]}"
+        payload.setdefault("clips", []).append(
+            {
+                "id": bed_id,
+                "deck": "deck-4",
+                "path": source.path,
+                "start_ms": bed_start,
+                "trim_start_ms": trim_start,
+                "duration_ms": bed_duration,
+                "gain_db": args.bed_gain_db,
+                "fade_in_ms": args.bed_fade_in_ms,
+                "fade_out_ms": args.bed_fade_out_ms,
+                "planner_role": "rhythm-bed",
+                "bed_under": lead.get("id"),
+            }
+        )
+        end_ms = bed_start + bed_duration
+        for param, value in (
+            ("gain_db", args.bed_gain_db),
+            ("lowpass_hz", args.bed_lowpass_hz),
+            ("highpass_hz", args.bed_highpass_hz),
+        ):
+            deck_automations.append(
+                {
+                    "target": "deck-4",
+                    "param": param,
+                    "source_clip_id": bed_id,
+                    "planner_role": "bed-filter-carve",
+                    "points": [{"at_ms": bed_start, "value": value}, {"at_ms": end_ms, "value": value}],
+                }
+            )
+        added.append({"id": bed_id, "source": source.path, "under": lead.get("id"), "start_ms": bed_start, "duration_ms": bed_duration})
+
+    payload["clips"] = sorted(
+        payload.get("clips", []),
+        key=lambda clip: (int(clip.get("start_ms", clip.get("start", 0)) or 0), str(clip.get("deck") or ""), str(clip.get("id") or "")),
+    )
+    notes = payload.setdefault("notes", {})
+    notes["bed_count"] = int(notes.get("bed_count") or 0) + len(added)
+    write_payload(session_path, payload)
+    return {"added": len(added), "beds": added}
 
 
 def clip_start_ms(clip: dict[str, Any]) -> int:
@@ -522,6 +660,7 @@ def continue_set(args: argparse.Namespace) -> int:
         payload = session_payload(selected, args)
         write_payload(session_path, payload)
         planner = run_planner(session_path, args)
+        structural = add_structural_beds(session_path, selected, args)
         creative = apply_creative_pass(session_path, args)
         validate = subprocess.run(
             [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -543,6 +682,7 @@ def continue_set(args: argparse.Namespace) -> int:
             "slug": args.slug,
             "intent": args.intent,
             "planner": planner,
+            "structural": structural,
             "creative": creative,
             "tracks": [asdict(track) for track in selected],
         }
@@ -583,6 +723,13 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--base-overlap-ms", type=int, default=8_000)
     cont.add_argument("--fade-in-ms", type=int, default=2_500)
     cont.add_argument("--fade-out-ms", type=int, default=5_000)
+    cont.add_argument("--bed-duration-ms", type=int, default=96_000)
+    cont.add_argument("--bed-trim-start-ms", type=int, default=60_000)
+    cont.add_argument("--bed-gain-db", type=float, default=-6.0)
+    cont.add_argument("--bed-fade-in-ms", type=int, default=3_000)
+    cont.add_argument("--bed-fade-out-ms", type=int, default=1_500)
+    cont.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
+    cont.add_argument("--bed-highpass-hz", type=float, default=90.0)
     cont.add_argument("--routine-every", type=int, default=3)
     cont.add_argument("--min-creative-moves", type=int, default=2)
     cont.add_argument("--no-creative-pass", action="store_true")

@@ -39,7 +39,7 @@ DECK_ORDER = ["deck-3", "deck-1", VOCAL_DECK, "deck-2", "deck-4"]
 LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
 WAVEFORM_BINS = 240
-WAVEFORM_CACHE_VERSION = 2
+WAVEFORM_CACHE_VERSION = 3
 
 
 def static_path_for_request(request_path: str) -> Path:
@@ -487,7 +487,7 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
     upcoming = [
         event
         for event in events
-        if event.get("kind") == "song" and event.get("status") == "planned"
+        if event.get("status") == "planned" and event.get("kind") not in {"automation"}
     ][:8]
     commentary = [
         event
@@ -790,10 +790,9 @@ def waveform_payload(path: Path, trim_start_ms: int = 0, duration_ms: int | None
     if isinstance(cached, dict) and isinstance(cached.get("peaks"), list):
         return {**cached, "cache": "hit"}
 
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(resolved)]
     if safe_trim:
         command.extend(["-ss", f"{safe_trim / 1000:.3f}"])
-    command.extend(["-i", str(resolved)])
     if safe_duration:
         command.extend(["-t", f"{safe_duration / 1000:.3f}"])
     sample_rate = 12_000

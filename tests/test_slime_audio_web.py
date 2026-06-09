@@ -272,6 +272,23 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(payload["peaks"], [])
         self.assertIn("not found", payload["error"])
 
+    def test_waveform_payload_uses_accurate_output_seek_for_trim(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            audio_path = Path(temp_dir) / "clip.flac"
+            audio_path.write_bytes(b"not real audio but ffmpeg is mocked")
+            cache_path = Path(temp_dir) / "waveform-cache.json"
+            samples = array("h", [0, 4000, -4000, 8000, -8000] * 200)
+
+            with patch.object(web, "DEFAULT_WAVEFORM_CACHE", cache_path), patch.object(web.subprocess, "run") as run:
+                run.return_value.stdout = samples.tobytes()
+                payload = web.waveform_payload(audio_path, trim_start_ms=12_345, duration_ms=20_000, bins=48)
+
+        command = run.call_args.args[0]
+        self.assertTrue(payload["available"])
+        self.assertLess(command.index("-i"), command.index("-ss"))
+        self.assertLess(command.index("-ss"), command.index("-t"))
+        self.assertEqual(command[command.index("-ss") + 1], "12.345")
+
     def test_band_envelopes_return_rgb_frequency_bands(self):
         samples = array("h", [0, 8000, -8000, 12000, -12000, 4000, -4000, 0] * 20)
 
@@ -325,7 +342,10 @@ class SlimeAudioWebTests(unittest.TestCase):
                             {"id": "a", "deck": "deck-1", "path": "/music/A/B/a.flac", "start": 0, "duration": 30_000},
                             {"id": "b", "deck": "deck-2", "path": "/music/A/B/b.flac", "start": 40_000, "duration": 30_000},
                         ],
-                        "mic_lean_ins": [{"id": "drop", "start": 45_000, "text": "talk here"}],
+                        "mic_lean_ins": [
+                            {"id": "drop", "start": 45_000, "text": "talk here"},
+                            {"id": "drop-next", "start": 60_000, "text": "later"},
+                        ],
                         "automations": [{"target": "b", "param": "gain_db", "points": [{"at": 42_000, "value": -6}, {"at": 46_000, "value": 0}]}],
                     }
                 ),
@@ -352,7 +372,7 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(dashboard["transport"]["status"], "stale")
         self.assertTrue(dashboard["transport"]["stale"])
         self.assertEqual(dashboard["now"]["id"], "b")
-        self.assertEqual([event["id"] for event in dashboard["upcoming"]], [])
+        self.assertEqual([event["id"] for event in dashboard["upcoming"]], ["drop-next"])
         self.assertEqual(dashboard["commentary"][0]["id"], "drop")
         self.assertEqual(dashboard["automation"][0]["param"], "gain_db")
         self.assertEqual(dashboard["health"]["runner_state"], "stale")

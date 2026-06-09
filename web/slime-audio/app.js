@@ -1029,7 +1029,7 @@ function render() {
   const dashboard = dashboardState.dashboard;
   syncPlayhead(dashboard?.transport || {});
   renderTopline();
-  renderList(els.nextList, dashboard.upcoming, "no future song clips");
+  renderList(els.nextList, dashboard.upcoming, "no planned timeline events");
   renderList(els.commentaryList, dashboard.commentary, "no planned lean-ins");
   renderList(els.automationList, dashboard.automation, "no upcoming automation", 10);
   renderHealth();
