@@ -436,6 +436,62 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
     return {"added": len(added), "beds": added}
 
 
+def add_lead_filter_rides(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    payload = load_session_payload(session_path)
+    clips = sorted(
+        [clip for clip in payload.get("clips", []) if clip.get("planner_role") == "lead" and clip_duration_ms(clip) >= args.min_vanilla_check_ms],
+        key=clip_start_ms,
+    )
+    deck_automations = payload.setdefault("deck_automations", [])
+    existing = {
+        str(automation.get("planner_role"))
+        + ":"
+        + str(automation.get("source_clip_id"))
+        + ":"
+        + str(automation.get("param"))
+        + ":"
+        + str(event_start_ms(automation))
+        for automation in deck_automations
+    }
+    added: list[dict[str, Any]] = []
+    for clip in clips:
+        lead_start = clip_start_ms(clip)
+        lead_end = clip_end_ms(clip)
+        cursor = lead_start + args.lead_activity_interval_ms
+        while cursor < lead_end - 12_000:
+            ride_start = max(lead_start, cursor - 6_000)
+            ride_peak = cursor
+            ride_end = min(lead_end, cursor + 10_000)
+            automation = {
+                "target": str(clip.get("deck") or ""),
+                "param": "highpass_hz",
+                "source_clip_id": clip["id"],
+                "planner_role": "autodj-lead-filter-ride",
+                "points": [
+                    {"at_ms": ride_start, "value": 30},
+                    {"at_ms": ride_peak, "value": args.lead_activity_highpass_hz},
+                    {"at_ms": ride_end, "value": 30},
+                ],
+            }
+            key = (
+                str(automation.get("planner_role"))
+                + ":"
+                + str(automation.get("source_clip_id"))
+                + ":"
+                + str(automation.get("param"))
+                + ":"
+                + str(event_start_ms(automation))
+            )
+            if automation["target"] and key not in existing:
+                deck_automations.append(automation)
+                existing.add(key)
+                added.append({"clip": clip["id"], "deck": automation["target"], "start_ms": ride_start, "end_ms": ride_end})
+            cursor += args.lead_activity_interval_ms
+    if added:
+        write_payload(session_path, payload)
+    return {"added": len(added), "rides": added}
+
+
 def clip_start_ms(clip: dict[str, Any]) -> int:
     return int(clip.get("start_ms", clip.get("start", 0)) or 0)
 
@@ -446,6 +502,109 @@ def clip_duration_ms(clip: dict[str, Any]) -> int:
 
 def clip_end_ms(clip: dict[str, Any]) -> int:
     return clip_start_ms(clip) + clip_duration_ms(clip)
+
+
+def event_start_ms(event: dict[str, Any]) -> int | None:
+    for key in ("start_ms", "start", "at_ms", "at"):
+        value = event.get(key)
+        if value is not None:
+            return int(value)
+    points = event.get("points")
+    if isinstance(points, list):
+        starts = [event_start_ms(point) for point in points if isinstance(point, dict)]
+        starts = [start for start in starts if start is not None]
+        if starts:
+            return min(starts)
+    return None
+
+
+def event_end_ms(event: dict[str, Any]) -> int | None:
+    start = event_start_ms(event)
+    duration = event.get("duration_ms", event.get("duration"))
+    if start is not None and duration is not None:
+        return start + int(duration)
+    points = event.get("points")
+    if isinstance(points, list):
+        ends = [event_start_ms(point) for point in points if isinstance(point, dict)]
+        ends = [end for end in ends if end is not None]
+        if ends:
+            return max(ends)
+    tail = event.get("tail_ms")
+    if start is not None and tail is not None:
+        return start + int(tail)
+    return start
+
+
+def overlaps(left_start: int, left_end: int, right_start: int | None, right_end: int | None) -> bool:
+    if right_start is None or right_end is None:
+        return False
+    return left_start < right_end and right_start < left_end
+
+
+def record_move_window(windows: list[tuple[int, int]], start: int | None, end: int | None, lead_start: int, lead_end: int) -> None:
+    if start is None or end is None or not overlaps(lead_start, lead_end, start, end):
+        return
+    windows.append((max(lead_start, start), min(lead_end, max(start + 1, end))))
+
+
+def max_gap_ms(lead_start: int, lead_end: int, windows: list[tuple[int, int]]) -> int:
+    if not windows:
+        return lead_end - lead_start
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(windows):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    cursor = lead_start
+    largest = 0
+    for start, end in merged:
+        largest = max(largest, start - cursor)
+        cursor = max(cursor, end)
+    return max(largest, lead_end - cursor)
+
+
+def validate_no_vanilla_leads(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    payload = load_session_payload(session_path)
+    clips = [clip for clip in payload.get("clips", []) if clip.get("id") and clip_duration_ms(clip) > 0]
+    leads = [clip for clip in clips if clip.get("planner_role") == "lead" and clip_duration_ms(clip) >= args.min_vanilla_check_ms]
+    automations = list(payload.get("automations", [])) + list(payload.get("deck_automations", []))
+    effects = list(payload.get("effects", []))
+    failures: list[dict[str, Any]] = []
+
+    for lead in leads:
+        lead_id = str(lead["id"])
+        lead_start = clip_start_ms(lead)
+        lead_end = clip_end_ms(lead)
+        windows: list[tuple[int, int]] = []
+        if any(lead.get(key) for key in ("tempo_shift_pct", "pitch_shift_semitones", "reverse")) or lead.get("playback_rate") not in {None, 1, 1.0}:
+            windows.append((lead_start, lead_end))
+        for clip in clips:
+            if clip is lead:
+                continue
+            role = str(clip.get("planner_role") or "")
+            if role == "lead" and clip_duration_ms(clip) > 45_000:
+                move_end = min(clip_end_ms(clip), clip_start_ms(clip) + 32_000)
+                record_move_window(windows, clip_start_ms(clip), move_end, lead_start, lead_end)
+            elif role != "lead":
+                record_move_window(windows, clip_start_ms(clip), clip_end_ms(clip), lead_start, lead_end)
+        for effect in effects:
+            if effect.get("target") == lead_id:
+                record_move_window(windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
+        for automation in automations:
+            target = str(automation.get("target") or "")
+            if target in {lead_id, str(lead.get("deck") or ""), "crossfader", "master", "all"}:
+                start = event_start_ms(automation)
+                end = event_end_ms(automation)
+                if start is not None:
+                    record_move_window(windows, start - 2_000, (end or start) + 2_000, lead_start, lead_end)
+        gap = max_gap_ms(lead_start, lead_end, windows)
+        if gap > args.max_vanilla_lead_ms:
+            failures.append({"id": lead_id, "max_vanilla_gap_ms": gap, "duration_ms": lead_end - lead_start})
+
+    if failures:
+        raise SystemExit(f"vanilla lead guard failed: {json.dumps(failures[:5], sort_keys=True)}")
+    return {"checked": len(leads), "max_allowed_gap_ms": args.max_vanilla_lead_ms}
 
 
 def run_session_edit(command_args: list[str]) -> dict[str, Any]:
@@ -679,6 +838,8 @@ def continue_set(args: argparse.Namespace) -> int:
         planner = run_planner(session_path, args)
         structural = add_structural_beds(session_path, selected, args)
         creative = apply_creative_pass(session_path, args)
+        activity = add_lead_filter_rides(session_path, args)
+        vanilla_guard = validate_no_vanilla_leads(session_path, args)
         validate = subprocess.run(
             [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
             cwd=REPO_ROOT,
@@ -701,6 +862,8 @@ def continue_set(args: argparse.Namespace) -> int:
             "planner": planner,
             "structural": structural,
             "creative": creative,
+            "activity": activity,
+            "vanilla_guard": vanilla_guard,
             "tracks": [asdict(track) for track in selected],
         }
         plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -749,6 +912,10 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--bed-highpass-hz", type=float, default=90.0)
     cont.add_argument("--routine-every", type=int, default=3)
     cont.add_argument("--min-creative-moves", type=int, default=2)
+    cont.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
+    cont.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
+    cont.add_argument("--lead-activity-interval-ms", type=int, default=75_000)
+    cont.add_argument("--lead-activity-highpass-hz", type=float, default=220.0)
     cont.add_argument("--no-creative-pass", action="store_true")
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)
