@@ -10,6 +10,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: easter-island-head-deploy
   cancel-in-progress: false
@@ -22,14 +25,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Sync repository
+      - name: Update deploy checkout
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$DEPLOY_PATH"
-          rsync -az --delete \
-            --exclude='.git/' \
-            --exclude='.venv/' \
-            --exclude='runtime/' \
-            ./ "$DEPLOY_PATH/"
+          if [[ ! -d "$DEPLOY_PATH/.git" ]]; then
+            backup_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/slime-audio-deploy-backup.XXXXXX")"
+            find "$DEPLOY_PATH" -mindepth 1 -maxdepth 1 \
+              ! -name '.venv' \
+              ! -name 'runtime' \
+              -exec mv -t "$backup_dir" -- {} +
+            git init "$DEPLOY_PATH"
+          fi
+
+          git -C "$DEPLOY_PATH" config remote.origin.url \
+            "https://github.com/${GITHUB_REPOSITORY}.git" || \
+            git -C "$DEPLOY_PATH" remote add origin \
+            "https://github.com/${GITHUB_REPOSITORY}.git"
+          git config --global --add safe.directory "$DEPLOY_PATH"
+          auth_header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -C "$DEPLOY_PATH" \
+            -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth_header" \
+            fetch --prune --tags origin "$GITHUB_SHA"
+          git -C "$DEPLOY_PATH" checkout -B deploy "$GITHUB_SHA"
+          git -C "$DEPLOY_PATH" reset --hard "$GITHUB_SHA"
+          git -C "$DEPLOY_PATH" clean -fd -e .venv/ -e runtime/
 
       - name: Apply deployment
         run: |
