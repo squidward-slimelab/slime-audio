@@ -2,6 +2,7 @@ import sys
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,12 +23,15 @@ from slime_audio_dj import (
     drop_candidates_for_analysis,
     estimate_bpm,
     key_match,
+    major_equivalent_tonic,
     relative_tonic,
     select_cue,
     semitone_distance,
     session_tension_windows,
+    store_analysis_in_db,
     suggested_lean_in_windows,
     transition_plan,
+    tonic_mode_from_key,
 )
 from slime_audio_session import parse_session
 from slime_music_library import Source, command_set_tunebat, connect, scan
@@ -62,8 +66,13 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertEqual(camelot(0, "major"), "8B")
         self.assertEqual(relative_tonic(9, "minor"), 0)
         self.assertEqual(relative_tonic(0, "major"), 9)
+        self.assertEqual(major_equivalent_tonic(9, "minor"), 0)
+        self.assertEqual(major_equivalent_tonic(1, "minor"), 4)
+        self.assertEqual(major_equivalent_tonic(0, "major"), 0)
+        self.assertEqual(tonic_mode_from_key("Ab minor"), (8, "minor"))
+        self.assertEqual(tonic_mode_from_key("C# major"), (1, "major"))
 
-    def test_minor_to_major_rotation_scores_as_key_match_without_pitch_shift(self):
+    def test_relative_minor_to_major_normalizes_without_pitch_shift(self):
         source = track("a-minor.wav", 124, 9, "minor")
         target = track("c-major.wav", 124, 0, "major")
 
@@ -71,8 +80,19 @@ class SlimeAudioDjTests(unittest.TestCase):
 
         self.assertGreater(score, 0.9)
         self.assertEqual(pitch_shift, 0)
-        self.assertEqual(relation, "relative major/minor rotation")
-        self.assertTrue(any("mode-rotation" in note for note in notes))
+        self.assertEqual(relation, "relative-major normalized key")
+        self.assertTrue(any("source minor normalized" in note for note in notes))
+
+    def test_mixed_mode_key_match_pitch_shifts_after_relative_major_normalization(self):
+        source = track("c-major.wav", 124, 0, "major")
+        target = track("b-minor.wav", 124, 11, "minor")
+
+        score, pitch_shift, relation, notes = key_match(source, target, max_pitch_shift=2)
+
+        self.assertGreater(score, 0.75)
+        self.assertEqual(pitch_shift, -2)
+        self.assertEqual(relation, "pitch-shift relative-major normalized")
+        self.assertTrue(any("target minor normalized" in note for note in notes))
 
     def test_pitch_shift_prefers_small_same_mode_moves(self):
         source = track("c-minor.wav", 128, 0, "minor")
@@ -92,7 +112,7 @@ class SlimeAudioDjTests(unittest.TestCase):
 
         self.assertGreater(plan.score, 0.85)
         self.assertEqual(plan.pitch_shift_semitones, 0)
-        self.assertEqual(plan.key_relation, "relative major/minor rotation")
+        self.assertEqual(plan.key_relation, "relative-major normalized key")
         self.assertAlmostEqual(plan.target_tempo_shift_pct, 1.61, places=2)
 
     def test_semitone_distance_uses_shortest_signed_path(self):
@@ -177,7 +197,7 @@ class SlimeAudioDjTests(unittest.TestCase):
                 "major",
                 "3B",
                 126.0,
-                None,
+                "",
                 0.75,
                 None,
                 None,
@@ -198,6 +218,70 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertEqual(analysis.confidence["bpm"], 1.0)
         self.assertEqual(cached["bpm"], 126.0)
         self.assertEqual(cached["camelot"], "3B")
+
+    def test_analyze_with_cache_derives_camelot_from_tunebat_key_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "Music"
+            track_path = root / "Artist" / "Album" / "01 - Song.mp3"
+            track_path.parent.mkdir(parents=True)
+            track_path.write_bytes(b"not real audio but good enough for cache-key")
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+            duplicate_key = conn.execute("SELECT duplicate_key FROM tracks").fetchone()["duplicate_key"]
+            command_set_tunebat(
+                conn,
+                duplicate_key,
+                "https://tunebat.com/Analyzer",
+                "Song",
+                "Artist",
+                "Ab minor",
+                "minor",
+                "",
+                103.0,
+                None,
+                0.75,
+                None,
+                None,
+                {"source": "test"},
+                emit=False,
+            )
+            cache_path = temp / "dj-cache.json"
+            raw = track(str(track_path), 81.52, 6, "minor", energy=0.2)
+            cache_path.write_text(json.dumps({cache_key(track_path): raw.__dict__}, default=lambda value: value.__dict__), encoding="utf-8")
+
+            analysis = analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, temp / "library.sqlite3", temp / "missing-analyzer.js")[0]
+
+        self.assertEqual(analysis.key, "Ab minor")
+        self.assertEqual(analysis.tonic, 8)
+        self.assertEqual(analysis.mode, "minor")
+        self.assertEqual(analysis.camelot, "1A")
+
+    def test_analyze_with_cache_refreshes_existing_db_row_without_full_track_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            track_path = temp / "track.wav"
+            track_path.write_bytes(b"not real audio but good enough for cache-key")
+            db_path = temp / "library.sqlite3"
+            cache_path = temp / "dj-cache.json"
+            keyless = replace(
+                track(str(track_path), 120.0, 0, "major"),
+                key=None,
+                tonic=None,
+                mode=None,
+                camelot=None,
+                confidence={"bpm": 0.9, "key": 0.0},
+            )
+            refreshed = track(str(track_path), 120.0, 5, "major")
+            store_analysis_in_db(db_path, track_path, keyless)
+
+            with patch("slime_audio_dj.analyze_track", return_value=refreshed) as analyze_track:
+                analysis = analyze_with_cache([track_path], cache_path, "ffmpeg", 44_100, db_path, temp / "missing-analyzer.js")[0]
+
+        analyze_track.assert_called_once()
+        self.assertEqual(analysis.tonic, 5)
+        self.assertEqual(analysis.mode, "major")
+        self.assertEqual(analysis.camelot, camelot(5, "major"))
 
     def test_analyze_with_cache_persists_structure_in_music_db_and_reuses_it(self):
         with tempfile.TemporaryDirectory() as temp_dir:

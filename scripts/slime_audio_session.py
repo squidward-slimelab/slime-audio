@@ -53,6 +53,13 @@ AUTOMATABLE_PARAMS = {
     "solo",
 }
 STEM_NAMES = {"vocals", "drums", "bass", "other"}
+SOURCE_ARTIFACT_PATH_MARKERS = (
+    "/separated/",
+    "/isolated/",
+    "/duplicate/",
+    "/duplicated/",
+    "/duplicates/",
+)
 STEM_AUTOMATABLE_PARAMS = {
     "gain_db",
     "mute",
@@ -73,6 +80,11 @@ DEFAULT_FADER_ASSIGNMENTS = {
     "deck-4": "B",
     "deck-5": "THRU",
 }
+
+
+def is_artifact_source_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").lower()
+    return any(marker in normalized for marker in SOURCE_ARTIFACT_PATH_MARKERS)
 
 @dataclass(frozen=True)
 class AutomationPoint:
@@ -584,6 +596,741 @@ def write_payload(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def action_type(action: dict[str, Any]) -> str:
+    return str(action.get("type") or action.get("action") or "").strip()
+
+
+def action_id(action: dict[str, Any]) -> str:
+    return str(action.get("id") or action.get("action_id") or "").strip()
+
+
+def action_at_ms(action: dict[str, Any]) -> int:
+    return parse_ms(action.get("at_ms", action.get("at", action.get("start_ms", action.get("start", 0)))), "action time")
+
+
+def action_position_ms(action: dict[str, Any], label: str = "action position") -> int:
+    value = action.get(
+        "position_ms",
+        action.get("position", action.get("source_ms", action.get("source_position_ms", action.get("cue_ms", action.get("cue", action.get("trim_start_ms", action.get("trim_start", 0))))))),
+    )
+    return parse_ms(value, label)
+
+
+def action_has_all_stem_paths(action: dict[str, Any]) -> bool:
+    stems = action.get("stems")
+    if not isinstance(stems, dict):
+        return False
+    for stem_name in STEM_NAMES:
+        stem_payload = stems.get(stem_name)
+        if isinstance(stem_payload, str) and stem_payload.strip():
+            continue
+        if isinstance(stem_payload, dict) and str(stem_payload.get("path") or "").strip():
+            continue
+        return False
+    return True
+
+
+def load_track_group_from_action(
+    action: dict[str, Any],
+    *,
+    group_id: str | None = None,
+    start_ms: int | None = None,
+    trim_start_ms: int | None = None,
+    duration_ms: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    group_id = group_id or action_id(action)
+    deck = str(action.get("deck") or "").strip()
+    source_path = str(action.get("source_path") or action.get("path") or "").strip()
+    stems_payload = action.get("stems") or {}
+    if not group_id:
+        raise ValueError("load_track action id is required")
+    if not deck:
+        raise ValueError(f"load_track {group_id} deck is required")
+    if not source_path:
+        raise ValueError(f"load_track {group_id} source_path is required")
+    if not isinstance(stems_payload, dict):
+        raise ValueError(f"load_track {group_id} stems must be an object")
+    missing_stems = sorted(STEM_NAMES - set(stems_payload))
+    if missing_stems:
+        raise ValueError(f"load_track {group_id} must include all stems: {', '.join(missing_stems)}")
+    enabled_stems = action.get("play_stems", action.get("enabled_stems"))
+    enabled_set = {str(stem) for stem in enabled_stems} if isinstance(enabled_stems, list) else None
+    stems: dict[str, Any] = {}
+    for stem_name in sorted(STEM_NAMES):
+        stem_payload = stems_payload[stem_name]
+        if isinstance(stem_payload, str):
+            stem_payload = {"path": stem_payload}
+        elif isinstance(stem_payload, bool):
+            stem_payload = {"enabled": stem_payload}
+        elif not isinstance(stem_payload, dict):
+            raise ValueError(f"load_track {group_id} stem {stem_name} must be an object, path, or boolean")
+        stem_payload = dict(stem_payload)
+        if enabled_set is not None:
+            stem_payload["enabled"] = stem_name in enabled_set
+        stems[stem_name] = stem_payload
+    raw_duration = action.get("duration_ms", action.get("duration"))
+    if duration_ms is None:
+        resolved_duration_ms = parse_ms(raw_duration, f"load_track {group_id} duration") if raw_duration is not None else None
+    else:
+        resolved_duration_ms = int(duration_ms)
+    group = {
+        "id": group_id,
+        "deck": deck,
+        "source_path": source_path,
+        "start_ms": action_at_ms(action) if start_ms is None else int(start_ms),
+        "trim_start_ms": parse_ms(action.get("trim_start_ms", action.get("trim_start", action.get("cue_ms", action.get("cue", 0)))), f"load_track {group_id} trim") if trim_start_ms is None else int(trim_start_ms),
+        "duration_ms": resolved_duration_ms,
+        "gain_db": float(action.get("gain_db", 0.0)),
+        "tempo_shift_pct": float(action.get("tempo_shift_pct", 0.0)),
+        "pitch_shift_semitones": int(action.get("pitch_shift_semitones", 0)),
+        "fade_in_ms": parse_ms(action.get("fade_in_ms", 0), f"load_track {group_id} fade_in_ms"),
+        "fade_out_ms": parse_ms(action.get("fade_out_ms", 0), f"load_track {group_id} fade_out_ms"),
+        "stems": stems,
+        "source_action_id": action_id(action) or group_id,
+    }
+    if action.get("stem_set_id"):
+        group["stem_set_id"] = str(action["stem_set_id"])
+    if action.get("manifest_path"):
+        group["manifest_path"] = str(action["manifest_path"])
+    return group, deck
+
+
+def action_load_target(action: dict[str, Any]) -> str:
+    return str(action.get("target") or action.get("group_id") or action.get("load_id") or action.get("deck") or "").strip()
+
+
+def action_cue_name(action: dict[str, Any]) -> str:
+    return str(action.get("cue_id") or action.get("cue_name") or action.get("name") or action.get("id") or "").strip()
+
+
+def stem_group_source_position(group: dict[str, Any], mix_ms: int) -> int:
+    start_ms = parse_ms(group.get("start_ms", group.get("start", 0)), f"stem group {group.get('id')} start")
+    trim_start_ms = parse_ms(group.get("trim_start_ms", group.get("trim_start", 0)), f"stem group {group.get('id')} trim_start")
+    factor = clip_tempo_factor(group)
+    return trim_start_ms + int(round((mix_ms - start_ms) * factor))
+
+
+def append_deck_clock_segment(
+    stem_groups: list[dict[str, Any]],
+    group_payloads: dict[str, dict[str, Any]],
+    load_action: dict[str, Any],
+    *,
+    segment_id: str,
+    start_ms: int,
+    trim_start_ms: int,
+    duration_ms: int,
+    pending_stem_automations: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+) -> dict[str, Any] | None:
+    if duration_ms <= 0:
+        return None
+    group, _deck = load_track_group_from_action(
+        load_action,
+        group_id=segment_id,
+        start_ms=start_ms,
+        trim_start_ms=trim_start_ms,
+        duration_ms=duration_ms,
+    )
+    group["source_action_id"] = action_id(load_action)
+    group["deck_clock_segment"] = True
+    load_id = action_id(load_action)
+    if pending_stem_automations and load_id in pending_stem_automations:
+        for stem_name, automations in pending_stem_automations[load_id].items():
+            stem_payload = group.setdefault("stems", {}).setdefault(stem_name, {})
+            if isinstance(stem_payload, str):
+                stem_payload = {"path": stem_payload}
+                group["stems"][stem_name] = stem_payload
+            stem_payload.setdefault("automations", []).extend(copy.deepcopy(automations))
+    stem_groups.append(group)
+    group_payloads[str(group["id"])] = group
+    return group
+
+
+def ready_stem_artifacts(db_path: Path, source_path: str) -> dict[str, Any] | None:
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return None
+    candidates = [source_path]
+    expanded = Path(source_path).expanduser()
+    if expanded.exists():
+        candidates.append(str(expanded.resolve()))
+    placeholders = ",".join("?" for _ in candidates)
+    try:
+        stem_set = conn.execute(
+            f"""
+            SELECT id, artifact_root
+            FROM track_stem_sets
+            WHERE status = 'ready'
+              AND source_path IN ({placeholders})
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            candidates,
+        ).fetchone()
+        if stem_set is None:
+            return None
+        rows = conn.execute(
+            """
+            SELECT stem_name, path
+            FROM track_stems
+            WHERE stem_set_id = ?
+            """,
+            (stem_set["id"],),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    stems = {str(row["stem_name"]): str(row["path"]) for row in rows}
+    if set(stems) != STEM_NAMES:
+        return None
+    artifact_root = Path(str(stem_set["artifact_root"]))
+    manifest_path = artifact_root / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    return {"stem_set_id": str(stem_set["id"]), "manifest_path": str(manifest_path), "stems": stems}
+
+
+def prepare_load_track_action_stems(
+    action: dict[str, Any],
+    *,
+    db_path: Path = DEFAULT_LIBRARY_DB,
+    prepare_stems: bool = True,
+) -> dict[str, Any]:
+    if action_type(action) != "load_track":
+        return copy.deepcopy(action)
+    prepared = copy.deepcopy(action)
+    source_path = str(prepared.get("source_path") or prepared.get("path") or "").strip()
+    load_id = action_id(prepared) or "<unnamed>"
+    if not source_path:
+        raise ValueError(f"load_track {load_id} source_path is required")
+    if action_has_all_stem_paths(prepared):
+        return prepared
+
+    artifacts = ready_stem_artifacts(db_path, source_path)
+    if artifacts is None and prepare_stems:
+        command = [
+            "python3",
+            str(REPO_ROOT / "scripts" / "slime_audio_stems.py"),
+            "--db",
+            str(db_path),
+            "split",
+            source_path,
+        ]
+        result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(
+                "stem pre-generation failed for "
+                f"{source_path}: {(result.stderr or result.stdout).strip()[-2000:]}"
+            )
+        artifacts = ready_stem_artifacts(db_path, source_path)
+    if artifacts is None:
+        raise ValueError(f"load_track {load_id} has no ready stems for {source_path}")
+
+    existing_stems = prepared.get("stems") if isinstance(prepared.get("stems"), dict) else {}
+    stems: dict[str, Any] = {}
+    for stem_name in sorted(STEM_NAMES):
+        existing = existing_stems.get(stem_name)
+        if isinstance(existing, dict):
+            stem_payload = dict(existing)
+            stem_payload.setdefault("path", artifacts["stems"][stem_name])
+        else:
+            stem_payload = {"path": artifacts["stems"][stem_name]}
+            if isinstance(existing, bool):
+                stem_payload["enabled"] = existing
+        stems[stem_name] = stem_payload
+    prepared["stems"] = stems
+    prepared.setdefault("stem_set_id", artifacts["stem_set_id"])
+    prepared.setdefault("manifest_path", artifacts["manifest_path"])
+    return prepared
+
+
+def compile_actions_payload_legacy(payload: dict[str, Any]) -> dict[str, Any]:
+    actions = payload.get("actions", payload.get("performance_actions", []))
+    if not actions:
+        return payload
+    if not isinstance(actions, list):
+        raise ValueError("actions must be a list")
+
+    compiled = copy.deepcopy(payload)
+    stem_groups = compiled.setdefault("stem_groups", [])
+    deck_automations = compiled.setdefault("deck_automations", [])
+    automations = compiled.setdefault("automations", [])
+    decks = [str(deck) for deck in compiled.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
+    group_payloads: dict[str, dict[str, Any]] = {str(group.get("id")): group for group in stem_groups if group.get("id")}
+
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict):
+            raise ValueError(f"action {index} must be an object")
+        kind = action_type(action)
+        if not kind:
+            raise ValueError(f"action {index} type is required")
+        if kind == "load_track":
+            group_id = action_id(action)
+            deck = str(action.get("deck") or "").strip()
+            source_path = str(action.get("source_path") or action.get("path") or "").strip()
+            stems_payload = action.get("stems") or {}
+            if not group_id:
+                raise ValueError("load_track action id is required")
+            if not deck:
+                raise ValueError(f"load_track {group_id} deck is required")
+            if not source_path:
+                raise ValueError(f"load_track {group_id} source_path is required")
+            if not isinstance(stems_payload, dict):
+                raise ValueError(f"load_track {group_id} stems must be an object")
+            missing_stems = sorted(STEM_NAMES - set(stems_payload))
+            if missing_stems:
+                raise ValueError(f"load_track {group_id} must include all stems: {', '.join(missing_stems)}")
+            enabled_stems = action.get("play_stems", action.get("enabled_stems"))
+            enabled_set = {str(stem) for stem in enabled_stems} if isinstance(enabled_stems, list) else None
+            stems: dict[str, Any] = {}
+            for stem_name in sorted(STEM_NAMES):
+                stem_payload = stems_payload[stem_name]
+                if isinstance(stem_payload, str):
+                    stem_payload = {"path": stem_payload}
+                elif isinstance(stem_payload, bool):
+                    stem_payload = {"enabled": stem_payload}
+                elif not isinstance(stem_payload, dict):
+                    raise ValueError(f"load_track {group_id} stem {stem_name} must be an object, path, or boolean")
+                stem_payload = dict(stem_payload)
+                if enabled_set is not None:
+                    stem_payload["enabled"] = stem_name in enabled_set
+                stems[stem_name] = stem_payload
+            group = {
+                "id": group_id,
+                "deck": deck,
+                "source_path": source_path,
+                "start_ms": action_at_ms(action),
+                "trim_start_ms": parse_ms(action.get("trim_start_ms", action.get("trim_start", action.get("cue_ms", action.get("cue", 0)))), f"load_track {group_id} trim"),
+                "duration_ms": parse_ms(action.get("duration_ms", action.get("duration")), f"load_track {group_id} duration") if action.get("duration_ms", action.get("duration")) is not None else None,
+                "gain_db": float(action.get("gain_db", 0.0)),
+                "tempo_shift_pct": float(action.get("tempo_shift_pct", 0.0)),
+                "pitch_shift_semitones": int(action.get("pitch_shift_semitones", 0)),
+                "fade_in_ms": parse_ms(action.get("fade_in_ms", 0), f"load_track {group_id} fade_in_ms"),
+                "fade_out_ms": parse_ms(action.get("fade_out_ms", 0), f"load_track {group_id} fade_out_ms"),
+                "stems": stems,
+                "source_action_id": group_id,
+            }
+            if action.get("stem_set_id"):
+                group["stem_set_id"] = str(action["stem_set_id"])
+            if action.get("manifest_path"):
+                group["manifest_path"] = str(action["manifest_path"])
+            stem_groups.append(group)
+            group_payloads[group_id] = group
+            if deck not in decks:
+                decks.append(deck)
+                compiled["decks"] = decks
+        elif kind == "stem_toggle":
+            group_id = str(action.get("target") or action.get("group_id") or action.get("load_id") or "").strip()
+            stem_name = str(action.get("stem") or "").strip()
+            if group_id not in group_payloads:
+                raise ValueError(f"stem_toggle target does not exist: {group_id}")
+            if stem_name not in STEM_NAMES:
+                raise ValueError(f"stem_toggle {group_id} stem must be one of {sorted(STEM_NAMES)}")
+            enabled = bool(action.get("enabled", True))
+            stem_payload = group_payloads[group_id].setdefault("stems", {}).setdefault(stem_name, {})
+            if isinstance(stem_payload, str):
+                stem_payload = {"path": stem_payload}
+                group_payloads[group_id]["stems"][stem_name] = stem_payload
+            stem_payload.setdefault("automations", []).append(
+                {
+                    "target": f"stem-group:{group_id}:{stem_name}",
+                    "param": "mute",
+                    "points": [{"at_ms": action_at_ms(action), "value": not enabled}],
+                }
+            )
+        elif kind == "knob_lerp":
+            target = str(action.get("target") or "").strip()
+            param = str(action.get("param") or "").strip()
+            if not target:
+                raise ValueError("knob_lerp target is required")
+            if not param:
+                raise ValueError("knob_lerp param is required")
+            start_ms = action_at_ms(action)
+            end_source = action.get("end_ms", action.get("end"))
+            if end_source is None:
+                duration_source = action.get("duration_ms", action.get("duration"))
+                if duration_source is None:
+                    raise ValueError(f"knob_lerp {target}.{param} requires end or duration")
+                end_ms = start_ms + parse_ms(duration_source, f"knob_lerp {target}.{param} duration")
+            else:
+                end_ms = parse_ms(end_source, f"knob_lerp {target}.{param} end")
+            if end_ms <= start_ms:
+                raise ValueError(f"knob_lerp {target}.{param} end must be after start")
+            automation = {
+                "target": target,
+                "param": param,
+                "points": [
+                    {"at_ms": start_ms, "value": action["from"], "curve": str(action.get("curve") or "linear")},
+                    {"at_ms": end_ms, "value": action["to"], "curve": str(action.get("curve") or "linear")},
+                ],
+            }
+            if target in decks:
+                deck_automations.append(automation)
+            elif target.startswith("stem-group:"):
+                parts = target.split(":")
+                if len(parts) != 3 or parts[1] not in group_payloads or parts[2] not in STEM_NAMES:
+                    raise ValueError(f"knob_lerp target does not exist: {target}")
+                stem_payload = group_payloads[parts[1]].setdefault("stems", {}).setdefault(parts[2], {})
+                if isinstance(stem_payload, str):
+                    stem_payload = {"path": stem_payload}
+                    group_payloads[parts[1]]["stems"][parts[2]] = stem_payload
+                stem_payload.setdefault("automations", []).append(automation)
+            else:
+                automations.append(automation)
+        else:
+            raise ValueError(f"unsupported action type: {kind}")
+    return compiled
+
+
+def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    actions = payload.get("actions", payload.get("performance_actions", []))
+    if not actions:
+        return payload
+    if not isinstance(actions, list):
+        raise ValueError("actions must be a list")
+
+    compiled = copy.deepcopy(payload)
+    compiled["stem_groups"] = list(compiled.get("stem_groups", compiled.get("stemGroups", [])))
+    stem_groups = compiled["stem_groups"]
+    deck_automations = compiled.setdefault("deck_automations", [])
+    automations = compiled.setdefault("automations", [])
+    decks = [str(deck) for deck in compiled.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
+    group_payloads: dict[str, dict[str, Any]] = {str(group.get("id")): group for group in stem_groups if group.get("id")}
+    loaded_actions: dict[str, dict[str, Any]] = {}
+    deck_active: dict[str, dict[str, Any]] = {}
+    deck_paused: dict[str, dict[str, Any]] = {}
+    cues: dict[str, dict[str, int]] = {}
+    segment_counts: dict[str, int] = {}
+    pending_stem_automations: dict[str, dict[str, list[dict[str, Any]]]] = {}
+
+    def add_deck(deck: str) -> None:
+        if deck and deck not in decks:
+            decks.append(deck)
+            compiled["decks"] = decks
+
+    def next_segment_id(load_id: str) -> str:
+        count = segment_counts.get(load_id, 0)
+        segment_counts[load_id] = count + 1
+        return load_id if count == 0 else f"{load_id}-segment-{count + 1:02d}"
+
+    def active_natural_end_ms(active: dict[str, Any]) -> int | None:
+        raw_duration = active["action"].get("duration_ms", active["action"].get("duration"))
+        if raw_duration is None:
+            return None
+        total_duration_ms = parse_ms(raw_duration, f"load_track {active['load_id']} duration")
+        original_trim_ms = parse_ms(
+            active["action"].get("trim_start_ms", active["action"].get("trim_start", active["action"].get("cue_ms", active["action"].get("cue", 0)))),
+            f"load_track {active['load_id']} trim",
+        )
+        source_elapsed_ms = int(active["trim_start_ms"]) - original_trim_ms
+        remaining_ms = max(0, total_duration_ms - source_elapsed_ms)
+        return int(active["start_ms"]) + remaining_ms
+
+    def close_active(deck: str, end_ms: int) -> None:
+        active = deck_active.get(deck)
+        if not active:
+            return
+        start_ms = int(active["start_ms"])
+        natural_end = active_natural_end_ms(active)
+        if natural_end is not None:
+            end_ms = min(end_ms, natural_end)
+        append_deck_clock_segment(
+            stem_groups,
+            group_payloads,
+            active["action"],
+            segment_id=next_segment_id(active["load_id"]),
+            start_ms=start_ms,
+            trim_start_ms=int(active["trim_start_ms"]),
+            duration_ms=end_ms - start_ms,
+            pending_stem_automations=pending_stem_automations,
+        )
+        deck_active.pop(deck, None)
+
+    def active_source_position(active: dict[str, Any], at_ms: int) -> int:
+        elapsed_ms = max(0, at_ms - int(active["start_ms"]))
+        return int(active["trim_start_ms"]) + int(round(elapsed_ms * clip_tempo_factor(active["action"])))
+
+    def resolve_loaded_target(action: dict[str, Any], label: str) -> tuple[str, str]:
+        target = action_load_target(action)
+        if not target:
+            raise ValueError(f"{label} target is required")
+        if target in loaded_actions:
+            return target, str(loaded_actions[target].get("deck") or "")
+        if target in decks:
+            active = deck_active.get(target) or deck_paused.get(target)
+            if active is None:
+                raise ValueError(f"{label} deck has no loaded track: {target}")
+            return str(active["load_id"]), target
+        raise ValueError(f"{label} target does not exist: {target}")
+
+    def cue_position(action: dict[str, Any], load_id: str, label: str) -> int:
+        cue_name = str(action.get("cue_id") or action.get("cue_name") or action.get("name") or "").strip()
+        has_position = any(
+            key in action
+            for key in ("position_ms", "position", "source_ms", "source_position_ms", "cue_ms", "cue", "trim_start_ms", "trim_start")
+        )
+        if has_position:
+            return action_position_ms(action, f"{label} {load_id} position")
+        if cue_name:
+            if cue_name not in cues.get(load_id, {}):
+                raise ValueError(f"{label} {load_id} missing cue: {cue_name}")
+            return cues[load_id][cue_name]
+        raise ValueError(f"{label} {load_id} requires position or cue")
+
+    for index, action in sorted(enumerate(actions), key=lambda item: (action_at_ms(item[1]) if isinstance(item[1], dict) else 0, item[0])):
+        if not isinstance(action, dict):
+            raise ValueError(f"action {index} must be an object")
+        kind = action_type(action)
+        if not kind:
+            raise ValueError(f"action {index} type is required")
+        at_ms = action_at_ms(action)
+
+        if kind == "load_track":
+            group, deck = load_track_group_from_action(action)
+            load_id = str(group["id"])
+            close_active(deck, at_ms)
+            loaded_actions[load_id] = action
+            group_payloads[load_id] = group
+            add_deck(deck)
+            deck_active[deck] = {
+                "action": action,
+                "load_id": load_id,
+                "start_ms": at_ms,
+                "trim_start_ms": int(group["trim_start_ms"]),
+            }
+            deck_paused.pop(deck, None)
+        elif kind == "set_cue":
+            target = action_load_target(action)
+            cue_name = action_cue_name(action)
+            if not target:
+                raise ValueError("set_cue target is required")
+            if not cue_name:
+                raise ValueError("set_cue name is required")
+            position_ms = action_position_ms(action, f"set_cue {cue_name} position")
+            cues.setdefault(target, {})[cue_name] = position_ms
+        elif kind == "jump_to_cue":
+            target = action_load_target(action)
+            cue_name = action_cue_name(action)
+            if target not in loaded_actions:
+                raise ValueError(f"jump_to_cue target does not exist: {target}")
+            if not cue_name:
+                raise ValueError("jump_to_cue cue name is required")
+            if cue_name not in cues.get(target, {}):
+                raise ValueError(f"jump_to_cue {target} missing cue: {cue_name}")
+            deck = str(loaded_actions[target].get("deck") or "")
+            close_active(deck, at_ms)
+            deck_active[deck] = {
+                "action": loaded_actions[target],
+                "load_id": target,
+                "start_ms": at_ms,
+                "trim_start_ms": cues[target][cue_name],
+            }
+            deck_paused.pop(deck, None)
+        elif kind == "loop_start":
+            target = action_load_target(action)
+            if target not in loaded_actions:
+                raise ValueError(f"loop_start target does not exist: {target}")
+            deck = str(loaded_actions[target].get("deck") or "")
+            close_active(deck, at_ms)
+            source_start_ms = action_position_ms(action, f"loop_start {target} position")
+            length_source = action.get("length_ms", action.get("length", action.get("duration_ms", action.get("duration"))))
+            if length_source is None:
+                raise ValueError(f"loop_start {target} length is required")
+            source_length_ms = parse_ms(length_source, f"loop_start {target} length")
+            if source_length_ms <= 0:
+                raise ValueError(f"loop_start {target} length must be positive")
+            exit_source = action.get("exit_ms", action.get("exit_at", action.get("until_ms", action.get("until"))))
+            if exit_source is None:
+                raise ValueError(f"loop_start {target} exit is required")
+            exit_ms = parse_ms(exit_source, f"loop_start {target} exit")
+            if exit_ms <= at_ms:
+                raise ValueError(f"loop_start {target} exit must be after start")
+            timeline_loop_ms = max(1, int(round(source_length_ms / clip_tempo_factor(loaded_actions[target]))))
+            cursor = at_ms
+            loop_index = 1
+            while cursor < exit_ms:
+                duration_ms = min(timeline_loop_ms, exit_ms - cursor)
+                append_deck_clock_segment(
+                    stem_groups,
+                    group_payloads,
+                    loaded_actions[target],
+                    segment_id=f"{target}-loop-{loop_index:02d}",
+                    start_ms=cursor,
+                    trim_start_ms=source_start_ms,
+                    duration_ms=duration_ms,
+                    pending_stem_automations=pending_stem_automations,
+                )
+                cursor += duration_ms
+                loop_index += 1
+            deck_active[deck] = {
+                "action": loaded_actions[target],
+                "load_id": target,
+                "start_ms": exit_ms,
+                "trim_start_ms": source_start_ms + source_length_ms,
+            }
+            deck_paused.pop(deck, None)
+        elif kind == "loop_exit":
+            target = action_load_target(action)
+            if target not in loaded_actions:
+                raise ValueError(f"loop_exit target does not exist: {target}")
+            deck = str(loaded_actions[target].get("deck") or "")
+            close_active(deck, at_ms)
+            resume_ms = action_position_ms(action, f"loop_exit {target} position")
+            deck_active[deck] = {
+                "action": loaded_actions[target],
+                "load_id": target,
+                "start_ms": at_ms,
+                "trim_start_ms": resume_ms,
+            }
+            deck_paused.pop(deck, None)
+        elif kind in {"pause", "deck_pause"}:
+            load_id, deck = resolve_loaded_target(action, kind)
+            active = deck_active.get(deck)
+            if active is None:
+                if deck in deck_paused:
+                    continue
+                raise ValueError(f"{kind} deck is not playing: {deck}")
+            resume_ms = active_source_position(active, at_ms)
+            close_active(deck, at_ms)
+            deck_paused[deck] = {
+                "action": loaded_actions[load_id],
+                "load_id": load_id,
+                "trim_start_ms": resume_ms,
+            }
+        elif kind in {"play", "deck_play"}:
+            load_id, deck = resolve_loaded_target(action, kind)
+            default_trim_ms = parse_ms(
+                loaded_actions[load_id].get("trim_start_ms", loaded_actions[load_id].get("trim_start", loaded_actions[load_id].get("cue_ms", loaded_actions[load_id].get("cue", 0)))),
+                f"load_track {load_id} trim",
+            )
+            position_ms = cue_position(action, load_id, kind) if (
+                action.get("cue_id") or action.get("cue_name") or action.get("name")
+                or any(key in action for key in ("position_ms", "position", "source_ms", "source_position_ms", "cue_ms", "cue", "trim_start_ms", "trim_start"))
+            ) else int((deck_paused.get(deck) or {}).get("trim_start_ms", default_trim_ms))
+            close_active(deck, at_ms)
+            deck_active[deck] = {
+                "action": loaded_actions[load_id],
+                "load_id": load_id,
+                "start_ms": at_ms,
+                "trim_start_ms": position_ms,
+            }
+            deck_paused.pop(deck, None)
+        elif kind in {"cue", "cue_seek"}:
+            load_id, deck = resolve_loaded_target(action, kind)
+            position_ms = cue_position(action, load_id, kind)
+            close_active(deck, at_ms)
+            deck_paused[deck] = {
+                "action": loaded_actions[load_id],
+                "load_id": load_id,
+                "trim_start_ms": position_ms,
+            }
+        elif kind in {"seek", "deck_seek"}:
+            load_id, deck = resolve_loaded_target(action, kind)
+            position_ms = cue_position(action, load_id, kind)
+            close_active(deck, at_ms)
+            should_play = bool(action.get("play", True))
+            if should_play:
+                deck_active[deck] = {
+                    "action": loaded_actions[load_id],
+                    "load_id": load_id,
+                    "start_ms": at_ms,
+                    "trim_start_ms": position_ms,
+                }
+                deck_paused.pop(deck, None)
+            else:
+                deck_paused[deck] = {
+                    "action": loaded_actions[load_id],
+                    "load_id": load_id,
+                    "trim_start_ms": position_ms,
+                }
+        elif kind == "stem_toggle":
+            group_id = str(action.get("target") or action.get("group_id") or action.get("load_id") or "").strip()
+            stem_name = str(action.get("stem") or "").strip()
+            if group_id not in loaded_actions and group_id not in group_payloads:
+                raise ValueError(f"stem_toggle target does not exist: {group_id}")
+            if stem_name not in STEM_NAMES:
+                raise ValueError(f"stem_toggle {group_id} stem must be one of {sorted(STEM_NAMES)}")
+            enabled = bool(action.get("enabled", True))
+            automation = {
+                "target": f"stem-group:{group_id}:{stem_name}",
+                "param": "mute",
+                "points": [{"at_ms": at_ms, "value": not enabled}],
+            }
+            pending_stem_automations.setdefault(group_id, {}).setdefault(stem_name, []).append(automation)
+            target_groups = [group for group in stem_groups if group.get("source_action_id") == group_id or group.get("id") == group_id]
+            if not target_groups:
+                target_groups = [load_track_group_from_action(loaded_actions[group_id])[0]] if group_id in loaded_actions else []
+            for group in target_groups:
+                stem_payload = group.setdefault("stems", {}).setdefault(stem_name, {})
+                if isinstance(stem_payload, str):
+                    stem_payload = {"path": stem_payload}
+                    group["stems"][stem_name] = stem_payload
+                stem_payload.setdefault("automations", []).append(copy.deepcopy(automation))
+        elif kind == "knob_lerp":
+            target = str(action.get("target") or "").strip()
+            param = str(action.get("param") or "").strip()
+            if not target:
+                raise ValueError("knob_lerp target is required")
+            if not param:
+                raise ValueError("knob_lerp param is required")
+            end_source = action.get("end_ms", action.get("end"))
+            if end_source is None:
+                duration_source = action.get("duration_ms", action.get("duration"))
+                if duration_source is None:
+                    raise ValueError(f"knob_lerp {target}.{param} requires end or duration")
+                end_ms = at_ms + parse_ms(duration_source, f"knob_lerp {target}.{param} duration")
+            else:
+                end_ms = parse_ms(end_source, f"knob_lerp {target}.{param} end")
+            if end_ms <= at_ms:
+                raise ValueError(f"knob_lerp {target}.{param} end must be after start")
+            automation = {
+                "target": target,
+                "param": param,
+                "points": [
+                    {"at_ms": at_ms, "value": action["from"], "curve": str(action.get("curve") or "linear")},
+                    {"at_ms": end_ms, "value": action["to"], "curve": str(action.get("curve") or "linear")},
+                ],
+            }
+            if target in decks:
+                deck_automations.append(automation)
+            elif target.startswith("stem-group:"):
+                parts = target.split(":")
+                if len(parts) != 3 or parts[1] not in group_payloads or parts[2] not in STEM_NAMES:
+                    raise ValueError(f"knob_lerp target does not exist: {target}")
+                stem_payload = group_payloads[parts[1]].setdefault("stems", {}).setdefault(parts[2], {})
+                if isinstance(stem_payload, str):
+                    stem_payload = {"path": stem_payload}
+                    group_payloads[parts[1]]["stems"][parts[2]] = stem_payload
+                stem_payload.setdefault("automations", []).append(automation)
+            else:
+                automations.append(automation)
+        else:
+            raise ValueError(f"unsupported action type: {kind}")
+
+    for deck, active in list(deck_active.items()):
+        raw_duration = active["action"].get("duration_ms", active["action"].get("duration"))
+        if raw_duration is None:
+            continue
+        total_duration_ms = parse_ms(raw_duration, f"load_track {active['load_id']} duration")
+        source_elapsed_ms = int(active["trim_start_ms"]) - parse_ms(
+            active["action"].get("trim_start_ms", active["action"].get("trim_start", active["action"].get("cue_ms", active["action"].get("cue", 0)))),
+            f"load_track {active['load_id']} trim",
+        )
+        remaining_ms = total_duration_ms - source_elapsed_ms
+        append_deck_clock_segment(
+            stem_groups,
+            group_payloads,
+            active["action"],
+            segment_id=next_segment_id(active["load_id"]),
+            start_ms=int(active["start_ms"]),
+            trim_start_ms=int(active["trim_start_ms"]),
+            duration_ms=remaining_ms,
+            pending_stem_automations=pending_stem_automations,
+        )
+    compiled["decks"] = decks
+    return compiled
+
+
 def playhead_ms_from_state(path: Path, now: float | None = None) -> int:
     payload = json.loads(path.read_text(encoding="utf-8"))
     explicit = payload.get("playhead_ms", payload.get("mix_playhead_ms"))
@@ -855,6 +1602,7 @@ def playlist_to_session_payload(
 
 
 def parse_session(payload: dict[str, Any]) -> MixSession:
+    payload = compile_actions_payload(payload)
     decks = [str(deck) for deck in payload.get("decks", [])]
     if not decks:
         decks = list(DEFAULT_SESSION_DECKS)
@@ -902,6 +1650,8 @@ def validate_session(session: MixSession) -> None:
     for clip in session.clips:
         if clip.deck not in deck_set:
             errors.append(f"clip {clip.id} uses unknown deck {clip.deck}")
+        if is_artifact_source_path(clip.path):
+            errors.append(f"clip {clip.id} uses artifact/duplicate source path: {clip.path}")
         if clip.attached_deck is not None and clip.attached_deck not in deck_set:
             errors.append(f"clip {clip.id} attaches to unknown deck {clip.attached_deck}")
         if clip.effect_parent_clip_id is not None and clip.effect_parent_clip_id not in {item.id for item in session.clips}:
@@ -922,6 +1672,8 @@ def validate_session(session: MixSession) -> None:
     for group in session.stem_groups:
         if group.deck not in deck_set:
             errors.append(f"stem group {group.id} uses unknown deck {group.deck}")
+        if is_artifact_source_path(group.source_path):
+            errors.append(f"stem group {group.id} uses artifact/duplicate source path: {group.source_path}")
         if group.start_ms < 0:
             errors.append(f"stem group {group.id} starts before zero")
         if group.trim_start_ms < 0:
@@ -1186,7 +1938,7 @@ def base_payload(path: Path, create: bool) -> dict[str, Any]:
 
 
 def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None:
-    for collection in ("clips", "mic_lean_ins", "effects", "slip_events"):
+    for collection in ("actions", "clips", "stem_groups", "mic_lean_ins", "effects", "slip_events"):
         for index, item in enumerate(payload.get(collection, [])):
             if item.get("id") == event_id:
                 return collection, index
@@ -1359,48 +2111,28 @@ def require_unique_event_id(payload: dict[str, Any], event_id: str) -> None:
         raise ValueError(f"event id already exists: {event_id}")
 
 
-def add_clip(
+def add_action(
     payload: dict[str, Any],
     *,
-    clip_id: str,
-    deck: str,
-    path: str,
-    start: str,
-    trim_start: str,
-    duration: str | None,
-    trim_db: float,
-    gain_db: float,
-    tempo_shift_pct: float,
-    pitch_shift_semitones: int,
-    fade_in_ms: int,
-    fade_out_ms: int,
+    action: dict[str, Any],
+    db_path: Path = DEFAULT_LIBRARY_DB,
+    prepare_stems: bool = True,
     lock_before_ms: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     next_payload = copy.deepcopy(payload)
-    require_unique_event_id(next_payload, clip_id)
+    action = prepare_load_track_action_stems(action, db_path=db_path, prepare_stems=prepare_stems)
+    event_id = action_id(action)
+    if not event_id:
+        raise ValueError("action id is required")
+    require_unique_event_id(next_payload, event_id)
     guard_live_edit(
-        label=f"clip {clip_id}",
-        start_ms=parse_ms(start, f"clip {clip_id} start"),
+        label=f"action {event_id}",
+        start_ms=action_at_ms(action),
         lock_before_ms=lock_before_ms,
         force=force,
     )
-    clip: dict[str, Any] = {
-        "id": clip_id,
-        "deck": deck,
-        "path": path,
-        "start": start,
-        "trim_start": trim_start,
-        "trim_db": trim_db,
-        "gain_db": gain_db,
-        "tempo_shift_pct": tempo_shift_pct,
-        "pitch_shift_semitones": pitch_shift_semitones,
-        "fade_in_ms": fade_in_ms,
-        "fade_out_ms": fade_out_ms,
-    }
-    if duration is not None:
-        clip["duration"] = duration
-    next_payload.setdefault("clips", []).append(clip)
+    next_payload.setdefault("actions", []).append(action)
     parse_session(next_payload)
     return next_payload
 
@@ -1505,7 +2237,10 @@ def move_event(
         force=force,
     )
     collection, index = found
-    next_payload[collection][index]["start"] = start
+    if collection == "actions":
+        next_payload[collection][index]["at"] = start
+    else:
+        next_payload[collection][index]["start"] = start
     parse_session(next_payload)
     return next_payload
 
@@ -2421,22 +3156,12 @@ def main() -> int:
     import_playlist_parser.add_argument("--default-duration")
     import_playlist_parser.add_argument("--probe", action=argparse.BooleanOptionalAction, default=True)
 
-    add_clip_parser = sub.add_parser("add-clip")
-    add_clip_parser.add_argument("session", type=Path)
-    add_clip_parser.add_argument("--create", action="store_true")
-    add_clip_parser.add_argument("--id", required=True)
-    add_clip_parser.add_argument("--deck", required=True)
-    add_clip_parser.add_argument("--path", required=True)
-    add_clip_parser.add_argument("--start", required=True)
-    add_clip_parser.add_argument("--trim-start", default="0")
-    add_clip_parser.add_argument("--duration")
-    add_clip_parser.add_argument("--trim-db", type=float, default=0.0)
-    add_clip_parser.add_argument("--gain-db", type=float, default=0.0)
-    add_clip_parser.add_argument("--tempo-shift-pct", type=float, default=0.0)
-    add_clip_parser.add_argument("--pitch-shift-semitones", type=int, default=0)
-    add_clip_parser.add_argument("--fade-in-ms", type=int, default=0)
-    add_clip_parser.add_argument("--fade-out-ms", type=int, default=0)
-    add_live_edit_args(add_clip_parser)
+    add_action_parser = sub.add_parser("add-action")
+    add_action_parser.add_argument("session", type=Path)
+    add_action_parser.add_argument("--create", action="store_true")
+    add_action_parser.add_argument("--action-json", required=True)
+    add_action_parser.add_argument("--db", type=Path, default=DEFAULT_LIBRARY_DB)
+    add_live_edit_args(add_action_parser)
 
     add_mic_parser = sub.add_parser("add-mic")
     add_mic_parser.add_argument("session", type=Path)
@@ -2605,28 +3330,21 @@ def main() -> int:
         print(f"imported {len(tracks)} playlist tracks into timestamped session {args.session}")
         return 0
 
-    if args.command == "add-clip":
+    if args.command == "add-action":
+        action_payload = json.loads(args.action_json)
+        if not isinstance(action_payload, dict):
+            raise ValueError("--action-json must be a JSON object")
         payload = base_payload(args.session, args.create)
         lock_before_ms = live_edit_lock(args)
-        updated = add_clip(
+        updated = add_action(
             payload,
-            clip_id=args.id,
-            deck=args.deck,
-            path=args.path,
-            start=args.start,
-            trim_start=args.trim_start,
-            duration=args.duration,
-            trim_db=args.trim_db,
-            gain_db=args.gain_db,
-            tempo_shift_pct=args.tempo_shift_pct,
-            pitch_shift_semitones=args.pitch_shift_semitones,
-            fade_in_ms=args.fade_in_ms,
-            fade_out_ms=args.fade_out_ms,
+            action=action_payload,
+            db_path=args.db,
             lock_before_ms=lock_before_ms,
             force=args.force,
         )
         write_payload(args.session, updated)
-        print(f"added clip {args.id}")
+        print(f"added action {action_id(action_payload)}")
         return 0
 
     if args.command == "add-mic":

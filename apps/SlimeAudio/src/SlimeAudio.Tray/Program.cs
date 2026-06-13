@@ -346,6 +346,14 @@ internal sealed class MulticastReceiver : IDisposable
     public string TelemetryPath => ClientTelemetry.Path;
     public int VolumePercent => _volumePercent;
     public string? OutputDevice => _settings.OutputDevice;
+    public SnapserverClientDiagnostics SnapserverDiagnostics => string.IsNullOrWhiteSpace(_serverHost)
+        ? new SnapserverClientDiagnostics(false, "no remembered snapserver host", false, null, null)
+        : SnapcastControl.GetClientDiagnostics(
+            _serverHost,
+            _options.SnapcastControlPort,
+            Environment.MachineName,
+            "default",
+            TimeSpan.FromMilliseconds(750));
 
     public MulticastReceiver(MulticastOptions options)
     {
@@ -796,8 +804,105 @@ internal static class ClientTelemetry
     }
 }
 
+internal sealed record SnapserverClientDiagnostics(
+    bool Ok,
+    string? Error,
+    bool ClientConnected,
+    string? ClientStream,
+    string? StreamStatus);
+
 internal static class SnapcastControl
 {
+    public static SnapserverClientDiagnostics GetClientDiagnostics(
+        string host,
+        int port,
+        string clientId,
+        string expectedStreamId,
+        TimeSpan timeout)
+    {
+        try
+        {
+            using var client = new TcpClient();
+            client.ConnectAsync(host, port).WaitAsync(timeout).GetAwaiter().GetResult();
+            using var stream = client.GetStream();
+            var request = JsonSerializer.Serialize(new
+            {
+                id = 1,
+                jsonrpc = "2.0",
+                method = "Server.GetStatus"
+            }) + "\n";
+            var payload = Encoding.UTF8.GetBytes(request);
+            stream.WriteAsync(payload).AsTask().WaitAsync(timeout).GetAwaiter().GetResult();
+
+            using var timeoutSource = new CancellationTokenSource(timeout);
+            var buffer = new byte[65536];
+            var read = stream.ReadAsync(buffer, timeoutSource.Token).AsTask().GetAwaiter().GetResult();
+            var response = Encoding.UTF8.GetString(buffer, 0, read);
+            return ParseClientDiagnostics(response, clientId, expectedStreamId);
+        }
+        catch (Exception ex)
+        {
+            return new SnapserverClientDiagnostics(false, ex.Message, false, null, null);
+        }
+    }
+
+    private static SnapserverClientDiagnostics ParseClientDiagnostics(string response, string clientId, string expectedStreamId)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(response);
+            var server = document.RootElement.GetProperty("result").GetProperty("server");
+            var streamStatuses = new Dictionary<string, string?>(StringComparer.Ordinal);
+            if (server.TryGetProperty("streams", out var streams))
+            {
+                foreach (var streamElement in streams.EnumerateArray())
+                {
+                    var id = streamElement.TryGetProperty("id", out var idValue) ? idValue.GetString() : null;
+                    if (!string.IsNullOrWhiteSpace(id))
+                    {
+                        streamStatuses[id] = streamElement.TryGetProperty("status", out var statusValue)
+                            ? statusValue.GetString()
+                            : null;
+                    }
+                }
+            }
+            streamStatuses.TryGetValue(expectedStreamId, out var expectedStreamStatus);
+
+            if (server.TryGetProperty("groups", out var groups))
+            {
+                foreach (var group in groups.EnumerateArray())
+                {
+                    var groupStream = group.TryGetProperty("stream_id", out var streamValue) ? streamValue.GetString() : null;
+                    if (!group.TryGetProperty("clients", out var clients))
+                    {
+                        continue;
+                    }
+
+                    foreach (var snapclient in clients.EnumerateArray())
+                    {
+                        var id = snapclient.TryGetProperty("id", out var idValue) ? idValue.GetString() : null;
+                        if (!string.Equals(id, clientId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        var connected = snapclient.TryGetProperty("connected", out var connectedValue) && connectedValue.GetBoolean();
+                        var streamStatus = groupStream is not null && streamStatuses.TryGetValue(groupStream, out var actualStreamStatus)
+                            ? actualStreamStatus
+                            : null;
+                        return new SnapserverClientDiagnostics(true, null, connected, groupStream, streamStatus);
+                    }
+                }
+            }
+
+            return new SnapserverClientDiagnostics(true, "client not present in snapserver status", false, null, expectedStreamStatus);
+        }
+        catch (Exception ex)
+        {
+            return new SnapserverClientDiagnostics(false, ex.Message, false, null, null);
+        }
+    }
+
     public static async Task SetVolumeAsync(string host, int port, string clientId, int percent)
     {
         using var client = new TcpClient();
@@ -1086,6 +1191,7 @@ internal sealed class AudioReceiver : IDisposable
             }
         }
 
+        var snapserver = _multicast.SnapserverDiagnostics;
         return new AudioDiagnostics(
             sessions.Count,
             Interlocked.Read(ref _receivedPackets),
@@ -1116,7 +1222,12 @@ internal sealed class AudioReceiver : IDisposable
             _multicast.LastStderrLine,
             _multicast.LastStartCommand,
             _multicast.UptimeMs,
-            _multicast.ReconnectAttempts);
+            _multicast.ReconnectAttempts,
+            snapserver.Ok,
+            snapserver.Error,
+            snapserver.ClientConnected,
+            snapserver.ClientStream,
+            snapserver.StreamStatus);
     }
 
     public void Dispose()

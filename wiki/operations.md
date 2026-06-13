@@ -70,7 +70,9 @@ python3 scripts/slime_audio_stream.py runtime/show-render.mp3 \
 Use `--no-active-pointer` only for proofs, diagnostics, or tests where the
 dashboard should deliberately keep showing the previous live set.
 
-For persistent Snapcast playback, keep one parent FIFO writer open across render windows and swap only the ffmpeg child input. Closing the FIFO between windows can make snapserver emit EOF and create audible gaps even when receiver clients remain healthy.
+Snapcast mode uses the system Snapserver and writes decoded audio to its FIFO,
+`/tmp/snapfifo`. Do not start ad hoc Snapserver instances for normal room
+playback.
 
 ## Timed Drops
 
@@ -96,6 +98,23 @@ curl -i http://DASHBOARD_HOST:8765/api/not-a-real-endpoint
 ```
 
 Both should return JSON content types for API paths.
+
+## Easter Island Head Deployment
+
+The main SlimeAudio host is deployed by GitHub Actions from `main` using the
+self-hosted repository runner on `easter-island-head`. The workflow is
+`.github/workflows/deploy-easter-island-head.yml`, and the deploy job targets
+the runner labels `self-hosted` and `easter-island-head`.
+
+The workflow checks out `main` on the runner, then rsyncs the repo to
+`/home/squidward/.openclaw/workspace/slime-audio`, excluding `.git/`, `.venv/`,
+and `runtime/`. Runtime state, databases, generated audio, and caches stay on
+the host.
+
+After sync, `scripts/deploy_easter_island_head.sh` runs on the container. It
+updates the Python venv, installs the package editable, compiles Python files,
+restarts `slime-audio-web.service`, starts `slime-music-library.timer`, and
+checks the local dashboard plus required services.
 
 ## Disk Hygiene
 

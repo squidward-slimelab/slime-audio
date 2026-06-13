@@ -132,10 +132,76 @@ class SlimeAudioStemsTests(unittest.TestCase):
         self.assertEqual(result, output)
         self.assertTrue(any(call[0] == "squidward@patrick" and "demucs" in call[1] for call in calls))
 
+    def test_remote_path_readable_quotes_shell_sensitive_paths(self):
+        calls = []
+
+        def fake_run(command, check=False):
+            calls.append(command)
+            return type("Result", (), {"returncode": 0})()
+
+        with patch.object(stems.subprocess, "run", side_effect=fake_run):
+            readable = stems.remote_path_readable("squidward@robokrabs", Path("/mnt/Music/Album (Disc 1)/Track Name.flac"))
+
+        self.assertTrue(readable)
+        self.assertEqual(calls[0][0:2], ["ssh", "squidward@robokrabs"])
+        self.assertIn("'/mnt/Music/Album (Disc 1)/Track Name.flac'", calls[0][2])
+
+    def test_run_demucs_falls_back_to_second_remote_host(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            output = temp / "remote-output" / "htdemucs" / "source"
+            output.mkdir(parents=True)
+            for stem_name in stems.CANONICAL_STEMS:
+                (output / f"{stem_name}.wav").write_bytes(b"stem")
+
+            calls = []
+
+            def fake_run_remote_demucs(source_path, temp_dir, *, host, demucs_bin, model, jobs, remote_workdir=None):
+                calls.append(host)
+                if host == "squidward@patrick":
+                    raise RuntimeError("ssh failed")
+                return output
+
+            with patch.object(stems, "run_remote_demucs", side_effect=fake_run_remote_demucs):
+                result = stems.run_demucs(
+                    Path("/mnt/rockhouse/Music/source.flac"),
+                    temp,
+                    demucs_bin="demucs",
+                    model="htdemucs",
+                    jobs=1,
+                    demucs_host="squidward@patrick,squidward@robokrabs",
+                )
+
+        self.assertEqual(result, output)
+        self.assertEqual(calls, ["squidward@patrick", "squidward@robokrabs"])
+
+    def test_run_demucs_reports_all_remote_failures(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+
+            def fake_run_remote_demucs(source_path, temp_dir, *, host, demucs_bin, model, jobs, remote_workdir=None):
+                raise RuntimeError(f"{host} unavailable")
+
+            with patch.object(stems, "run_remote_demucs", side_effect=fake_run_remote_demucs):
+                with self.assertRaisesRegex(RuntimeError, "remote Demucs failed on all hosts"):
+                    stems.run_demucs(
+                        Path("/mnt/rockhouse/Music/source.flac"),
+                        temp,
+                        demucs_bin="demucs",
+                        model="htdemucs",
+                        jobs=1,
+                        demucs_host="squidward@patrick,squidward@robokrabs",
+                    )
+
     def test_local_demucs_flag_disables_default_remote_host(self):
         args = stems.parse_args(["split", "/tmp/source.wav", "--local-demucs"])
 
         self.assertIsNone(args.demucs_host)
+
+    def test_default_demucs_hosts_include_gpu_fallback(self):
+        args = stems.parse_args(["split", "/tmp/source.wav"])
+
+        self.assertEqual(stems.parse_demucs_hosts(args.demucs_host), ["squidward@patrick", "squidward@robokrabs"])
 
 
 if __name__ == "__main__":

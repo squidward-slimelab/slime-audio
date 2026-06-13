@@ -332,7 +332,7 @@ function eventIds(events) {
 
 function clipAt(lane, atMs) {
   const clips = (lane.events || [])
-    .filter((event) => event.kind !== "automation" && ["song", "effect-track", "vocal"].includes(event.kind))
+    .filter((event) => event.kind !== "automation" && ["song", "stem-group", "effect-track", "vocal"].includes(event.kind))
     .sort((a, b) => numericValue(a.start_ms, 0) - numericValue(b.start_ms, 0));
   return clips.find((event) => atMs >= numericValue(event.start_ms, 0) && atMs < numericValue(event.end_ms, event.start_ms || 0)) || null;
 }
@@ -858,7 +858,7 @@ function renderTopline() {
   els.updatedTime.textContent = transport.updated_at || dashboardState.payload?.generated_at || "--";
 
   els.currentTitle.textContent = now?.display_title || "nothing active";
-  els.currentDetail.textContent = now ? `${fmtMs(now.start_ms)} - ${fmtMs(now.end_ms)} | ${shortPath(now.path)}` : "no current clip";
+  els.currentDetail.textContent = now ? `${fmtMs(now.start_ms)} - ${fmtMs(now.end_ms)} | ${shortPath(now.path || now.source_path)}` : "no current load";
   setBadgeState(els.currentState, transport.status || "idle");
   const pct = transport.duration_ms && playhead !== null ? Math.max(0, Math.min(100, (playhead / transport.duration_ms) * 100)) : 0;
   els.sessionProgress.style.width = `${pct}%`;
@@ -893,7 +893,7 @@ function renderHealth() {
   els.healthList.replaceChildren();
   const rows = [
     ["runner", health.runner_state || "unknown"],
-    ["current clips", String((health.current_clips || []).length)],
+    ["runner window", String((health.current_clips || []).length)],
     ["receiver telemetry", (health.receivers || []).length ? `${health.receivers.length} receivers` : "not in state"],
   ];
   for (const [key, value] of rows) {
@@ -917,6 +917,7 @@ function renderSummary() {
     ["set", setInfo.title || setInfo.slug || "unassigned"],
     ["mode", session.timeline_mode || "native"],
     ["duration", fmtMs(session.duration_ms)],
+    ["actions", counts.action || 0],
     ["songs", counts.song || 0],
     ["stem groups", counts["stem-group"] || 0],
     ["fx clips", counts["effect-track"] || 0],
@@ -1133,7 +1134,7 @@ function render() {
   const dashboard = dashboardState.dashboard;
   syncPlayhead(dashboard?.transport || {});
   renderTopline();
-  renderList(els.nextList, dashboard.upcoming, "no planned timeline events");
+  renderList(els.nextList, dashboard.upcoming, "no planned actions or events");
   renderList(els.commentaryList, dashboard.commentary, "no planned lean-ins");
   renderList(els.automationList, dashboard.automation, "no upcoming automation", 10);
   renderHealth();

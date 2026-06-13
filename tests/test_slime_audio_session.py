@@ -6,11 +6,13 @@ import wave
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import AUDACITY_REVERB_PRESETS, audit_hidden_volume_sag, audit_session_durations, load_session, parse_ms, playhead_ms_from_state, session_summary
+from slime_audio_session import AUDACITY_REVERB_PRESETS, audit_hidden_volume_sag, audit_session_durations, load_session, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
@@ -94,6 +96,44 @@ def write_cue_db(db_path: Path, track: Path, *, kind: str, at_ms: int, confidenc
 
 
 class SlimeAudioSessionTests(unittest.TestCase):
+    def test_load_session_rejects_artifact_source_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "bad-clip",
+                                "deck": "deck-1",
+                                "path": "/music/Artist/Album/separated/htdemucs/Track/vocals.flac",
+                                "start_ms": 0,
+                                "duration_ms": 1000,
+                            }
+                        ],
+                        "stem_groups": [
+                            {
+                                "id": "bad-group",
+                                "deck": "deck-2",
+                                "source_path": "/music/Artist/Album/isolated/Track_Vocal.wav",
+                                "start_ms": 0,
+                                "duration_ms": 1000,
+                                "stems": {
+                                    "vocals": {
+                                        "path": "/music/Artist/Album/separated/htdemucs/Track/vocals.flac"
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                )
+            )
+
+            with self.assertRaisesRegex(ValueError, "artifact/duplicate source path"):
+                load_session(session_path)
+
     def test_load_session_accepts_stem_group_with_stem_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
@@ -319,39 +359,424 @@ class SlimeAudioSessionTests(unittest.TestCase):
 
             self.assertEqual(run_cli(["slime_audio_session.py", "audit-volume", str(session_path), "--from-ms", "20000"]), 0)
 
-    def test_cli_add_clip_accepts_rendered_tempo_and_pitch_correction(self):
+    def test_actions_compile_load_track_stem_toggle_and_knob_lerp(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "session.json"
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "lead-load",
+                                "deck": "deck-1",
+                                "source_path": "/music/lead.flac",
+                                "at": "00:08.000",
+                                "trim_start": "00:16.000",
+                                "duration": "00:32.000",
+                                "tempo_shift_pct": 2.5,
+                                "pitch_shift_semitones": -1,
+                                "play_stems": ["drums", "bass", "other"],
+                                "stems": {
+                                    "vocals": {"path": "/stems/lead/vocals.flac"},
+                                    "drums": {"path": "/stems/lead/drums.flac"},
+                                    "bass": {"path": "/stems/lead/bass.flac"},
+                                    "other": {"path": "/stems/lead/other.flac"},
+                                },
+                            },
+                            {"type": "stem_toggle", "id": "vocal-in", "target": "lead-load", "stem": "vocals", "at": "00:24.000", "enabled": True},
+                            {"type": "knob_lerp", "id": "filter-open", "target": "deck-1", "param": "lowpass_hz", "at": "00:08.000", "duration": "00:08.000", "from": 800, "to": 1800},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            group = session.stem_groups[0]
+
+        self.assertEqual(group.id, "lead-load")
+        self.assertEqual(group.start_ms, 8_000)
+        self.assertEqual(group.trim_start_ms, 16_000)
+        self.assertEqual(group.duration_ms, 32_000)
+        self.assertEqual(group.tempo_shift_pct, 2.5)
+        self.assertEqual(group.pitch_shift_semitones, -1)
+        self.assertFalse(group.stems["vocals"].enabled)
+        self.assertEqual(group.stems["vocals"].automations[0].param, "mute")
+        self.assertEqual(group.stems["vocals"].automations[0].points[0].value, False)
+        self.assertEqual(session.deck_automations[0].target, "deck-1")
+        self.assertEqual(session.deck_automations[0].param, "lowpass_hz")
+
+    def test_actions_compile_cue_jump_with_deck_clock_segments(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {"type": "load_track", "id": "lead-load", "deck": "deck-1", "source_path": "/music/lead.flac", "at_ms": 0, "trim_start_ms": 10_000, "duration_ms": 60_000, "stems": stems},
+                            {"type": "set_cue", "id": "drop", "target": "lead-load", "position_ms": 42_000, "at_ms": 1_000},
+                            {"type": "jump_to_cue", "target": "lead-load", "cue_id": "drop", "at_ms": 16_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-segment-02"])
+        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 10_000, 16_000), (16_000, 42_000, 28_000)])
+
+    def test_actions_compile_load_track_duration_caps_later_deck_close(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "short-vocal",
+                                "deck": "deck-1",
+                                "source_path": "/music/vocal.flac",
+                                "at_ms": 10_000,
+                                "duration_ms": 12_000,
+                                "stems": stems,
+                            },
+                            {
+                                "type": "load_track",
+                                "id": "next-vocal",
+                                "deck": "deck-1",
+                                "source_path": "/music/next.flac",
+                                "at_ms": 60_000,
+                                "duration_ms": 8_000,
+                                "stems": stems,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual(
+            [(group.id, group.start_ms, group.duration_ms) for group in session.stem_groups],
+            [("short-vocal", 10_000, 12_000), ("next-vocal", 60_000, 8_000)],
+        )
+
+    def test_actions_compile_pause_and_play_transport_segments(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "lead-load",
+                                "deck": "deck-1",
+                                "source_path": "/music/lead.flac",
+                                "at_ms": 0,
+                                "trim_start_ms": 10_000,
+                                "duration_ms": 60_000,
+                                "tempo_shift_pct": 25,
+                                "stems": stems,
+                            },
+                            {"type": "pause", "id": "pause-lead", "target": "deck-1", "at_ms": 8_000},
+                            {"type": "play", "id": "resume-lead", "target": "deck-1", "at_ms": 12_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-segment-02"])
+        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 10_000, 8_000), (12_000, 20_000, 50_000)])
+
+    def test_actions_compile_cue_and_seek_transport_segments(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {"type": "load_track", "id": "lead-load", "deck": "deck-1", "source_path": "/music/lead.flac", "at_ms": 0, "trim_start_ms": 0, "duration_ms": 80_000, "stems": stems},
+                            {"type": "set_cue", "id": "drop", "target": "lead-load", "position_ms": 32_000, "at_ms": 1_000},
+                            {"type": "cue", "id": "cue-drop", "target": "lead-load", "cue_id": "drop", "at_ms": 8_000},
+                            {"type": "play", "id": "play-drop", "target": "deck-1", "at_ms": 12_000},
+                            {"type": "seek", "id": "seek-hook", "target": "deck-1", "position_ms": 48_000, "at_ms": 20_000},
+                            {"type": "cue_seek", "id": "park-outro", "target": "deck-1", "position_ms": 64_000, "at_ms": 28_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-segment-02", "lead-load-segment-03"])
+        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 0, 8_000), (12_000, 32_000, 8_000), (20_000, 48_000, 8_000)])
+
+    def test_actions_compile_loop_segments_and_resume_deck_clock(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {"type": "load_track", "id": "lead-load", "deck": "deck-1", "source_path": "/music/lead.flac", "at_ms": 0, "trim_start_ms": 0, "duration_ms": 40_000, "stems": stems},
+                            {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "at_ms": 4_000, "enabled": False},
+                            {"type": "loop_start", "target": "lead-load", "at_ms": 8_000, "position_ms": 24_000, "length_ms": 4_000, "exit_ms": 16_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-loop-01", "lead-load-loop-02", "lead-load-segment-02"])
+        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 0, 8_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)])
+        self.assertTrue(all(group.stems["vocals"].automations for group in session.stem_groups))
+
+    def test_session_covers_cues_beat_jumps_play_pause_and_loops_together(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            jumped_track = "/music/jumped.flac"
+            write_analysis_cache(cache, jumped_track, bpm=120, beat_offset_ms=0)
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "clips": [
+                            {
+                                "id": "jumped-clip",
+                                "deck": "deck-2",
+                                "path": jumped_track,
+                                "start_ms": 40_000,
+                                "trim_start_ms": 1_000,
+                                "duration_ms": 8_000,
+                            }
+                        ],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "lead-load",
+                                "deck": "deck-1",
+                                "source_path": "/music/lead.flac",
+                                "at_ms": 0,
+                                "trim_start_ms": 0,
+                                "duration_ms": 48_000,
+                                "stems": stems,
+                            },
+                            {"type": "set_cue", "id": "hook", "target": "lead-load", "position_ms": 16_000, "at_ms": 1_000},
+                            {"type": "cue", "id": "park-hook", "target": "lead-load", "cue_id": "hook", "at_ms": 4_000},
+                            {"type": "play", "id": "play-hook", "target": "deck-1", "at_ms": 6_000},
+                            {"type": "pause", "id": "pause-hook", "target": "deck-1", "at_ms": 10_000},
+                            {"type": "play", "id": "resume-hook", "target": "deck-1", "at_ms": 12_000},
+                            {"type": "loop_start", "id": "loop-hook", "target": "lead-load", "at_ms": 16_000, "position_ms": 24_000, "length_ms": 4_000, "exit_ms": 24_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             self.assertEqual(
                 run_cli(
                     [
                         "slime_audio_session.py",
-                        "add-clip",
-                        str(path),
-                        "--create",
+                        "beat-jump",
+                        str(session_path),
                         "--id",
-                        "tempo-corrected-bed",
-                        "--deck",
-                        "deck-4",
-                        "--path",
-                        "/music/bed.flac",
-                        "--start",
-                        "00:08.000",
-                        "--duration",
-                        "00:32.000",
-                        "--tempo-shift-pct",
-                        "2.5",
-                        "--pitch-shift-semitones",
-                        "-1",
+                        "jumped-clip",
+                        "--beats",
+                        "1",
+                        "--cache",
+                        str(cache),
                     ]
                 ),
                 0,
             )
-            clip = load_session(path).clips[0]
+            session = load_session(session_path)
 
-        self.assertEqual(clip.tempo_shift_pct, 2.5)
-        self.assertEqual(clip.pitch_shift_semitones, -1)
+        self.assertEqual(session.clips[0].trim_start_ms, 1_500)
+        self.assertEqual(
+            [(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups],
+            [
+                (0, 0, 4_000),
+                (6_000, 16_000, 4_000),
+                (12_000, 20_000, 4_000),
+                (16_000, 24_000, 4_000),
+                (20_000, 24_000, 4_000),
+                (24_000, 28_000, 20_000),
+            ],
+        )
+
+    def test_tempo_shifted_loop_length_is_source_clock_not_deck_clock(self):
+        stems = {
+            "vocals": {"path": "/stems/lead/vocals.flac"},
+            "drums": {"path": "/stems/lead/drums.flac"},
+            "bass": {"path": "/stems/lead/bass.flac"},
+            "other": {"path": "/stems/lead/other.flac"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "lead-load",
+                                "deck": "deck-1",
+                                "source_path": "/music/lead.flac",
+                                "at_ms": 0,
+                                "trim_start_ms": 0,
+                                "duration_ms": 40_000,
+                                "tempo_shift_pct": 25,
+                                "stems": stems,
+                            },
+                            {
+                                "type": "loop_start",
+                                "target": "lead-load",
+                                "at_ms": 8_000,
+                                "position_ms": 24_000,
+                                "length_ms": 4_000,
+                                "exit_ms": 16_000,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual(
+            [(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups],
+            [(0, 0, 8_000), (8_000, 24_000, 3_200), (11_200, 24_000, 3_200), (14_400, 24_000, 1_600), (16_000, 28_000, 12_000)],
+        )
+
+    def test_add_action_hydrates_ready_stems_from_db(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            db_path = temp / "library.sqlite3"
+            manifest_path = temp / "stems" / "set-a" / "manifest.json"
+            manifest_path.parent.mkdir(parents=True)
+            manifest_path.write_text("{}", encoding="utf-8")
+            source = temp / "lead.flac"
+            source.write_bytes(b"fake")
+            conn = connect(db_path)
+            conn.execute(
+                """
+                INSERT INTO track_stem_sets(
+                    id, duplicate_key, source_path, source_size, source_mtime, model, profile, artifact_root,
+                    sample_rate, channels, duration_ms, status, error, created_at, updated_at
+                )
+                VALUES (?, NULL, ?, ?, ?, 'htdemucs', '4stem', ?, 44100, 2, 1000, 'ready', NULL, 'now', 'now')
+                """,
+                ("set-a", str(source.resolve()), source.stat().st_size, source.stat().st_mtime, str(manifest_path.parent)),
+            )
+            for stem in ("vocals", "drums", "bass", "other"):
+                conn.execute(
+                    "INSERT INTO track_stems(stem_set_id, stem_name, path) VALUES ('set-a', ?, ?)",
+                    (stem, str(manifest_path.parent / f"{stem}.wav")),
+                )
+            conn.commit()
+            session_path = temp / "session.json"
+            action = {
+                "type": "load_track",
+                "id": "lead-load",
+                "deck": "deck-1",
+                "source_path": str(source),
+                "at_ms": 0,
+                "duration_ms": 1000,
+            }
+
+            self.assertEqual(
+                run_cli(["slime_audio_session.py", "add-action", str(session_path), "--create", "--db", str(db_path), "--action-json", json.dumps(action)]),
+                0,
+            )
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+
+        stored = payload["actions"][0]
+        self.assertEqual(stored["stem_set_id"], "set-a")
+        self.assertEqual(stored["manifest_path"], str(manifest_path))
+        self.assertEqual(set(stored["stems"]), {"vocals", "drums", "bass", "other"})
+        self.assertTrue(all(stored["stems"][stem]["path"].endswith(f"{stem}.wav") for stem in stored["stems"]))
+
+    def test_prepare_load_track_runs_split_when_ready_stems_missing(self):
+        action = {"type": "load_track", "id": "lead-load", "deck": "deck-1", "source_path": "/music/lead.flac"}
+        artifacts = {
+            "stem_set_id": "set-b",
+            "manifest_path": "/stems/set-b/manifest.json",
+            "stems": {
+                "vocals": "/stems/set-b/vocals.wav",
+                "drums": "/stems/set-b/drums.wav",
+                "bass": "/stems/set-b/bass.wav",
+                "other": "/stems/set-b/other.wav",
+            },
+        }
+        with patch("slime_audio_session.ready_stem_artifacts", side_effect=[None, artifacts]) as ready, patch(
+            "slime_audio_session.subprocess.run",
+            return_value=SimpleNamespace(returncode=0, stdout='{"status":"ready"}', stderr=""),
+        ) as run:
+            prepared = prepare_load_track_action_stems(action, db_path=Path("/tmp/library.sqlite3"))
+
+        self.assertEqual(ready.call_count, 2)
+        self.assertIn("split", run.call_args.args[0])
+        self.assertEqual(prepared["stem_set_id"], "set-b")
+        self.assertEqual(prepared["stems"]["vocals"]["path"], "/stems/set-b/vocals.wav")
 
     def test_playhead_from_playlist_state_uses_duration_cache(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -503,31 +928,24 @@ class SlimeAudioSessionTests(unittest.TestCase):
     def test_cli_edits_session_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"
+            load_action = {
+                "type": "load_track",
+                "id": "intro",
+                "deck": "deck-1",
+                "source_path": "/music/intro.flac",
+                "at": "00:00.000",
+                "trim_start": "00:32.000",
+                "duration": "00:16.000",
+                "gain_db": -2,
+                "stems": {
+                    "vocals": "/stems/intro/vocals.flac",
+                    "drums": "/stems/intro/drums.flac",
+                    "bass": "/stems/intro/bass.flac",
+                    "other": "/stems/intro/other.flac",
+                },
+            }
             self.assertEqual(
-                run_cli(
-                    [
-                    "slime_audio_session.py",
-                    "add-clip",
-                    str(path),
-                    "--create",
-                    "--id",
-                    "intro",
-                    "--deck",
-                    "deck-1",
-                    "--path",
-                    "/music/intro.flac",
-                    "--start",
-                    "00:00.000",
-                    "--trim-start",
-                    "00:32.000",
-                    "--duration",
-                    "00:16.000",
-                    "--trim-db",
-                    "-4",
-                    "--gain-db",
-                    "-2",
-                    ]
-                ),
+                run_cli(["slime_audio_session.py", "add-action", str(path), "--create", "--action-json", json.dumps(load_action)]),
                 0,
             )
             self.assertEqual(
@@ -584,15 +1002,15 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(path)
             summary = session_summary(session)
 
-        self.assertEqual(summary["clip_count"], 1)
+        self.assertEqual(summary["clip_count"], 0)
+        self.assertEqual(summary["stem_group_count"], 1)
         self.assertEqual(summary["mic_lean_in_count"], 1)
         self.assertEqual(summary["automation_count"], 3)
         self.assertIn("deck-5", summary["decks"])
         self.assertEqual(session.mic_lean_ins[0].deck, "deck-5")
         self.assertEqual(summary["fader_routing"]["deck-5"], "THRU")
-        self.assertEqual(session.clips[0].trim_db, -4.0)
-        self.assertEqual(session.clips[0].gain_db, -2.0)
-        self.assertEqual(summary["clips_by_deck"]["deck-1"][0]["start_ms"], 4_000)
+        self.assertEqual(session.stem_groups[0].gain_db, -2.0)
+        self.assertEqual(summary["stem_groups_by_deck"]["deck-1"][0]["start_ms"], 4_000)
         lean_in = session.mic_lean_ins[0]
         self.assertEqual([effect.param for effect in lean_in.effects], ["duck_volume", "lowpass_hz"])
 

@@ -24,6 +24,10 @@ Download the Windows installer from GitHub releases.
 
 GitHub Actions builds win-x64 artifacts from `.github/workflows/slime-audio.yml`.
 
+Pushes to `main` deploy the SlimeAudio host on `easter-island-head` through
+`.github/workflows/deploy-easter-island-head.yml` after the runner joins the
+self-hosted GitHub runner pool. See `wiki/operations.md` for host behavior.
+
 ## Spotify Brain
 
 The older Python Spotify wrapper still lives in this repo because it is useful for playlist/playback experiments.
@@ -183,7 +187,7 @@ The current analyzer is intentionally dependency-light and works through the exi
 
 ## Live Mix Sessions
 
-Live mix sessions are the canonical control-plane shape for DJ sets. They are intentionally planned data, not manual performance gestures: every gain ramp, filter move, pitch/tempo change, TTS lean-in, and ducking move should be encoded as automation before playback reaches it. Clips use absolute mix timestamps like an Ableton arrangement, so tracks do not need to be stacked back-to-back. Use `start`, `trim_start`, and `duration` to pull sections from songs for overlays, hooks, bridges, and loops. Music uses `deck-1` through `deck-4`; scheduled vocals use the dedicated `deck-5` vocal lane.
+Live mix sessions are the canonical control-plane shape for DJ sets. They are intentionally planned data, not manual performance gestures: every load, cue, jump, loop, gain ramp, filter move, pitch/tempo change, TTS lean-in, and ducking move should be encoded before playback reaches it. New music authoring uses `actions[]`: `load_track` creates a conceptual deck load with all four stem slots, `set_cue` stores source positions, `jump_to_cue` moves the deck clock to a named cue, and `loop_start`/`loop_exit` create bounded repeats. The compiler turns those actions into renderable stem-group segments while preserving the source action id. Music uses `deck-1` through `deck-4`; scheduled vocals use the dedicated `deck-5` vocal lane.
 
 `runtime/mix-session.json` and `runtime/mix-session-state.json` are the active live pointers consumed by the runner and dashboard. They should not be treated as the permanent identity of a set. Keep named set artifacts separately, activate one through the native session runner, then use the live-edit commands below against the active session while playback continues. Directly streaming a rendered review file bypasses dashboard state and should only be used for file-only review playback.
 
@@ -205,7 +209,6 @@ python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
 python3 scripts/slime_audio_session.py summary runtime/mix-session.json
 python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json --playlist runtime/set.txt --start 00:00.000 --decks deck-1,deck-2,deck-3,deck-4
-python3 scripts/slime_audio_live_edit.py add-clip --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000 --trim-db -3 --gain-db -6 --reason "add future bed"
 python3 scripts/slime_audio_live_edit.py add-mic --id drop-2 --deck deck-5 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --reason "scheduled lean-in"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]' --reason "shape bed entrance"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param eq_low_db --points-json '[{"at":"01:16.000","value":-4},{"at":"01:48.000","value":-4}]' --reason "thin bed lows under lead"

@@ -48,7 +48,7 @@ class SlimeAudioLiveEditTests(unittest.TestCase):
                 run_cli(
                     [
                         "slime_audio_live_edit.py",
-                        "add-clip",
+                        "add-action",
                         "--session",
                         str(session_path),
                         "--state",
@@ -59,16 +59,23 @@ class SlimeAudioLiveEditTests(unittest.TestCase):
                         "test-dj",
                         "--reason",
                         "unit test",
-                        "--id",
-                        "future",
-                        "--deck",
-                        "deck-1",
-                        "--path",
-                        "/music/b.flac",
-                        "--start",
-                        "00:30.000",
-                        "--duration",
-                        "00:12.000",
+                        "--action-json",
+                        json.dumps(
+                            {
+                                "type": "load_track",
+                                "id": "future",
+                                "deck": "deck-1",
+                                "source_path": "/music/b.flac",
+                                "at_ms": 30_000,
+                                "duration_ms": 12_000,
+                                "stems": {
+                                    "vocals": "/stems/b/vocals.flac",
+                                    "drums": "/stems/b/drums.flac",
+                                    "bass": "/stems/b/bass.flac",
+                                    "other": "/stems/b/other.flac",
+                                },
+                            }
+                        ),
                     ]
                 ),
                 0,
@@ -76,9 +83,10 @@ class SlimeAudioLiveEditTests(unittest.TestCase):
             session = load_session(session_path)
             history = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
 
-        self.assertEqual([clip.id for clip in session.clips], ["current", "future"])
+        self.assertEqual([clip.id for clip in session.clips], ["current"])
+        self.assertEqual([group.id for group in session.stem_groups], ["future"])
         self.assertEqual(history[-1]["type"], "live_edit_applied")
-        self.assertEqual(history[-1]["command"], "add-clip")
+        self.assertEqual(history[-1]["command"], "add-action")
         self.assertEqual(history[-1]["actor"], "test-dj")
         self.assertEqual(history[-1]["reason"], "unit test")
         self.assertEqual(history[-1]["live_edit_lock_ms"], 10_000)

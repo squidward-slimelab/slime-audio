@@ -8,7 +8,8 @@ Use `scripts/slime_audio_live_edit.py` for active/future session edits. It defau
 
 Supported edit concepts include:
 
-- `add-clip`, `move`, and `remove`
+- `add-action` for `load_track`, transport (`pause`, `play`, `cue`, `seek`), `stem_toggle`, and `knob_lerp`
+- `move` and `remove`
 - `automate`
 - `add-mic`
 - `add-effect`
@@ -18,6 +19,8 @@ Supported edit concepts include:
 - `mashup-bed`
 - `fader-routing`
 - `crossfader`
+
+Manual clip dropping is not supported. Clips are render data, not the authoring surface.
 
 Serialize live writes to the same session. Do not launch several live-edit commands in parallel.
 

@@ -59,25 +59,11 @@ def common_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-state-lock", action="store_true", help="Disable the default active playhead lock.")
     parser.add_argument("--lock-before", help="Explicit live edit lock timestamp.")
     parser.add_argument("--history-log", type=Path, default=DEFAULT_HISTORY)
+    parser.add_argument("--db", type=Path, default=session.DEFAULT_LIBRARY_DB)
     parser.add_argument("--actor", default=os.environ.get("USER") or "unknown")
     parser.add_argument("--reason", default="")
     parser.add_argument("--force", action="store_true", help="Allow edits before the live edit lock.")
     return parser
-
-
-def add_clip_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--id", required=True)
-    parser.add_argument("--deck", required=True)
-    parser.add_argument("--path", required=True)
-    parser.add_argument("--start", required=True)
-    parser.add_argument("--trim-start", default="0")
-    parser.add_argument("--duration")
-    parser.add_argument("--trim-db", type=float, default=0.0)
-    parser.add_argument("--gain-db", type=float, default=0.0)
-    parser.add_argument("--tempo-shift-pct", type=float, default=0.0)
-    parser.add_argument("--pitch-shift-semitones", type=int, default=0)
-    parser.add_argument("--fade-in-ms", type=int, default=0)
-    parser.add_argument("--fade-out-ms", type=int, default=0)
 
 
 def add_mic_args(parser: argparse.ArgumentParser) -> None:
@@ -122,8 +108,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     common = common_parser()
 
-    add_clip_parser = sub.add_parser("add-clip", parents=[common])
-    add_clip_args(add_clip_parser)
+    add_action_parser = sub.add_parser("add-action", parents=[common])
+    add_action_parser.add_argument("--action-json", required=True)
 
     add_mic_parser = sub.add_parser("add-mic", parents=[common])
     add_mic_args(add_mic_parser)
@@ -211,24 +197,17 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    if args.command == "add-clip":
-        args.affected_ids = [args.id]
+    if args.command == "add-action":
+        action_payload = json.loads(args.action_json)
+        if not isinstance(action_payload, dict):
+            raise ValueError("--action-json must be a JSON object")
+        args.affected_ids = [str(action_payload.get("id") or action_payload.get("action_id") or "")]
         apply_edit(
             args,
-            lambda payload, lock_ms: session.add_clip(
+            lambda payload, lock_ms: session.add_action(
                 payload,
-                clip_id=args.id,
-                deck=args.deck,
-                path=args.path,
-                start=args.start,
-                trim_start=args.trim_start,
-                duration=args.duration,
-                trim_db=args.trim_db,
-                gain_db=args.gain_db,
-                tempo_shift_pct=args.tempo_shift_pct,
-                pitch_shift_semitones=args.pitch_shift_semitones,
-                fade_in_ms=args.fade_in_ms,
-                fade_out_ms=args.fade_out_ms,
+                action=action_payload,
+                db_path=args.db,
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),

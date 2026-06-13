@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import socket
 import subprocess
 import time
 from array import array
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from slime_audio_session import VOCAL_DECK, load_payload, parse_ms, parse_session, playhead_ms_from_state
+from slime_audio_session import VOCAL_DECK, compile_actions_payload, load_payload, parse_ms, parse_session, playhead_ms_from_state
 from slime_audio_sets import (
     DEFAULT_ACTIVE_SET,
     DEFAULT_SETS_DIR,
@@ -116,6 +117,7 @@ def session_stem_group_event(group: dict[str, Any]) -> dict[str, Any]:
         "source_path": group.get("source_path") or group.get("path"),
         "stem_set_id": group.get("stem_set_id"),
         "manifest_path": group.get("manifest_path"),
+        "source_action_id": group.get("source_action_id"),
         "start_ms": start_ms,
         "trim_start_ms": parse_ms(group.get("trim_start_ms", group.get("trim_start", 0)), "stem group trim_start"),
         "duration_ms": duration_ms,
@@ -136,6 +138,41 @@ def session_stem_group_event(group: dict[str, Any]) -> dict[str, Any]:
         "stem_indicators": stem_indicators,
         **format_title(str(group.get("source_path") or group.get("path") or "")),
     }
+
+
+def session_action_event(action: dict[str, Any]) -> dict[str, Any]:
+    action_kind = str(action.get("type") or action.get("action") or "action")
+    action_id = str(action.get("id") or action.get("action_id") or action_kind)
+    start_ms = parse_ms(action.get("at_ms", action.get("at", action.get("start_ms", action.get("start", 0)))), "action time")
+    duration = action.get("duration_ms", action.get("duration"))
+    duration_ms = parse_ms(duration, "action duration") if duration is not None else 1000
+    event: dict[str, Any] = {
+        "id": action_id,
+        "kind": "action",
+        "action_type": action_kind,
+        "deck": action.get("deck"),
+        "lane": "actions",
+        "target": action.get("target"),
+        "param": action.get("param"),
+        "stem": action.get("stem"),
+        "cue_id": action.get("cue_id") or action.get("cue_name") or action.get("name"),
+        "position_ms": action.get("position_ms", action.get("position")),
+        "length_ms": action.get("length_ms", action.get("length")),
+        "start_ms": start_ms,
+        "duration_ms": duration_ms,
+        "end_ms": start_ms + duration_ms,
+        "source_path": action.get("source_path") or action.get("path"),
+        "stem_set_id": action.get("stem_set_id"),
+        "manifest_path": action.get("manifest_path"),
+        "play_stems": action.get("play_stems", action.get("enabled_stems")),
+        "gain_db": action.get("gain_db", 0.0),
+        "tempo_shift_pct": action.get("tempo_shift_pct", 0.0),
+        "pitch_shift_semitones": action.get("pitch_shift_semitones", 0),
+        "from": action.get("from"),
+        "to": action.get("to"),
+    }
+    event.update(format_title(str(action.get("source_path") or action.get("path") or "")))
+    return event
 
 
 def stem_group_indicators(stems: dict[str, Any]) -> list[dict[str, Any]]:
@@ -170,13 +207,17 @@ def stem_group_indicators(stems: dict[str, Any]) -> list[dict[str, Any]]:
 
 def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
     parse_session(payload)
+    compiled_payload = compile_actions_payload(payload)
     events: list[dict[str, Any]] = []
-    for clip in payload.get("clips", []):
+    for action in payload.get("actions", payload.get("performance_actions", [])):
+        if isinstance(action, dict):
+            events.append(session_action_event(action))
+    for clip in compiled_payload.get("clips", []):
         event = session_clip_event(clip)
         events.append(event)
         for automation in clip.get("automations", []):
             events.append(automation_payload(automation, owner=str(clip.get("id"))))
-    for group in payload.get("stem_groups", payload.get("stemGroups", [])):
+    for group in compiled_payload.get("stem_groups", compiled_payload.get("stemGroups", [])):
         events.append(session_stem_group_event(group))
         for automation in group.get("automations", []):
             events.append(automation_payload(automation, owner=str(group.get("id"))))
@@ -185,7 +226,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(stem, dict):
                 for automation in stem.get("automations", []):
                     events.append(automation_payload(automation, owner=f"stem-group:{group.get('id')}:{stem_name}"))
-    for lean_in in payload.get("mic_lean_ins", payload.get("micLeanIns", [])):
+    for lean_in in compiled_payload.get("mic_lean_ins", compiled_payload.get("micLeanIns", [])):
         start_ms = parse_ms(lean_in.get("start_ms", lean_in.get("start", 0)), "mic lean-in start")
         events.append(
             {
@@ -206,11 +247,11 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 events.append(automation_payload(lean_in[key], owner=str(lean_in.get("id"))))
         for automation in lean_in.get("effects", []):
             events.append(automation_payload(automation, owner=str(lean_in.get("id"))))
-    for automation in payload.get("automations", []):
+    for automation in compiled_payload.get("automations", []):
         events.append(automation_payload(automation))
-    for automation in payload.get("deck_automations", payload.get("deckAutomations", [])):
+    for automation in compiled_payload.get("deck_automations", compiled_payload.get("deckAutomations", [])):
         events.append({**automation_payload(automation), "deck": automation.get("target")})
-    for effect in payload.get("effects", []):
+    for effect in compiled_payload.get("effects", []):
         start_ms = parse_ms(effect.get("start_ms", effect.get("start", 0)), "effect start")
         duration_ms = parse_ms(effect.get("duration_ms", effect.get("duration", 0)), "effect duration")
         tail_ms = parse_ms(effect.get("tail_ms", effect.get("tail", 0)), "effect tail")
@@ -237,7 +278,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "routine_recipe": effect.get("routine_recipe"),
             }
         )
-    for slip in payload.get("slip_events", payload.get("slipEvents", [])):
+    for slip in compiled_payload.get("slip_events", compiled_payload.get("slipEvents", [])):
         start_ms = parse_ms(slip.get("start_ms", slip.get("start", 0)), "slip start")
         duration_ms = parse_ms(slip.get("duration_ms", slip.get("duration", 0)), "slip duration")
         events.append(
@@ -256,7 +297,7 @@ def session_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "routine_recipe": slip.get("routine_recipe"),
             }
         )
-    kind_order = {"song": 0, "stem-group": 1, "vocal": 2, "effect": 3, "slip": 4, "automation": 5}
+    kind_order = {"action": 0, "song": 1, "stem-group": 2, "vocal": 3, "effect": 4, "slip": 5, "automation": 6}
     return sorted(
         events,
         key=lambda item: (
@@ -314,6 +355,11 @@ def classify_status(event: dict[str, Any], playhead_ms: int | None) -> str:
 
 
 def display_title_for_event(event: dict[str, Any]) -> str:
+    if event.get("kind") == "action":
+        action_type = str(event.get("action_type") or "action")
+        if action_type == "load_track":
+            return str(event.get("title") or event.get("id") or "load track")
+        return action_type.replace("_", " ")
     if event.get("kind") == "automation":
         return f"{event.get('param') or 'automation'}"
     if event.get("kind") == "vocal":
@@ -330,6 +376,41 @@ def display_title_for_event(event: dict[str, Any]) -> str:
 
 
 def display_meta_for_event(event: dict[str, Any]) -> str:
+    if event.get("kind") == "action":
+        action_type = str(event.get("action_type") or "action")
+        if action_type == "load_track":
+            deck = event.get("deck") or "deck"
+            stems = event.get("play_stems")
+            stem_text = f" | play {', '.join(str(stem) for stem in stems)}" if isinstance(stems, list) and stems else ""
+            stem_set = f" | stems ready {event.get('stem_set_id')}" if event.get("stem_set_id") else ""
+            transform = mix_transform_text(event)
+            transform_text = f" | {transform}" if transform else ""
+            return f"load_track | {deck}{stem_text}{stem_set}{transform_text}"
+        if action_type == "stem_toggle":
+            return f"stem_toggle | {event.get('target')}:{event.get('stem')}"
+        if action_type == "knob_lerp":
+            return f"knob_lerp | {event.get('target')} | {event.get('param')} | {event.get('from')} -> {event.get('to')}"
+        if action_type == "set_cue":
+            return f"set_cue | {event.get('target')} | {event.get('id')}"
+        if action_type == "jump_to_cue":
+            return f"jump_to_cue | {event.get('target')} | {event.get('id')}"
+        if action_type == "loop_start":
+            return f"loop_start | {event.get('target')}"
+        if action_type == "loop_exit":
+            return f"loop_exit | {event.get('target')}"
+        if action_type in {"play", "deck_play"}:
+            cue = event.get("cue_id")
+            cue_text = f" | {cue}" if cue else ""
+            return f"{action_type} | {event.get('target')}{cue_text}"
+        if action_type in {"pause", "deck_pause"}:
+            return f"{action_type} | {event.get('target')}"
+        if action_type in {"cue", "cue_seek", "seek", "deck_seek"}:
+            cue = event.get("cue_id")
+            position = event.get("position_ms")
+            destination = cue if cue else position
+            destination_text = f" | {destination}" if destination is not None else ""
+            return f"{action_type} | {event.get('target')}{destination_text}"
+        return action_type
     if event.get("kind") == "automation":
         if event.get("target") == "crossfader":
             return "crossfader motion"
@@ -374,11 +455,19 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
             if isinstance(stem, dict) and stem.get("enabled", True)
         ]
         mix = ", ".join(active) if active else "full-track fallback"
-        return f"stem deck | {mix}"
+        transform = mix_transform_text(event)
+        return " | ".join(part for part in (f"stem deck | {mix}", transform) if part)
     if event.get("routine_recipe"):
         return f"{event.get('routine_recipe')} routine of {event.get('source_clip_id')}"
     if event.get("planner_role") == "instant-double":
         return f"instant double of {event.get('source_clip_id')}"
+    mix_bits = mix_transform_bits(event)
+    artist_album = " - ".join(str(value) for value in (event.get("artist"), event.get("album")) if value)
+    source = artist_album or str(event.get("path") or "")
+    return " | ".join([part for part in (source, ", ".join(mix_bits)) if part])
+
+
+def mix_transform_bits(event: dict[str, Any]) -> list[str]:
     mix_bits: list[str] = []
     for key, label, suffix in (
         ("trim_db", "trim", " dB"),
@@ -394,9 +483,11 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
     rate = event.get("playback_rate")
     if isinstance(rate, (int, float)) and rate != 1:
         mix_bits.append(f"rate {rate:g}")
-    artist_album = " - ".join(str(value) for value in (event.get("artist"), event.get("album")) if value)
-    source = artist_album or str(event.get("path") or "")
-    return " | ".join([part for part in (source, ", ".join(mix_bits)) if part])
+    return mix_bits
+
+
+def mix_transform_text(event: dict[str, Any]) -> str:
+    return ", ".join(mix_transform_bits(event))
 
 
 def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str, Any]:
@@ -405,6 +496,8 @@ def normalize_event(event: dict[str, Any], playhead_ms: int | None) -> dict[str,
     duration = None if start is None or end is None else max(0, end - start)
     if event.get("kind") == "automation" and event.get("target") == "crossfader":
         lane = "fader"
+    elif event.get("kind") == "action":
+        lane = "actions"
     elif event.get("kind") == "effect-track":
         lane = f"{event.get('attached_deck') or event.get('deck')}-fx"
     else:
@@ -456,6 +549,8 @@ def lane_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ordered_lanes.append(fx_lane)
     for lane in ("effects", "fader", "automation"):
         ordered_lanes.append(lane)
+    if "actions" in active_lanes:
+        ordered_lanes.insert(0, "actions")
     for event in events:
         lane = str(event.get("lane") or "timeline")
         if lane not in ordered_lanes:
@@ -546,18 +641,58 @@ def stream_process_alive(pid_value: object) -> bool | None:
     return process_alive_with_cmdline(pid_value, "slime_audio_stream.py")
 
 
+def snapcast_stream_health(control_port: int = 1705, stream_id: str = "slime-audio") -> dict[str, Any]:
+    try:
+        with socket.create_connection(("127.0.0.1", control_port), timeout=0.5) as sock:
+            sock.sendall(b'{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}\n')
+            sock.settimeout(0.5)
+            raw = b""
+            while b"\n" not in raw:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                raw += chunk
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        return {"control_alive": False, "error": f"{exc.__class__.__name__}: {exc}"}
+
+    server = (payload.get("result") or {}).get("server") or {}
+    streams = server.get("streams") or []
+    stream = next((item for item in streams if item.get("id") == stream_id), None)
+    connected_clients = 0
+    for group in server.get("groups") or []:
+        if group.get("stream_id") != stream_id:
+            continue
+        connected_clients += sum(1 for client in group.get("clients") or [] if client.get("connected"))
+    return {
+        "control_alive": True,
+        "stream_present": stream is not None,
+        "stream_status": stream.get("status") if isinstance(stream, dict) else None,
+        "connected_clients": connected_clients,
+    }
+
+
 def runner_health(state: dict[str, Any], transport: dict[str, Any]) -> dict[str, Any]:
     status = str(state.get("runner_status") or "")
     pid = state.get("runner_pid")
     stream_pid = state.get("stream_pid")
     alive = runner_process_alive(pid)
     stream_alive = stream_process_alive(stream_pid)
+    snapcast_health = None
+    if status == "streaming" and state.get("stream_mode") == "snapcast" and stream_alive is not False:
+        snapcast_health = snapcast_stream_health()
     health = "ok"
     if status in {"failed", "fatal", "stopped"}:
         health = status
     elif status == "completed" or transport.get("status") == "completed":
         health = "completed"
     elif status == "streaming" and stream_alive is False:
+        health = "dead"
+    elif snapcast_health is not None and (
+        not snapcast_health.get("control_alive")
+        or not snapcast_health.get("stream_present")
+        or snapcast_health.get("stream_status") not in {"playing", "idle"}
+    ):
         health = "dead"
     elif alive is False and (state.get("current") or state.get("window_started_at")):
         health = "dead"
@@ -569,6 +704,7 @@ def runner_health(state: dict[str, Any], transport: dict[str, Any]) -> dict[str,
         "runner_process_alive": alive,
         "stream_pid": stream_pid,
         "stream_process_alive": stream_alive,
+        "snapcast": snapcast_health,
         "runner_status": status or None,
         "runner_updated_at": state.get("runner_updated_at"),
         "runner_exit_at": state.get("runner_exit_at"),
@@ -586,7 +722,7 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
         playhead_ms = None
     duration_ms = session_duration_ms(raw_events, state)
     events = [normalize_event(event, playhead_ms) for event in raw_events]
-    current = next((event for event in events if event.get("kind") == "song" and event.get("status") == "current"), None)
+    current = next((event for event in events if event.get("kind") in {"song", "stem-group"} and event.get("status") == "current"), None)
     if current is None and state.get("current"):
         current = next((event for event in events if event.get("path") == state.get("current")), None)
     upcoming = [
@@ -650,7 +786,7 @@ def now_from_state(state: dict[str, Any], session_payload: dict[str, Any]) -> di
                 or (current and event.get("path") == current)
                 or (
                     playhead_ms is not None
-                    and event.get("kind") == "song"
+                    and event.get("kind") in {"song", "stem-group"}
                     and isinstance(event.get("start_ms"), int)
                     and isinstance(event.get("end_ms"), int)
                     and event["start_ms"] <= playhead_ms < event["end_ms"]

@@ -130,6 +130,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=130_000,
             double_every=1,
+            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -168,6 +169,40 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(transition_plans["after"]["from_clip_id"], "next")
         self.assertEqual(transition_plans["after"]["pitch_shift_semitones"], clips["after"]["pitch_shift_semitones"])
 
+    def test_future_mix_planner_cuts_by_default_without_implicit_blends(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 120_000},
+                {"id": "next", "deck": "deck-1", "path": "/music/next.flac", "start_ms": 140_000, "duration_ms": 120_000},
+                {"id": "after", "deck": "deck-2", "path": "/music/after.flac", "start_ms": 280_000, "duration_ms": 120_000},
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        planned, moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac"),
+                "/music/next.flac": analysis("/music/next.flac", tonic=0),
+                "/music/after.flac": analysis("/music/after.flac", tonic=0),
+            },
+            lock_before_ms=130_000,
+            double_every=1,
+        )
+
+        clips = {clip["id"]: clip for clip in planned["clips"]}
+        self.assertEqual(clips["after"]["start_ms"], clips["next"]["start_ms"] + clips["next"]["duration_ms"])
+        self.assertEqual(clips["after"]["fade_in_ms"], 0)
+        self.assertNotIn("double-after", clips)
+        self.assertEqual(planned.get("deck_automations", []), [])
+        transition_plans = {item["to_clip_id"]: item for item in planned["transition_plans"]}
+        self.assertEqual(transition_plans["after"]["decision"], "cut")
+        self.assertEqual(transition_plans["after"]["overlap_ms"], 0)
+        self.assertTrue(any(move.kind == "cut" for move in moves))
+
     def test_future_mix_planner_does_not_preview_incoming_tracks_by_default(self):
         payload = {
             "version": 1,
@@ -188,6 +223,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             routine_every=0,
+            allow_blends=True,
         )
 
         self.assertTrue(any(move.kind == "blend" for move in moves))
@@ -213,6 +249,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             routine_every=0,
+            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -267,7 +304,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(transition_plan["to_clip_id"], "bad")
         self.assertEqual(transition_plan["decision"], "cut")
         self.assertEqual(transition_plan["overlap_ms"], 0)
-        self.assertIn("transition score", transition_plan["reason"])
+        self.assertIn("implicit blends disabled", transition_plan["reason"])
 
     def test_planner_can_rewrite_only_a_bounded_future_block(self):
         payload = {
@@ -296,6 +333,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             plan_until_ms=260_000,
             double_every=10,
             routine_every=0,
+            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -328,6 +366,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             double_every=10,
+            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -344,6 +383,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             max_pitch_shift_semitones=0,
+            allow_blends=True,
         )
         no_pitch_clips = {clip["id"]: clip for clip in no_pitch["clips"]}
         self.assertEqual(no_pitch_clips["next"]["start_ms"], no_pitch_clips["current"]["start_ms"] + no_pitch_clips["current"]["duration_ms"])

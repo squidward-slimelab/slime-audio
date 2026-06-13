@@ -769,6 +769,32 @@ h2 {
   background: #171a2a;
 }
 
+.lane-row.actions .lane-track {
+  min-height: 54px;
+  background:
+    linear-gradient(90deg, rgba(111, 184, 232, 0.07), transparent),
+    var(--panel-soft);
+}
+
+.timeline-event.action {
+  top: 12px;
+  height: 34px;
+  min-width: 92px;
+  grid-template-rows: minmax(0, 1fr) auto;
+  border-left-color: var(--blue);
+  background: #102434;
+}
+
+.timeline-event.action small {
+  color: var(--blue);
+}
+
+.timeline-event.action span::before {
+  content: "action ";
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .stem-indicators {
   position: relative;
   z-index: 1;

@@ -15,7 +15,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 - Capture operator feedback about song selection, transitions, effects, vibe, and technical issues from the dashboard. Feedback is timeline-aware: it defaults to the live playhead/current event and timeline event clicks can retarget the note to a specific clip, effect, or automation.
 - Provide a compact operational view of what the native session runner is about to play.
 - Treat `runtime/active-set.json` as the single active-playback pointer for both native session runner playback and direct `slime_audio_stream.py` fallback playback. The frontend should not require manual pointer edits after audio starts.
-- Serve `/tv` as the living-room display view. It consumes the same `/api/state` payload, avoids archive/edit controls, and renders a full-screen animated canvas driven by the current clip waveform from `/api/waveform`, with large now-playing, progress, upcoming, and runner-signal overlays for a TV attached to SPONGEBOT.
+- Serve `/tv` as the living-room display view. It consumes the same `/api/state` payload, avoids archive/edit controls, and renders a full-screen animated canvas driven by the current load/event waveform from `/api/waveform`, with large now-playing, progress, upcoming, and runner-signal overlays for a TV display.
 
 The dashboard must track the current session schema. When new mix controls ship, the API and frontend should expose them instead of hiding real mixer state behind summary text.
 
@@ -34,6 +34,7 @@ The dashboard must track the current session schema. When new mix controls ship,
 The frontend consumes the server view model from `/api/state`. Keep this contract updated when session fields change. Recent expected concepts include:
 
 - clip trim and gain
+- load-time tempo and pitch transforms on `load_track` action rows
 - automation values
 - per-track EQ automation
 - EDM/mashup bed styling

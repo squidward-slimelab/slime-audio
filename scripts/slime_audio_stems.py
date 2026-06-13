@@ -22,7 +22,10 @@ from slime_music_library import DEFAULT_DB, connect
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STEM_ROOT = REPO_ROOT / "runtime" / "stems"
-DEFAULT_DEMUCS_HOST = os.environ.get("SLIME_AUDIO_DEMUCS_HOST", "squidward@patrick")
+DEFAULT_DEMUCS_HOSTS = os.environ.get(
+    "SLIME_AUDIO_DEMUCS_HOSTS",
+    os.environ.get("SLIME_AUDIO_DEMUCS_HOST", "squidward@patrick,squidward@robokrabs"),
+)
 CANONICAL_STEMS = ("vocals", "drums", "bass", "other")
 WINDOW_MS = 1000
 
@@ -270,15 +273,19 @@ def run_local_demucs(source_path: Path, temp_dir: Path, *, demucs_bin: str, mode
 def remote_shell(host: str, command: str, *, capture: bool = False) -> str:
     result = subprocess.run(
         ["ssh", host, command],
-        check=True,
-        capture_output=capture,
+        check=False,
+        capture_output=True,
         text=True,
     )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"ssh {host} command failed with exit {result.returncode}{suffix}")
     return result.stdout.strip() if capture else ""
 
 
 def remote_path_readable(host: str, path: Path) -> bool:
-    result = subprocess.run(["ssh", host, "test", "-r", str(path)], check=False)
+    result = subprocess.run(["ssh", host, f"test -r {shlex.quote(str(path))}"], check=False)
     return result.returncode == 0
 
 
@@ -288,6 +295,17 @@ def remote_rsync_from(host: str, remote_path: str, local_path: Path) -> None:
 
 def remote_rsync_to(local_path: Path, host: str, remote_path: str) -> None:
     subprocess.run(["rsync", "-a", str(local_path), f"{host}:{remote_path}"], check=True)
+
+
+def remote_resolve_demucs_bin(host: str, demucs_bin: str) -> str:
+    if demucs_bin == "demucs":
+        command = "command -v demucs || { test -x \"$HOME/slime-audio-demucs-venv/bin/demucs\" && printf '%s\\n' \"$HOME/slime-audio-demucs-venv/bin/demucs\"; }"
+        resolved = remote_shell(host, command, capture=True)
+        if not resolved:
+            raise RuntimeError("demucs not found on remote PATH or ~/slime-audio-demucs-venv/bin/demucs")
+        return resolved.splitlines()[0]
+    remote_shell(host, f"command -v {shlex.quote(demucs_bin)} >/dev/null")
+    return demucs_bin
 
 
 def run_remote_demucs(
@@ -304,6 +322,7 @@ def run_remote_demucs(
     mktemp_command = f"mktemp -d {shlex.quote(str(Path(remote_workdir) / template))}" if remote_workdir else "mktemp -d"
     remote_temp = remote_shell(host, mktemp_command, capture=True)
     try:
+        remote_demucs_bin = remote_resolve_demucs_bin(host, demucs_bin)
         if remote_path_readable(host, source_path):
             remote_source = str(source_path)
         else:
@@ -312,7 +331,7 @@ def run_remote_demucs(
         remote_output = f"{remote_temp}/out"
         command = " ".join(
             [
-                shlex.quote(demucs_bin),
+                shlex.quote(remote_demucs_bin),
                 "-n",
                 shlex.quote(model),
                 "-j",
@@ -342,16 +361,26 @@ def run_demucs(
     remote_workdir: str | None = None,
 ) -> Path:
     if demucs_host:
-        return run_remote_demucs(
-            source_path,
-            temp_dir,
-            host=demucs_host,
-            demucs_bin=demucs_bin,
-            model=model,
-            jobs=jobs,
-            remote_workdir=remote_workdir,
-        )
+        errors: list[str] = []
+        for host in parse_demucs_hosts(demucs_host):
+            try:
+                return run_remote_demucs(
+                    source_path,
+                    temp_dir,
+                    host=host,
+                    demucs_bin=demucs_bin,
+                    model=model,
+                    jobs=jobs,
+                    remote_workdir=remote_workdir,
+                )
+            except Exception as exc:
+                errors.append(f"{host}: {exc.__class__.__name__}: {exc}")
+        raise RuntimeError("remote Demucs failed on all hosts: " + "; ".join(errors))
     return run_local_demucs(source_path, temp_dir, demucs_bin=demucs_bin, model=model, jobs=jobs)
+
+
+def parse_demucs_hosts(value: str) -> list[str]:
+    return [host.strip() for host in value.split(",") if host.strip()]
 
 
 def write_manifest(path: Path, identity: TrackIdentity, audio: dict[str, Any], stem_metrics: dict[str, dict[str, Any]]) -> None:
@@ -592,7 +621,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     split = sub.add_parser("split")
     split.add_argument("track")
     split.add_argument("--demucs-bin", default="demucs")
-    split.add_argument("--demucs-host", default=DEFAULT_DEMUCS_HOST, help="SSH host that runs Demucs. Defaults to SLIME_AUDIO_DEMUCS_HOST or squidward@patrick.")
+    split.add_argument(
+        "--demucs-host",
+        default=DEFAULT_DEMUCS_HOSTS,
+        help="Comma-separated SSH host list that runs Demucs. Defaults to SLIME_AUDIO_DEMUCS_HOSTS, SLIME_AUDIO_DEMUCS_HOST, or patrick then robokrabs.",
+    )
     split.add_argument("--local-demucs", action="store_true", help="Run Demucs on this machine instead of over SSH.")
     split.add_argument("--remote-workdir", help="Remote parent directory for temporary Demucs work.")
     split.add_argument("--jobs", type=int, default=1)

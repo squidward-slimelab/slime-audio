@@ -5,6 +5,7 @@ import argparse
 from datetime import datetime
 import json
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -29,8 +30,8 @@ DEFAULT_ACTIVE_STREAM_STATE = REPO_ROOT / "runtime" / "active-stream-state.json"
 DEFAULT_DJ_PAUSE_FILE = REPO_ROOT / "runtime" / "dj-watchdog.paused"
 
 
-def default_snapcast_fifo_path() -> Path:
-    return Path(f"/tmp/slime-audio-snapfifo-{os.getpid()}")
+def system_snapcast_fifo_path() -> Path:
+    return Path("/tmp/snapfifo")
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,11 @@ def format_diagnostics(
     last_packet_ms = float(diagnostics.get("LastPacketUnixTimeMs") or 0)
     receiver_now_ms = now_ms + clock_offset_ms
     last_packet_age_ms = max(0.0, receiver_now_ms - last_packet_ms) if last_packet_ms else 0.0
+    def format_bool_field(name: str) -> str:
+        if name not in diagnostics:
+            return "unknown"
+        return str(bool(diagnostics.get(name))).lower()
+
     return (
         f"diag_sessions={diagnostics.get('ActiveSessions', 0)}"
         f"\tdiag_packets={diagnostics.get('ReceivedPackets', 0)}"
@@ -80,6 +86,11 @@ def format_diagnostics(
         f"\tshared_stream_last_stderr_ms={diagnostics.get('SharedStreamLastStderrUnixTimeMs', 0)}"
         f"\tshared_stream_uptime_ms={diagnostics.get('SharedStreamUptimeMs', 0)}"
         f"\tshared_stream_reconnect_attempts={diagnostics.get('SharedStreamReconnectAttempts', 0)}"
+        f"\tshared_stream_snapserver_ok={format_bool_field('SharedStreamSnapserverOk')}"
+        f"\tshared_stream_snapserver_error={diagnostics.get('SharedStreamSnapserverError') or ''}"
+        f"\tshared_stream_client_connected={format_bool_field('SharedStreamSnapserverClientConnected')}"
+        f"\tshared_stream_client_stream={diagnostics.get('SharedStreamSnapserverClientStream') or ''}"
+        f"\tshared_stream_server_stream_status={diagnostics.get('SharedStreamSnapserverStreamStatus') or ''}"
         f"\ttelemetry_path={diagnostics.get('SharedStreamTelemetryPath') or ''}"
         f"\toutput_device={diagnostics.get('SharedStreamOutputDevice') or 'default'}"
         f"\toutput_devices={','.join(diagnostics.get('SharedStreamOutputDevices') or [])}"
@@ -197,13 +208,6 @@ def require_ffplay() -> str:
     return ffplay
 
 
-def require_snapserver() -> str:
-    snapserver = shutil.which("snapserver")
-    if snapserver is None:
-        raise FileNotFoundError("snapserver is not installed")
-    return snapserver
-
-
 def snapserver_status(control_port: int = 1705, timeout_s: float = 1.0) -> dict:
     with socket.create_connection(("127.0.0.1", control_port), timeout=timeout_s) as sock:
         sock.sendall(b'{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}\n')
@@ -217,21 +221,6 @@ def snapserver_status(control_port: int = 1705, timeout_s: float = 1.0) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
-def tcp_port_accepts(port: int, host: str = "127.0.0.1", timeout_s: float = 0.2) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            return True
-    except OSError:
-        return False
-
-
-def ensure_snapcast_ports_free(stream_port: int, control_port: int = 1705) -> None:
-    busy = [port for port in (control_port, stream_port) if tcp_port_accepts(port)]
-    if busy:
-        ports = ", ".join(str(port) for port in busy)
-        raise RuntimeError(f"snapcast port already in use before startup: {ports}")
-
-
 def snapserver_stream_ids(status: dict) -> set[str]:
     server = (status.get("result") or {}).get("server") or {}
     stream_ids: set[str] = set()
@@ -240,33 +229,6 @@ def snapserver_stream_ids(status: dict) -> set[str]:
         if stream_id:
             stream_ids.add(str(stream_id))
     return stream_ids
-
-
-def wait_for_snapserver_ready(
-    process: subprocess.Popen[bytes],
-    *,
-    control_port: int = 1705,
-    stream_id: str = "slime-audio",
-    timeout_s: float = 3.0,
-) -> dict:
-    deadline = time.monotonic() + timeout_s
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            raise subprocess.CalledProcessError(process.returncode or 1, "snapserver")
-        try:
-            status = snapserver_status(control_port=control_port)
-            stream_ids = snapserver_stream_ids(status)
-            if stream_id in stream_ids:
-                return status
-            last_error = RuntimeError(f"snapserver missing stream {stream_id!r}; streams={sorted(stream_ids)}")
-        except Exception as exc:
-            last_error = exc
-        time.sleep(0.1)
-    if process.poll() is not None:
-        raise subprocess.CalledProcessError(process.returncode or 1, "snapserver")
-    detail = f": {last_error}" if last_error is not None else ""
-    raise RuntimeError(f"snapserver did not become ready on control port {control_port}{detail}")
 
 
 def connected_snapclient_ids(status: dict) -> set[str]:
@@ -578,93 +540,60 @@ def run_snapcast_stream(
     input_path: Path,
     targets: list[Receiver],
     fifo_path: Path,
-    port: int,
     sample_rate: int,
     channels: int,
-    buffer_ms: int,
     delay_ms: int,
     start_offset_ms: int = 0,
     on_ready: Callable[[], None] | None = None,
+    control_port: int = 1705,
+    stream_id: str = "default",
 ) -> None:
-    try:
-        fifo_path.unlink()
-    except FileNotFoundError:
-        pass
-    ensure_snapcast_ports_free(port)
-    os.mkfifo(fifo_path)
-    server = subprocess.Popen(
-        [
-            require_snapserver(),
-            "--config",
-            "/dev/null",
-            "--server.datadir",
-            "/tmp/slime-audio-snapserver",
-            "--http.enabled",
-            "false",
-            "--tcp.enabled",
-            "true",
-            "--tcp.port",
-            "1705",
-            "--stream.port",
-            str(port),
-            "--stream.buffer",
-            str(buffer_ms),
-            "--stream.source",
-            f"pipe://{fifo_path}?name=slime-audio&sampleformat={sample_rate}:16:{channels}&codec=flac",
-            "--logging.sink",
-            "stderr",
-            "--logging.filter",
-            "*:warning",
-        ],
-    )
+    status = snapserver_status(control_port=control_port)
+    stream_ids = snapserver_stream_ids(status)
+    if stream_id not in stream_ids:
+        raise RuntimeError(f"system snapserver missing stream {stream_id!r}; streams={sorted(stream_ids)}")
+    if not fifo_path.exists():
+        raise FileNotFoundError(f"system snapserver fifo does not exist: {fifo_path}")
+    if not stat_is_fifo(fifo_path):
+        raise RuntimeError(f"system snapserver fifo is not a fifo: {fifo_path}")
 
-    try:
-        wait_for_snapserver_ready(server, control_port=1705)
-        send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
-        wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=1705)
-        time.sleep(max(delay_ms, 0) / 1000)
-        if on_ready is not None:
-            on_ready()
-        try:
-            with fifo_path.open("wb") as fifo:
-                seek_args = ["-ss", f"{start_offset_ms / 1000:.3f}"] if start_offset_ms > 0 else []
-                subprocess.run(
-                    [
-                        require_ffmpeg(),
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-re",
-                        *seek_args,
-                        "-i",
-                        str(input_path),
-                        "-vn",
-                        "-f",
-                        "s16le",
-                        "-acodec",
-                        "pcm_s16le",
-                        "-ac",
-                        str(channels),
-                        "-ar",
-                        str(sample_rate),
-                        "pipe:1",
-                    ],
-                    stdout=fifo,
-                    check=True,
-                )
-        finally:
-            try:
-                fifo_path.unlink()
-            except FileNotFoundError:
-                pass
-    finally:
-        if server.poll() is None:
-            server.terminate()
-            try:
-                server.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                server.kill()
-                server.wait(timeout=5)
+    send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
+    wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=control_port)
+    time.sleep(max(delay_ms, 0) / 1000)
+    if on_ready is not None:
+        on_ready()
+
+    seek_args = ["-ss", f"{start_offset_ms / 1000:.3f}"] if start_offset_ms > 0 else []
+    ffmpeg_cmd = [
+        require_ffmpeg(),
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-re",
+        *seek_args,
+        "-i",
+        str(input_path),
+        "-vn",
+        "-f",
+        "s16le",
+        "-acodec",
+        "pcm_s16le",
+        "-ac",
+        str(channels),
+        "-ar",
+        str(sample_rate),
+        str(fifo_path),
+    ]
+    fifo_stat = os.stat(fifo_path)
+    if fifo_stat.st_uid != os.geteuid():
+        fifo_owner = pwd.getpwuid(fifo_stat.st_uid).pw_name
+        ffmpeg_cmd = ["sudo", "-n", "-u", fifo_owner, *ffmpeg_cmd]
+    subprocess.run(ffmpeg_cmd, check=True)
+
+
+def stat_is_fifo(path: Path) -> bool:
+    return path.exists() and os.stat(path).st_mode & 0o170000 == 0o010000
 
 
 def send_control(targets: list[Receiver], payload: bytes, label: str) -> None:
@@ -724,8 +653,6 @@ def main() -> int:
     parser.add_argument("--mode", choices=["multicast", "snapcast"], default="snapcast")
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
-    parser.add_argument("--snapcast-port", type=int, default=1704)
-    parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
     parser.add_argument("--snapcast-fifo", type=Path, default=None)
     parser.add_argument("--delay-ms", type=int, default=DEFAULT_LIVE_DELAY_MS)
     parser.add_argument("--sample-rate", type=int, default=48000)
@@ -763,7 +690,7 @@ def main() -> int:
     parser.add_argument("--no-active-pointer", action="store_true", help="Do not publish this playback to the dashboard active pointer.")
     args = parser.parse_args()
     if args.snapcast_fifo is None:
-        args.snapcast_fifo = default_snapcast_fifo_path()
+        args.snapcast_fifo = system_snapcast_fifo_path()
 
     control_count = sum(
         1
@@ -808,7 +735,7 @@ def main() -> int:
         if args.mode == "multicast":
             print(f"multicast {args.multicast_group}:{args.multicast_port}")
         elif args.mode == "snapcast":
-            print(f"snapcast port={args.snapcast_port} fifo={args.snapcast_fifo}")
+            print(f"snapcast fifo={args.snapcast_fifo}")
         return 0
 
     if args.start_listeners:
@@ -918,7 +845,7 @@ def main() -> int:
     if args.mode == "snapcast":
         print(
             f"snapcast backend={args.backend} file={args.file} "
-            f"port={args.snapcast_port} targets={len(targets)}",
+            f"fifo={args.snapcast_fifo} targets={len(targets)}",
             flush=True,
         )
         try:
@@ -926,10 +853,8 @@ def main() -> int:
                 args.file,
                 targets,
                 args.snapcast_fifo,
-                args.snapcast_port,
                 args.sample_rate,
                 args.channels,
-                args.snapcast_buffer_ms,
                 args.delay_ms,
                 args.start_offset_ms,
                 on_ready=publish_ready_stream,

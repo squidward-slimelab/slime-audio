@@ -3,7 +3,6 @@ import signal
 import sys
 import tempfile
 import unittest
-from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -44,6 +43,40 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
             session = runner.load_session(session_path)
 
         self.assertEqual([clip.id for clip in runner.clips_in_window(session, 10_000, 30_000)], ["a", "b"])
+
+    def test_window_selects_overlapping_stem_groups(self):
+        stems = {
+            "vocals": {"path": "/stems/vocals.wav"},
+            "drums": {"path": "/stems/drums.wav"},
+            "bass": {"path": "/stems/bass.wav"},
+            "other": {"path": "/stems/other.wav"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "stem-bed",
+                                "deck": "deck-1",
+                                "source_path": "/music/stem-bed.flac",
+                                "at_ms": 0,
+                                "duration_ms": 60_000,
+                                "stems": stems,
+                                "play_stems": ["drums", "bass", "other"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = runner.load_session(session_path)
+
+        self.assertEqual([clip.id for clip in runner.clips_in_window(session, 10_000, 30_000)], ["stem-bed"])
 
     def test_dry_run_renders_session_window_from_state_playhead(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -96,6 +129,52 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertIn("runner_started_at", state)
         self.assertIn("runner_updated_at", state)
 
+    def test_single_window_renders_from_playhead_to_session_end(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            state_path = temp / "state.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000},
+                            {"id": "b", "deck": "deck-1", "path": "/music/b.flac", "start": 25_000, "duration": 20_000},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(json.dumps({"playhead_ms": 25_000}), encoding="utf-8")
+            args = runner.parse_args_from(
+                [
+                    "--session",
+                    str(session_path),
+                    "--state",
+                    str(state_path),
+                    "--window-ms",
+                    "10000",
+                    "--single-window",
+                    "--target",
+                    "all",
+                    "--dry-run",
+                ]
+            )
+
+            with patch.object(runner, "render_window", wraps=runner.render_window) as render:
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(runner.run_session(args), 0)
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(state["window_start_ms"], 25_000)
+        self.assertEqual(state["window_end_ms"], 45_000)
+        render.assert_called_once()
+        self.assertEqual(render.call_args.args[1], 25_000)
+        self.assertEqual(render.call_args.args[2], 20_000)
+
     def test_pause_file_blocks_runner_before_active_pointer_or_state_write(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -142,8 +221,16 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         self.assertIn("--mode", command)
         self.assertEqual(command[command.index("--mode") + 1], "snapcast")
         self.assertEqual(command[command.index("--delay-ms") + 1], "0")
+        self.assertIn("--no-active-pointer", command)
 
-    def test_no_persistent_snapcast_uses_window_stream_command(self):
+    def test_stream_command_passes_ignore_pause_to_child_stream(self):
+        args = runner.parse_args_from(["--target", "all", "--mode", "snapcast", "--ignore-pause"])
+
+        command = runner.stream_command(args, Path("/tmp/window.wav"))
+
+        self.assertIn("--ignore-pause", command)
+
+    def test_snapcast_uses_window_stream_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             session_path = temp / "session.json"
@@ -173,7 +260,6 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                     "SPONGEBOT",
                     "--mode",
                     "snapcast",
-                    "--no-persistent-snapcast",
                     "--window-ms",
                     "10000",
                 ]
@@ -230,7 +316,6 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                     "SPONGEBOT",
                     "--mode",
                     "snapcast",
-                    "--no-persistent-snapcast",
                     "--window-ms",
                     "10000",
                 ]
@@ -413,65 +498,10 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
             finally:
                 prepared.cleanup()
 
-    def test_persistent_snapcast_keeps_fifo_alive_between_window_writers(self):
-        args = Namespace(
-            snapcast_fifo=Mock(),
-            channels=2,
-            sample_rate=48_000,
-        )
-        first_handle = Mock()
-        second_handle = Mock()
-        args.snapcast_fifo.open.side_effect = [first_handle, second_handle]
-        snapcast = runner.PersistentSnapcast(args)
-        snapcast.fifo_keepalive_fd = 10
-
-        with patch.object(runner, "require_ffmpeg", return_value="ffmpeg"):
-            with patch.object(runner.subprocess, "Popen") as popen:
-                popen.return_value = Mock()
-                first = snapcast.start_window(Path("/tmp/a.wav"))
-                second = snapcast.start_window(Path("/tmp/b.wav"))
-
-        self.assertEqual(args.snapcast_fifo.open.call_count, 2)
-        self.assertEqual(popen.call_count, 2)
-        self.assertIs(first.handle, first_handle)
-        self.assertIs(second.handle, second_handle)
-        self.assertEqual(popen.call_args_list[0].kwargs["stdout"], first_handle)
-        self.assertEqual(popen.call_args_list[1].kwargs["stdout"], second_handle)
-
-    def test_default_snapcast_fifo_is_process_scoped(self):
+    def test_snapcast_fifo_defaults_to_system_fifo(self):
         args = runner.parse_args_from(["--target", "all", "--dry-run"])
 
-        self.assertEqual(args.snapcast_fifo.name, f"slime-audio-snapfifo-{runner.os.getpid()}")
-
-    def test_fifo_keepalive_waits_for_snapserver_reader(self):
-        path = Path("/tmp/slime-test-fifo")
-        not_ready = OSError()
-        not_ready.errno = runner.errno.ENXIO
-
-        with patch.object(runner.os, "open", side_effect=[not_ready, 11, 12]) as open_fifo:
-            with patch.object(runner.os, "close") as close:
-                with patch.object(runner.time, "sleep") as sleep:
-                    with patch.object(runner.time, "monotonic", side_effect=[0.0, 0.1]):
-                        self.assertEqual(runner.open_fifo_writer_when_reader_ready(path), 12)
-
-        self.assertEqual(open_fifo.call_count, 3)
-        close.assert_called_once_with(11)
-        sleep.assert_called_once_with(0.05)
-
-    def test_fifo_keepalive_closes_bootstrap_on_timeout(self):
-        path = Path("/tmp/slime-test-fifo")
-        not_ready = OSError()
-        not_ready.errno = runner.errno.ENXIO
-
-        with patch.object(runner.os, "open", side_effect=[not_ready, 11, not_ready]) as open_fifo:
-            with patch.object(runner.os, "close") as close:
-                with patch.object(runner.time, "sleep"):
-                    with patch.object(runner.time, "monotonic", side_effect=[0.0, 0.1, 10.0]):
-                        with self.assertRaises(OSError):
-                            runner.open_fifo_writer_when_reader_ready(path)
-
-        self.assertEqual(open_fifo.call_count, 3)
-        close.assert_called_once_with(11)
+        self.assertEqual(args.snapcast_fifo, Path("/tmp/snapfifo"))
 
 
 if __name__ == "__main__":

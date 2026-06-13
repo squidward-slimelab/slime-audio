@@ -16,7 +16,15 @@ The live runner updates `runtime/active-set.json` when real playback starts, inc
 
 ## Session Model
 
-Sessions use absolute mix timestamps. Clips can overlap across up to four decks, and each clip can have trim, gain, EQ, filters, tempo/pitch changes, reverse/playback-rate flags, fades, and routine metadata.
+The authoring model is time-based performance actions. Treat `clips` and `stem_groups` as renderable session data, not the editing primitive. New DJ edits should be expressed as actions such as `load_track`, `set_cue`, `jump_to_cue`, `pause`, `play`, `cue`, `seek`, `loop_start`, `loop_exit`, `stem_toggle`, and `knob_lerp`, then compiled into renderable `stem_groups`, clips, and automations.
+
+There is no manual clip-drop command. Loading music starts with `load_track`, which resolves to real `vocals`, `drums`, `bass`, and `other` stem slots for the conceptual deck load. If an added `load_track` action does not already include stem paths, `add-action` pre-generates or reuses ready stem artifacts before saving the action so playback never waits on Demucs at load time.
+
+Actions use absolute mix timestamps, but each loaded deck also has a deck clock. A `load_track` starts that deck clock at `trim_start_ms`; `set_cue` stores named source positions for that loaded track; `jump_to_cue` ends the current deck-clock segment and resumes the same conceptual load from the cue at the jump time; `pause` closes the audible deck segment and parks the source position; `play` resumes a parked deck or starts from an explicit cue/position; `cue` and `cue_seek` park a deck at a source cue without playing; `seek` jumps and resumes immediately unless `"play": false` is set; `loop_start` repeats a source-clock window until its exit time, then resumes the deck clock after the source loop window. When a load has `tempo_shift_pct`, loop `length_ms` remains source-clock length and the compiler converts it to rendered deck-clock duration; planners must quantize `exit_ms` to whole rendered loop repeats so the final loop is not a partial off-phrase tail. The compiler materializes those deck-clock moves into renderable stem-group segments while preserving the source action id. Transport targets can be a load id or a deck name.
+
+Do not rely on implicit auto-crossfades. Autodj and the mix planner default to hard cuts/no overlap; crossfader movement, overlap blends, and long fades must be explicit performance actions or named routines with a musical reason. Protective click fades are fine when authored intentionally, but hidden default handoff fades are not.
+
+Sessions still support render-output clips and stem groups. Clips can overlap across up to four decks, and each clip can have trim, gain, EQ, filters, tempo/pitch changes, reverse/playback-rate flags, fades, and routine metadata.
 
 Common clip controls:
 
@@ -27,7 +35,7 @@ Common clip controls:
 - `gain_db` is static clip placement.
 - Top-level `deck_automations` targeted to `deck-1`, `deck-2`, `deck-3`, `deck-4`, or `deck-5` are the canonical channel fader and knob moves. Use deck `gain_db` for fader moves, deck `eq_low_db`/`eq_mid_db`/`eq_high_db` for EQ, and deck `lowpass_hz`/`highpass_hz` for filters. Mixdown resolves those absolute-timeline points onto the clip currently occupying that deck.
 - Clip-targeted `gain_db` automation is reserved for clip-local gates/replacement moves, not normal deck fader state.
-- `tempo_shift_pct` and `pitch_shift_semitones` are rendered beat/key correction controls. Keep them conservative and intentional.
+- `tempo_shift_pct` and `pitch_shift_semitones` are rendered beat/key correction controls. Keep them conservative and intentional. For overlapped full-track loads, key-fit must use full-track DB/TuneBat key metadata. Convert minor keys to their relative major by moving up 3 semitones, then pitch-shift the incoming load by the shortest semitone distance to the current load. If a song is missing full-track key metadata, run analysis and populate the DB before layering it. Only non-song drops/effects can bypass harmonic key metadata, and they should not be treated as full-track musical layers. Excessive required shifts mean the decks should not overlap.
 - `reverse`, `playback_rate`, and `scratch_motion` are record-motion/scratch controls where speed and pitch move together.
 
 Stem-heavy sessions can add top-level `stem_groups`. A stem group is one conceptual deck event with child `vocals`, `drums`, `bass`, and `other` streams that share timing, trim, tempo, pitch, reverse/rate, deck automation, and crossfader routing. Use this for vocal hooks, acapellas, and bass-controlled doubles instead of pretending full-band EQ is a real stem split. Details live in [Stem management](stem-management.md).
@@ -51,7 +59,13 @@ python3 scripts/slime_audio_session.py summary runtime/mix-session.json
 Make safe live edits against the active session:
 
 ```bash
-python3 scripts/slime_audio_live_edit.py add-clip --id break-loop --deck deck-1 --path /mnt/rockhouse/Music/example.flac --start 01:12.000 --trim-start 02:04.000 --duration 00:32.000 --trim-db -3 --gain-db -6 --reason "add future bed"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"load_track","id":"break-load","deck":"deck-1","source_path":"/mnt/rockhouse/Music/example.flac","at":"01:12.000","trim_start":"02:04.000","duration":"00:32.000","play_stems":["drums","bass","other"]}' --reason "load future bed"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"set_cue","target":"break-load","cue_id":"drop","position":"02:36.000","at":"01:13.000"}' --reason "name incoming drop"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"jump_to_cue","target":"break-load","cue_id":"drop","at":"01:28.000"}' --reason "jump deck clock to drop"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"pause","id":"pause-break","target":"deck-1","at":"01:36.000"}' --reason "park deck for repair"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"play","id":"resume-break","target":"deck-1","at":"01:40.000"}' --reason "resume parked deck"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"seek","id":"seek-break-hook","target":"break-load","position":"03:08.000","at":"01:42.000"}' --reason "skip to hook"
+python3 scripts/slime_audio_live_edit.py add-action --action-json '{"type":"loop_start","target":"break-load","at":"01:44.000","position":"02:48.000","length":"00:04.000","exit":"01:52.000"}' --reason "hold 1-bar rhythm loop"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]' --reason "shape bed entrance"
 python3 scripts/slime_audio_live_edit.py fader-routing --assign deck-1=A --assign deck-3=A --assign deck-2=B --assign deck-4=B --assign deck-5=THRU --reason "DDJ-style routing plus vocal lane"
 python3 scripts/slime_audio_live_edit.py crossfader --points-json '[{"at_ms":84000,"value":-1},{"at_ms":88000,"value":1}]' --reason "planned fader cut"
@@ -91,7 +105,7 @@ python3 scripts/slime_audio_mix_planner.py --session runtime/mix-session.json --
 
 The planner can add phrase-aware overlays, drop doubles, rendered tempo/key correction, transition automation, and top-level `transition_plans` explaining each adjacent-pair decision. For live repair passes, add `--cached-analysis-only --horizon-ms 1200000` so the planner only uses existing DB analysis and touches a bounded future block. A straight playlist import is not a finished DJ set.
 
-For overlapping transitions, key fit is the default target. Use TuneBat-backed DB metadata where available, prefer exact same-key or relative major/minor compatible overlaps, and use conservative rendered correction only when it makes the overlap better. Unsafe transitions should remain hard cuts.
+For overlapping transitions, key fit is the default target. Use TuneBat-backed DB metadata where available, prefer exact same-key or relative major/minor compatible overlaps, and use conservative rendered correction only when it makes the overlap better. If song key metadata is missing, run the analyzer first. Unsafe transitions should remain hard cuts.
 
 Before the planner runs, selection needs a taste pass:
 

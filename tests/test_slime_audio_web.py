@@ -14,6 +14,83 @@ import slime_audio_sets as sets
 
 
 class SlimeAudioWebTests(unittest.TestCase):
+    def test_dashboard_labels_transport_actions(self):
+        actions = [
+            {"type": "pause", "id": "pause-lead", "target": "deck-1", "at_ms": 8_000},
+            {"type": "play", "id": "play-lead", "target": "deck-1", "cue_id": "drop", "at_ms": 12_000},
+            {"type": "seek", "id": "seek-lead", "target": "lead-load", "position_ms": 48_000, "at_ms": 16_000},
+            {"type": "cue_seek", "id": "park-lead", "target": "lead-load", "cue_id": "outro", "at_ms": 20_000},
+        ]
+
+        metas = [web.display_meta_for_event(web.session_action_event(action)) for action in actions]
+
+        self.assertEqual(
+            metas,
+            [
+                "pause | deck-1",
+                "play | deck-1 | drop",
+                "seek | lead-load | 48000",
+                "cue_seek | lead-load | outro",
+            ],
+        )
+
+    def test_dashboard_surfaces_actions_and_compiled_stem_groups(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-1"],
+            "actions": [
+                {
+                    "type": "load_track",
+                    "id": "lead-load",
+                    "deck": "deck-1",
+                    "source_path": "/music/Artist/Album/lead.flac",
+                    "at_ms": 1_000,
+                    "duration_ms": 8_000,
+                    "tempo_shift_pct": 2.5,
+                    "pitch_shift_semitones": -1,
+                    "stem_set_id": "stem-a",
+                    "manifest_path": "/stems/stem-a/manifest.json",
+                    "play_stems": ["drums", "bass", "other"],
+                    "stems": {
+                        "vocals": {"path": "/stems/stem-a/vocals.wav", "enabled": False},
+                        "drums": {"path": "/stems/stem-a/drums.wav", "enabled": True},
+                        "bass": {"path": "/stems/stem-a/bass.wav", "enabled": True},
+                        "other": {"path": "/stems/stem-a/other.wav", "enabled": True},
+                    },
+                },
+                {
+                    "type": "knob_lerp",
+                    "id": "lead-filter-open",
+                    "target": "deck-1",
+                    "param": "lowpass_hz",
+                    "at_ms": 1_000,
+                    "duration_ms": 4_000,
+                    "from": 900,
+                    "to": 1800,
+                },
+                {"type": "stem_toggle", "id": "lead-vocal-in", "target": "lead-load", "stem": "vocals", "at_ms": 4_000, "enabled": True},
+            ],
+        }
+
+        events = [web.normalize_event(event, 2_000) for event in web.session_events(payload)]
+        lanes = web.lane_rows(events)
+        counts = {}
+        for event in events:
+            counts[event["kind"]] = counts.get(event["kind"], 0) + 1
+
+        action = next(event for event in events if event["kind"] == "action" and event["id"] == "lead-load")
+        stem_group = next(event for event in events if event["kind"] == "stem-group")
+        automation = next(event for event in events if event["kind"] == "automation" and event["param"] == "lowpass_hz")
+
+        self.assertEqual(action["lane"], "actions")
+        self.assertEqual(action["display_meta"], "load_track | deck-1 | play drums, bass, other | stems ready stem-a | tempo 2.5%, pitch -1 st")
+        self.assertEqual(stem_group["source_action_id"], "lead-load")
+        self.assertEqual(stem_group["lane"], "deck-1")
+        self.assertEqual(automation["lane"], "deck-1")
+        self.assertEqual(counts["action"], 3)
+        self.assertEqual(counts["stem-group"], 1)
+        self.assertEqual([lane["id"] for lane in lanes[:2]], ["actions", "deck-3"])
+
     def test_session_events_include_stem_groups(self):
         events = web.session_events(
             {
@@ -26,6 +103,8 @@ class SlimeAudioWebTests(unittest.TestCase):
                         "source_path": "/music/source.flac",
                         "start": 1_000,
                         "duration": 8_000,
+                        "tempo_shift_pct": 2.5,
+                        "pitch_shift_semitones": -1,
                         "stems": {
                             "vocals": {"enabled": True, "gain_db": -3, "path": "/stems/vocals.wav", "solo": True},
                             "drums": {"enabled": True, "path": "/stems/drums.wav"},
@@ -42,6 +121,7 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(stem_event["id"], "stem-hook")
         self.assertEqual(stem_event["stems"]["vocals"]["gain_db"], -3)
         self.assertEqual([item["state"] for item in stem_event["stem_indicators"]], ["solo", "suppressed", "muted", "disabled"])
+        self.assertEqual(web.normalize_event(stem_event, None)["display_meta"], "stem deck | vocals solo, drums, bass muted | tempo 2.5%, pitch -1 st")
 
     def test_session_dashboard_includes_now_and_timeline(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -564,6 +644,47 @@ class SlimeAudioWebTests(unittest.TestCase):
 
         self.assertEqual(health["runner_state"], "dead")
         self.assertFalse(health["stream_process_alive"])
+
+    def test_dashboard_marks_snapcast_stream_dead_when_control_is_missing(self):
+        with patch.object(web, "stream_process_alive", return_value=True):
+            with patch.object(web, "snapcast_stream_health", return_value={"control_alive": False, "error": "refused"}):
+                health = web.runner_health(
+                    {
+                        "runner_status": "streaming",
+                        "stream_mode": "snapcast",
+                        "stream_pid": 456,
+                        "current": "/music/render.mp3",
+                    },
+                    {"status": "playing", "stale": False},
+                )
+
+        self.assertEqual(health["runner_state"], "dead")
+        self.assertEqual(health["snapcast"]["error"], "refused")
+
+    def test_dashboard_accepts_snapcast_stream_with_playing_control_status(self):
+        with patch.object(web, "stream_process_alive", return_value=True):
+            with patch.object(
+                web,
+                "snapcast_stream_health",
+                return_value={
+                    "control_alive": True,
+                    "stream_present": True,
+                    "stream_status": "playing",
+                    "connected_clients": 2,
+                },
+            ):
+                health = web.runner_health(
+                    {
+                        "runner_status": "streaming",
+                        "stream_mode": "snapcast",
+                        "stream_pid": 456,
+                        "current": "/music/render.mp3",
+                    },
+                    {"status": "playing", "stale": False},
+                )
+
+        self.assertEqual(health["runner_state"], "ok")
+        self.assertEqual(health["snapcast"]["connected_clients"], 2)
 
     def test_transport_status_surfaces_failed_stream(self):
         status = web.transport_status(

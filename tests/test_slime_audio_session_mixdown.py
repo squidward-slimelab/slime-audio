@@ -1,7 +1,12 @@
 import json
+import math
+import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 
 
@@ -20,10 +25,348 @@ from slime_audio_session_mixdown import (
     session_duration_ms,
     shift_session_window,
     spill_filter_complex_to_script,
+    stem_automation_windows,
+    stem_group_inputs,
 )
 
 
 class SlimeAudioSessionMixdownTests(unittest.TestCase):
+    def write_beep_track(self, path: Path, *, frequency_hz: float = 440.0, duration_s: float = 5.0, interval_s: float = 0.5) -> None:
+        sample_rate = 48_000
+        beep_s = 0.08
+        frame_count = int(duration_s * sample_rate)
+        interval_frames = int(interval_s * sample_rate)
+        beep_frames = int(beep_s * sample_rate)
+        samples = []
+        for index in range(frame_count):
+            in_beep = (index % interval_frames) < beep_frames
+            value = 0.0
+            if in_beep:
+                value = 0.55 * math.sin(2 * math.pi * frequency_hz * (index / sample_rate))
+            samples.append(struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767)))
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(sample_rate)
+            audio.writeframes(b"".join(samples))
+
+    def write_beatgrid_track(self, path: Path, *, bpm: float = 120.0, bars: int = 12) -> None:
+        sample_rate = 48_000
+        beat_s = 60.0 / bpm
+        beep_s = 0.05
+        beat_count = bars * 4
+        frame_count = int((beat_count * beat_s + 0.25) * sample_rate)
+        samples = []
+        for index in range(frame_count):
+            elapsed_s = index / sample_rate
+            beat_index = int(elapsed_s / beat_s)
+            beat_pos_s = elapsed_s - (beat_index * beat_s)
+            value = 0.0
+            if beat_index < beat_count and beat_pos_s < beep_s:
+                downbeat = beat_index % 4 == 0
+                frequency_hz = 880.0 if downbeat else 440.0
+                amplitude = 0.70 if downbeat else 0.45
+                value = amplitude * math.sin(2 * math.pi * frequency_hz * elapsed_s)
+            samples.append(struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767)))
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(sample_rate)
+            audio.writeframes(b"".join(samples))
+
+    def write_stem_beat_track(self, path: Path, *, frequency_hz: float, beat_offset: int, bpm: float = 120.0, bars: int = 8) -> None:
+        sample_rate = 48_000
+        beat_s = 60.0 / bpm
+        beep_s = 0.05
+        beat_count = bars * 4
+        frame_count = int((beat_count * beat_s + 0.25) * sample_rate)
+        samples = []
+        for index in range(frame_count):
+            elapsed_s = index / sample_rate
+            beat_index = int(elapsed_s / beat_s)
+            beat_pos_s = elapsed_s - (beat_index * beat_s)
+            value = 0.0
+            if beat_index < beat_count and beat_index % 4 == beat_offset and beat_pos_s < beep_s:
+                value = 0.55 * math.sin(2 * math.pi * frequency_hz * elapsed_s)
+            samples.append(struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767)))
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(1)
+            audio.setsampwidth(2)
+            audio.setframerate(sample_rate)
+            audio.writeframes(b"".join(samples))
+
+    def read_wav_samples(self, path: Path) -> tuple[int, list[float]]:
+        with wave.open(str(path), "rb") as audio:
+            channels = audio.getnchannels()
+            sample_rate = audio.getframerate()
+            frames = audio.readframes(audio.getnframes())
+        values = struct.unpack("<" + "h" * (len(frames) // 2), frames)
+        if channels > 1:
+            values = values[::channels]
+        return sample_rate, [value / 32768.0 for value in values]
+
+    def test_inactive_stem_group_does_not_fall_back_to_full_track(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "muted-preload",
+                                "deck": "deck-1",
+                                "source_path": "/music/full.flac",
+                                "at_ms": 0,
+                                "duration_ms": 10_000,
+                                "play_stems": [],
+                                "stems": {
+                                    "vocals": {"path": "/stems/vocals.wav"},
+                                    "drums": {"path": "/stems/drums.wav"},
+                                    "bass": {"path": "/stems/bass.wav"},
+                                    "other": {"path": "/stems/other.wav"},
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+        self.assertEqual(stem_group_inputs(session.stem_groups[0]), [])
+
+    def test_stem_toggle_points_render_as_persistent_mute_windows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "bass-preload",
+                                "deck": "deck-1",
+                                "source_path": "/music/full.flac",
+                                "at_ms": 0,
+                                "duration_ms": 10_000,
+                                "play_stems": ["bass"],
+                                "stems": {
+                                    "vocals": {"path": "/stems/vocals.wav"},
+                                    "drums": {"path": "/stems/drums.wav"},
+                                    "bass": {"path": "/stems/bass.wav"},
+                                    "other": {"path": "/stems/other.wav"},
+                                },
+                            },
+                            {"type": "stem_toggle", "id": "bass-muted", "target": "bass-preload", "stem": "bass", "at_ms": 0, "enabled": False},
+                            {"type": "stem_toggle", "id": "bass-live", "target": "bass-preload", "stem": "bass", "at_ms": 2_000, "enabled": True},
+                            {"type": "stem_toggle", "id": "bass-out", "target": "bass-preload", "stem": "bass", "at_ms": 8_000, "enabled": False},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            group = session.stem_groups[0]
+            stem = group.stems["bass"]
+
+        self.assertEqual([(name, path) for name, _stem, path, fallback in stem_group_inputs(group)], [("bass", "/stems/bass.wav")])
+        self.assertEqual(stem_automation_windows(session, group, "bass", stem, "mute"), [(0, 2_000, 1.0), (2_000, 8_000, 0.0), (8_000, 10_000, 1.0)])
+
+    def beep_centers_seconds(self, samples: list[float], sample_rate: int) -> list[float]:
+        frame_size = sample_rate // 100
+        rms = []
+        for offset in range(0, len(samples), frame_size):
+            chunk = samples[offset : offset + frame_size]
+            if not chunk:
+                continue
+            rms.append(math.sqrt(sum(value * value for value in chunk) / len(chunk)))
+        threshold = max(rms, default=0.0) * 0.35
+        centers = []
+        start = None
+        for index, value in enumerate(rms + [0.0]):
+            if value >= threshold and start is None:
+                start = index
+            elif value < threshold and start is not None:
+                centers.append(((start + index - 1) / 2) * (frame_size / sample_rate))
+                start = None
+        return centers
+
+    def dominant_frequency_hz(self, samples: list[float], sample_rate: int, center_s: float) -> float:
+        start = max(0, int((center_s - 0.03) * sample_rate))
+        end = min(len(samples), int((center_s + 0.03) * sample_rate))
+        window = samples[start:end]
+        crossings = 0
+        previous = window[0] if window else 0.0
+        for value in window[1:]:
+            if previous <= 0 < value or previous >= 0 > value:
+                crossings += 1
+            previous = value
+        duration_s = max(1e-9, len(window) / sample_rate)
+        return crossings / (2 * duration_s)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for render-level DSP tests")
+    def test_rendered_tempo_and_pitch_shifts_preserve_expected_beep_timing_and_frequency(self):
+        cases = [
+            ("tempo-only", 100.0, 0, 0.25, 440.0),
+            ("pitch-only", 0.0, 12, 0.50, 880.0),
+            ("tempo-and-pitch", 100.0, 12, 0.25, 880.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "beeps.wav"
+            self.write_beep_track(source)
+            for name, tempo_shift, pitch_shift, expected_interval, expected_frequency in cases:
+                with self.subTest(name=name):
+                    session_path = temp / f"{name}.json"
+                    output = temp / f"{name}.wav"
+                    session_path.write_text(
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "decks": ["deck-1"],
+                                "clips": [
+                                    {
+                                        "id": name,
+                                        "deck": "deck-1",
+                                        "path": str(source),
+                                        "start": 0,
+                                        "duration": 2000,
+                                        "tempo_shift_pct": tempo_shift,
+                                        "pitch_shift_semitones": pitch_shift,
+                                    }
+                                ],
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
+                    session = load_session(session_path)
+                    subprocess.run(ffmpeg_command(session, {}, output, 48_000, 1), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    sample_rate, samples = self.read_wav_samples(output)
+                    centers = self.beep_centers_seconds(samples, sample_rate)
+
+                    self.assertGreaterEqual(len(centers), 4)
+                    intervals = [right - left for left, right in zip(centers, centers[1:4])]
+                    mean_interval = sum(intervals) / len(intervals)
+                    frequency = self.dominant_frequency_hz(samples, sample_rate, centers[1])
+
+                    self.assertAlmostEqual(mean_interval, expected_interval, delta=0.035)
+                    self.assertAlmostEqual(frequency, expected_frequency, delta=35.0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for render-level beatgrid tests")
+    def test_rendered_tempo_and_pitch_shifts_preserve_long_synthetic_beatgrid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "beatgrid.wav"
+            output = temp / "shifted-grid.wav"
+            self.write_beatgrid_track(source, bpm=120.0, bars=12)
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "synthetic-grid",
+                                "deck": "deck-1",
+                                "path": str(source),
+                                "start": 0,
+                                "duration": 19_200,
+                                "tempo_shift_pct": 25.0,
+                                "pitch_shift_semitones": 7,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            subprocess.run(ffmpeg_command(session, {}, output, 48_000, 1), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            sample_rate, samples = self.read_wav_samples(output)
+            centers = self.beep_centers_seconds(samples, sample_rate)
+
+            self.assertGreaterEqual(len(centers), 44)
+            beat_intervals = [right - left for left, right in zip(centers[4:40], centers[5:41])]
+            expected_beat_s = 0.4
+            mean_beat_s = sum(beat_intervals) / len(beat_intervals)
+            max_drift_s = max(abs(interval - expected_beat_s) for interval in beat_intervals)
+            downbeat_centers = centers[::4]
+            downbeat_intervals = [right - left for left, right in zip(downbeat_centers[1:9], downbeat_centers[2:10])]
+            mean_downbeat_s = sum(downbeat_intervals) / len(downbeat_intervals)
+            downbeat_frequency = self.dominant_frequency_hz(samples, sample_rate, downbeat_centers[2])
+
+            self.assertAlmostEqual(mean_beat_s, expected_beat_s, delta=0.012)
+            self.assertLess(max_drift_s, 0.025)
+            self.assertAlmostEqual(mean_downbeat_s, expected_beat_s * 4, delta=0.025)
+            self.assertAlmostEqual(downbeat_frequency, 880.0 * (2 ** (7 / 12)), delta=55.0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for render-level stem DSP tests")
+    def test_rendered_stem_group_applies_tempo_and_pitch_shifts_to_every_attached_stem(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            stem_specs = {
+                "vocals": (220.0, 0),
+                "drums": (330.0, 1),
+                "bass": (440.0, 2),
+                "other": (550.0, 3),
+            }
+            stem_paths = {}
+            for stem_name, (frequency_hz, beat_offset) in stem_specs.items():
+                path = temp / f"{stem_name}.wav"
+                self.write_stem_beat_track(path, frequency_hz=frequency_hz, beat_offset=beat_offset)
+                stem_paths[stem_name] = path
+            output = temp / "shifted-stems.wav"
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "stem_groups": [
+                            {
+                                "id": "synthetic-stems",
+                                "deck": "deck-1",
+                                "source_path": str(temp / "source.wav"),
+                                "start": 0,
+                                "duration": 12_800,
+                                "tempo_shift_pct": 25.0,
+                                "pitch_shift_semitones": 7,
+                                "stems": {
+                                    stem_name: {"path": str(path)}
+                                    for stem_name, path in stem_paths.items()
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            subprocess.run(ffmpeg_command(session, {}, output, 48_000, 1), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            sample_rate, samples = self.read_wav_samples(output)
+            centers = self.beep_centers_seconds(samples, sample_rate)
+
+            self.assertGreaterEqual(len(centers), 28)
+            beat_intervals = [right - left for left, right in zip(centers[4:24], centers[5:25])]
+            expected_beat_s = 0.4
+            mean_beat_s = sum(beat_intervals) / len(beat_intervals)
+            max_drift_s = max(abs(interval - expected_beat_s) for interval in beat_intervals)
+            self.assertAlmostEqual(mean_beat_s, expected_beat_s, delta=0.012)
+            self.assertLess(max_drift_s, 0.025)
+
+            pitch_factor = 2 ** (7 / 12)
+            for index, (stem_name, (frequency_hz, _beat_offset)) in enumerate(stem_specs.items()):
+                with self.subTest(stem=stem_name):
+                    measured = self.dominant_frequency_hz(samples, sample_rate, centers[4 + index])
+                    self.assertAlmostEqual(measured, frequency_hz * pitch_factor, delta=35.0)
+
     def test_balance_audit_candidates_use_payload_planner_metadata(self):
         payload = {
             "clips": [
@@ -237,7 +580,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("highpass=f=180.000", filters)
         self.assertIn("adelay=2000:all=1", filters)
 
-    def test_stem_group_falls_back_to_source_when_stem_paths_missing(self):
+    def test_ffmpeg_command_does_not_deduplicate_repeated_stem_group_inputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
             session_path.write_text(
@@ -247,7 +590,49 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
                         "decks": ["deck-1"],
                         "stem_groups": [
                             {
-                                "id": "fallback",
+                                "id": "loop-a",
+                                "deck": "deck-1",
+                                "source_path": "/music/source.flac",
+                                "start": 0,
+                                "trim_start": 1_000,
+                                "duration": 4_000,
+                                "stems": {"drums": {"path": "/stems/drums.wav"}},
+                            },
+                            {
+                                "id": "loop-b",
+                                "deck": "deck-1",
+                                "source_path": "/music/source.flac",
+                                "start": 4_000,
+                                "trim_start": 1_000,
+                                "duration": 4_000,
+                                "stems": {"drums": {"path": "/stems/drums.wav"}},
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+            command = ffmpeg_command(session, {}, Path("/tmp/out.wav"), 48_000, 2)
+            filters = command[command.index("-filter_complex") + 1]
+
+        self.assertEqual(command.count("-i"), 2)
+        self.assertEqual(command.count("/stems/drums.wav"), 2)
+        self.assertIn("[0:a]atrim=start=1.000:duration=4.000", filters)
+        self.assertIn("[1:a]atrim=start=1.000:duration=4.000", filters)
+
+    def test_stem_group_does_not_fall_back_to_source_when_stem_paths_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "stem_groups": [
+                            {
+                                "id": "missing-stem",
                                 "deck": "deck-1",
                                 "source_path": "/music/source.flac",
                                 "start": 0,
@@ -264,7 +649,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
             command = ffmpeg_command(session, {}, Path("/tmp/out.wav"), 48_000, 2)
 
-        self.assertIn("/music/source.flac", command)
+        self.assertNotIn("/music/source.flac", command)
 
     def test_mixdown_filter_includes_lean_in_duck_and_lowpass(self):
         with tempfile.TemporaryDirectory() as temp_dir:

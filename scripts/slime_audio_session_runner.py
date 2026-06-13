@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
 import signal
@@ -16,17 +15,8 @@ from typing import Any
 from slime_audio_session import Clip, MixSession, load_session, parse_ms, playhead_ms_from_state
 from slime_audio_session_mixdown import session_duration_ms
 from slime_audio_stream import (
-    SHARED_STREAM_START_MESSAGE,
-    Receiver,
-    default_snapcast_fifo_path,
-    discover_receivers,
-    ensure_snapcast_ports_free,
     require_ffmpeg,
-    require_snapserver,
-    resolve_targets,
-    send_control,
-    wait_for_snapserver_ready,
-    wait_for_snapclients,
+    system_snapcast_fifo_path,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +25,7 @@ DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
 DEFAULT_ACTIVE_SET = REPO_ROOT / "runtime" / "active-set.json"
 DEFAULT_DJ_PAUSE_FILE = REPO_ROOT / "runtime" / "dj-watchdog.paused"
+DEFAULT_KOKORO_URL = os.environ.get("SLIME_AUDIO_KOKORO_URL", "http://robokrabs.tail4cb51.ts.net:7862")
 _active_stream: subprocess.Popen[bytes] | None = None
 
 
@@ -46,7 +37,7 @@ class PreparedWindow:
         output: Path,
         start_ms: int,
         end_ms: int,
-        active_clips: list[Clip],
+        active_clips: list[Any],
         render_command: list[str],
     ) -> None:
         self.temp = temp
@@ -71,100 +62,6 @@ class RunningWindow:
             if close is not None:
                 close()
             self.handle = None
-
-
-class PersistentSnapcast:
-    def __init__(self, args: argparse.Namespace) -> None:
-        self.args = args
-        self.targets: list[Receiver] = []
-        self.server: subprocess.Popen[bytes] | None = None
-        self.fifo_keepalive_fd: int | None = None
-
-    def start(self) -> None:
-        try:
-            self.args.snapcast_fifo.unlink()
-        except FileNotFoundError:
-            pass
-        ensure_snapcast_ports_free(self.args.snapcast_port)
-        os.mkfifo(self.args.snapcast_fifo)
-        self.server = subprocess.Popen(
-            [
-                require_snapserver(),
-                "--config",
-                "/dev/null",
-                "--server.datadir",
-                "/tmp/slime-audio-snapserver",
-                "--http.enabled",
-                "false",
-                "--tcp.enabled",
-                "true",
-                "--tcp.port",
-                "1705",
-                "--stream.port",
-                str(self.args.snapcast_port),
-                "--stream.buffer",
-                str(self.args.snapcast_buffer_ms),
-                "--stream.source",
-                (
-                    f"pipe://{self.args.snapcast_fifo}?name=slime-audio"
-                    f"&sampleformat={self.args.sample_rate}:16:{self.args.channels}&codec=flac"
-                ),
-                "--logging.sink",
-                "stderr",
-                "--logging.filter",
-                "*:warning",
-            ],
-        )
-        wait_for_snapserver_ready(self.server, control_port=1705)
-        self.fifo_keepalive_fd = open_fifo_writer_when_reader_ready(self.args.snapcast_fifo)
-        discovered = discover_receivers(47777, self.args.discover_timeout_ms)
-        self.targets = resolve_targets(self.args.target, discovered, 47777, include_muted=False)
-        if not self.targets:
-            raise SystemExit("no targets resolved")
-        send_control(self.targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
-        wait_for_snapclients(self.targets, timeout_s=10.0, control_port=1705)
-
-    def start_window(self, audio_path: Path) -> RunningWindow:
-        if self.fifo_keepalive_fd is None:
-            raise RuntimeError("snapcast fifo keepalive is not open")
-        command = [
-            require_ffmpeg(),
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-re",
-            "-i",
-            str(audio_path),
-            "-vn",
-            "-f",
-            "s16le",
-            "-acodec",
-            "pcm_s16le",
-            "-ac",
-            str(self.args.channels),
-            "-ar",
-            str(self.args.sample_rate),
-            "pipe:1",
-        ]
-        fifo_handle = self.args.snapcast_fifo.open("wb")
-        process = subprocess.Popen(command, stdout=fifo_handle, start_new_session=True)
-        return RunningWindow(process, handle=fifo_handle)
-
-    def stop(self) -> None:
-        if self.fifo_keepalive_fd is not None:
-            os.close(self.fifo_keepalive_fd)
-            self.fifo_keepalive_fd = None
-        if self.server is not None and self.server.poll() is None:
-            self.server.terminate()
-            try:
-                self.server.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.server.kill()
-                self.server.wait(timeout=5)
-        try:
-            self.args.snapcast_fifo.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def iso_now() -> str:
@@ -215,25 +112,6 @@ def write_active_dashboard_pointer(args: argparse.Namespace) -> None:
             "loaded_at": iso_now(),
         },
     )
-
-
-def open_fifo_writer_when_reader_ready(path: Path, timeout_s: float = 5.0) -> int:
-    deadline = time.monotonic() + timeout_s
-    bootstrap_fd: int | None = None
-    while True:
-        try:
-            writer_fd = os.open(str(path), os.O_WRONLY | os.O_NONBLOCK)
-            if bootstrap_fd is not None:
-                os.close(bootstrap_fd)
-            return writer_fd
-        except OSError as exc:
-            if exc.errno != errno.ENXIO or time.monotonic() >= deadline:
-                if bootstrap_fd is not None:
-                    os.close(bootstrap_fd)
-                raise
-            if bootstrap_fd is None:
-                bootstrap_fd = os.open(str(path), os.O_RDWR | os.O_NONBLOCK)
-            time.sleep(0.05)
 
 
 def append_history(path: Path | None, event: dict[str, Any]) -> None:
@@ -324,9 +202,10 @@ def clip_overlaps_window(clip: Clip, start_ms: int, end_ms: int) -> bool:
     return clip.start_ms < end_ms and clip.end_ms is not None and clip.end_ms > start_ms
 
 
-def clips_in_window(session: MixSession, start_ms: int, end_ms: int) -> list[Clip]:
+def clips_in_window(session: MixSession, start_ms: int, end_ms: int) -> list[Any]:
+    events = [*session.clips, *session.stem_groups]
     return sorted(
-        [clip for clip in session.clips if clip_overlaps_window(clip, start_ms, end_ms)],
+        [clip for clip in events if clip_overlaps_window(clip, start_ms, end_ms)],
         key=lambda clip: (clip.start_ms, clip.deck, clip.id),
     )
 
@@ -356,11 +235,10 @@ def stream_command(args: argparse.Namespace, audio_path: Path) -> list[str]:
             str(args.discover_timeout_ms),
             "--delay-ms",
             str(args.delay_ms),
+            "--no-active-pointer",
         ]
     )
     if args.mode == "snapcast":
-        command.extend(["--snapcast-port", str(args.snapcast_port)])
-        command.extend(["--snapcast-buffer-ms", str(args.snapcast_buffer_ms)])
         command.extend(["--snapcast-fifo", str(args.snapcast_fifo)])
     if args.mode == "multicast":
         command.extend(["--multicast-group", args.multicast_group])
@@ -369,6 +247,8 @@ def stream_command(args: argparse.Namespace, audio_path: Path) -> list[str]:
             command.append("--no-auto-listeners")
         if args.stop_listeners_when_done:
             command.append("--stop-listeners-when-done")
+    if args.ignore_pause:
+        command.append("--ignore-pause")
     return command
 
 
@@ -391,6 +271,7 @@ def mixdown_command(args: argparse.Namespace, start_ms: int, duration_ms: int, o
         str(args.sample_rate),
         "--channels",
         str(args.channels),
+        "--no-verify",
     ]
     if args.skip_tts:
         command.append("--skip-tts")
@@ -447,17 +328,7 @@ def wait_stream(process: subprocess.Popen[bytes]) -> int:
             _active_stream = None
 
 
-def start_window_stream(args: argparse.Namespace, window: PreparedWindow, snapcast: PersistentSnapcast | None) -> tuple[RunningWindow, list[str]]:
-    global _active_stream
-    if snapcast is not None:
-        running = snapcast.start_window(window.output)
-        _active_stream = running.process
-        return running, [
-            "persistent-snapcast",
-            str(window.output),
-            "--targets",
-            ",".join(target.machine_name for target in snapcast.targets),
-        ]
+def start_window_stream(args: argparse.Namespace, window: PreparedWindow) -> tuple[RunningWindow, list[str]]:
     stream = stream_command(args, window.output)
     process = start_stream(stream)
     return RunningWindow(process), stream
@@ -487,9 +358,12 @@ def write_window_state(
     session: MixSession,
     start_ms: int,
     end_ms: int,
-    active_clips: list[Clip],
+    active_clips: list[Any],
 ) -> dict[str, Any]:
     now = iso_now()
+    current_path = None
+    if active_clips:
+        current_path = getattr(active_clips[0], "path", None) or getattr(active_clips[0], "source_path", None)
     if not state.get("mix_started_at"):
         state["mix_started_at"] = now
     for key in ("runner_exit_at", "runner_exit_reason", "signal", "traceback"):
@@ -502,13 +376,13 @@ def write_window_state(
             "window_started_at": now,
             "window_start_ms": start_ms,
             "window_end_ms": end_ms,
-            "current": active_clips[0].path if active_clips else None,
-            "resolved_current": active_clips[0].path if active_clips else None,
+            "current": current_path,
+            "resolved_current": current_path,
             "current_clips": [
                 {
                     "id": clip.id,
                     "deck": clip.deck,
-                    "path": clip.path,
+                    "path": getattr(clip, "path", None) or getattr(clip, "source_path", None),
                     "start_ms": clip.start_ms,
                     "end_ms": clip.end_ms,
                     "trim_start_ms": clip.trim_start_ms,
@@ -539,10 +413,13 @@ def prepare_window(args: argparse.Namespace, session: MixSession, start_ms: int,
     if temp_root is not None:
         temp_root.mkdir(parents=True, exist_ok=True)
     temp = tempfile.TemporaryDirectory(prefix="slime-session-runner-", dir=temp_root)
+    Path(temp.name).chmod(0o755)
     output = Path(temp.name) / f"window-{start_ms}-{end_ms}.wav"
     active_clips = clips_in_window(session, start_ms, end_ms)
     try:
         render_command = render_window(args, start_ms, end_ms - start_ms, output)
+        if output.exists():
+            output.chmod(0o644)
     except Exception:
         temp.cleanup()
         raise
@@ -571,13 +448,6 @@ def run_session(args: argparse.Namespace) -> int:
     write_runner_status(args, "running")
 
     prepared: PreparedWindow | None = None
-    snapcast = (
-        PersistentSnapcast(args)
-        if args.mode == "snapcast" and args.persistent_snapcast and not args.dry_run
-        else None
-    )
-    if snapcast is not None:
-        snapcast.start()
     try:
         while True:
             session = load_session(args.session)
@@ -620,7 +490,7 @@ def run_session(args: argparse.Namespace) -> int:
                     continue
 
                 start_ms = playhead_ms
-                end_ms = min(total_ms, start_ms + args.window_ms)
+                end_ms = total_ms if args.single_window else min(total_ms, start_ms + args.window_ms)
                 window = prepare_window(args, session, start_ms, end_ms)
                 active_clips = window.active_clips
 
@@ -643,7 +513,7 @@ def run_session(args: argparse.Namespace) -> int:
                 window.cleanup()
                 return 0
 
-            running, stream = start_window_stream(args, window, snapcast)
+            running, stream = start_window_stream(args, window)
             started_monotonic = time.monotonic()
             state = write_window_state(args, state, session=session, start_ms=start_ms, end_ms=end_ms, active_clips=active_clips)
             append_history(
@@ -725,8 +595,6 @@ def run_session(args: argparse.Namespace) -> int:
     finally:
         if prepared is not None:
             prepared.cleanup()
-        if snapcast is not None:
-            snapcast.stop()
 
 
 def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
@@ -742,26 +610,23 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mode", choices=["snapcast", "multicast"], default="snapcast")
     parser.add_argument("--backend", choices=["auto", "ffmpeg"], default="ffmpeg")
     parser.add_argument("--window-ms", type=int, default=180_000)
+    parser.add_argument(
+        "--single-window",
+        action="store_true",
+        help="Render and stream from the current playhead to session end as one window to avoid FIFO handoff gaps.",
+    )
     parser.add_argument("--prerender-next", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--prerender-lead-ms", type=int, default=60_000)
     parser.add_argument("--idle-poll-ms", type=int, default=1000)
     parser.add_argument("--retry-seconds", type=int, default=5)
     parser.add_argument("--discover-timeout-ms", type=int, default=4000)
     parser.add_argument("--delay-ms", type=int, default=0)
-    parser.add_argument("--snapcast-port", type=int, default=1704)
-    parser.add_argument("--snapcast-buffer-ms", type=int, default=1000)
     parser.add_argument("--snapcast-fifo", type=Path, default=None)
-    parser.add_argument(
-        "--persistent-snapcast",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep one snapserver/fifo open across windows. Disable to use the one-shot stream path per window.",
-    )
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)
     parser.add_argument("--no-auto-listeners", action="store_true")
     parser.add_argument("--stop-listeners-when-done", action="store_true")
-    parser.add_argument("--kokoro-url", default="http://robokrabs:7862")
+    parser.add_argument("--kokoro-url", default=DEFAULT_KOKORO_URL)
     parser.add_argument("--voice", default="am_eric")
     parser.add_argument("--sample-rate", type=int, default=48_000)
     parser.add_argument("--channels", type=int, default=2)
@@ -785,7 +650,7 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     if args.target is None:
         args.target = ["all"]
     if args.snapcast_fifo is None:
-        args.snapcast_fifo = default_snapcast_fifo_path()
+        args.snapcast_fifo = system_snapcast_fifo_path()
     if args.window_ms <= 0:
         raise SystemExit("--window-ms must be positive")
     return args

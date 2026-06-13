@@ -13,9 +13,29 @@ from slime_audio_dj import (
     DEFAULT_TUNEBAT_LOCAL_ANALYZER,
     TrackAnalysis,
     analyze_with_cache,
+    has_full_track_key_metadata,
     load_analysis_from_db,
 )
 from slime_audio_session import load_session, parse_ms
+
+
+ANALYZER_REPAIR_PROBLEMS = {
+    "missing_analysis",
+    "missing_bpm",
+    "missing_beat_offset",
+    "missing_phrase_ms",
+    "missing_key",
+    "low_bpm_confidence",
+    "low_key_confidence",
+}
+
+
+def overlaps_window(start_ms: int, end_ms: int | None, *, from_ms: int | None, horizon_end_ms: int | None) -> bool:
+    if from_ms is not None and end_ms is not None and end_ms < from_ms:
+        return False
+    if horizon_end_ms is not None and start_ms > horizon_end_ms:
+        return False
+    return True
 
 
 def session_paths(session_path: Path, *, from_ms: int | None = None, horizon_ms: int | None = None) -> list[Path]:
@@ -25,11 +45,17 @@ def session_paths(session_path: Path, *, from_ms: int | None = None, horizon_ms:
     for clip in sorted(session.clips, key=lambda item: (item.start_ms, item.id)):
         if not clip.path:
             continue
-        if from_ms is not None and clip.end_ms is not None and clip.end_ms < from_ms:
+        if clip.kind == "effect-track":
             continue
-        if end_ms is not None and clip.start_ms > end_ms:
+        if not overlaps_window(clip.start_ms, clip.end_ms, from_ms=from_ms, horizon_end_ms=end_ms):
             continue
         paths.append(Path(clip.path))
+    for group in sorted(session.stem_groups, key=lambda item: (item.start_ms, item.id)):
+        if not group.source_path:
+            continue
+        if not overlaps_window(group.start_ms, group.end_ms, from_ms=from_ms, horizon_end_ms=end_ms):
+            continue
+        paths.append(Path(group.source_path))
     return dedupe_paths(paths)
 
 
@@ -65,7 +91,7 @@ def analysis_problems(analysis: TrackAnalysis | None, *, min_bpm_confidence: flo
         problems.append("missing_beat_offset")
     if analysis.beatgrid is None or analysis.beatgrid.phrase_ms is None:
         problems.append("missing_phrase_ms")
-    if not analysis.key or not analysis.camelot:
+    if not has_full_track_key_metadata(analysis):
         problems.append("missing_key")
     if float((analysis.confidence or {}).get("bpm", 0.0) or 0.0) < min_bpm_confidence:
         problems.append("low_bpm_confidence")
@@ -76,6 +102,26 @@ def analysis_problems(analysis: TrackAnalysis | None, *, min_bpm_confidence: flo
     if not analysis.cues:
         problems.append("missing_cues")
     return problems
+
+
+def paths_needing_analysis(
+    paths: list[Path],
+    *,
+    db_path: Path,
+    min_bpm_confidence: float = 0.45,
+    min_key_confidence: float = 0.25,
+) -> list[Path]:
+    needing: list[Path] = []
+    for path in paths:
+        analysis = load_analysis_from_db(db_path, path)
+        problems = analysis_problems(
+            analysis,
+            min_bpm_confidence=min_bpm_confidence,
+            min_key_confidence=min_key_confidence,
+        )
+        if ANALYZER_REPAIR_PROBLEMS.intersection(problems):
+            needing.append(path)
+    return needing
 
 
 def build_report(
@@ -147,9 +193,14 @@ def main() -> int:
         paths = dedupe_paths([Path(value) for value in args.track])
 
     if args.analyze_missing:
-        missing = [path for path in paths if load_analysis_from_db(args.db, path) is None]
-        if missing:
-            analyze_with_cache(missing, args.cache, args.backend, args.sample_rate, args.db, args.tunebat_analyzer)
+        needing_analysis = paths_needing_analysis(
+            paths,
+            db_path=args.db,
+            min_bpm_confidence=args.min_bpm_confidence,
+            min_key_confidence=args.min_key_confidence,
+        )
+        if needing_analysis:
+            analyze_with_cache(needing_analysis, args.cache, args.backend, args.sample_rate, args.db, args.tunebat_analyzer)
 
     report = build_report(
         paths,

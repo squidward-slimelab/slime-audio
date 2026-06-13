@@ -26,6 +26,29 @@ from slime_music_library import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+NOTE_NAME_TO_TONIC = {
+    "C": 0,
+    "B#": 0,
+    "C#": 1,
+    "DB": 1,
+    "D": 2,
+    "D#": 3,
+    "EB": 3,
+    "E": 4,
+    "FB": 4,
+    "E#": 5,
+    "F": 5,
+    "F#": 6,
+    "GB": 6,
+    "G": 7,
+    "G#": 8,
+    "AB": 8,
+    "A": 9,
+    "A#": 10,
+    "BB": 10,
+    "B": 11,
+    "CB": 11,
+}
 MAJOR_PROFILE = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
 MINOR_PROFILE = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
 
@@ -598,6 +621,17 @@ def load_analysis_from_db(db_path: Path, path: Path) -> TrackAnalysis | None:
     )
 
 
+def has_full_track_key_metadata(analysis: TrackAnalysis | None) -> bool:
+    if analysis is None:
+        return False
+    return (
+        analysis.tonic is not None
+        and analysis.mode in {"major", "minor"}
+        and bool(analysis.key)
+        and bool(analysis.camelot)
+    )
+
+
 def store_analysis_in_db(db_path: Path, path: Path, analysis: TrackAnalysis) -> None:
     size, mtime_ns = file_identity(path)
     identity_path = analysis_db_path(path)
@@ -798,6 +832,19 @@ def tonic_mode_from_camelot(value: str | None) -> tuple[int | None, str | None]:
     return None, None
 
 
+def tonic_mode_from_key(value: str | None) -> tuple[int | None, str | None]:
+    if not value:
+        return None, None
+    parts = str(value).strip().replace("♯", "#").replace("♭", "b").split()
+    if not parts:
+        return None, None
+    tonic = NOTE_NAME_TO_TONIC.get(parts[0].upper())
+    mode = next((part.lower() for part in parts[1:] if part.lower() in {"major", "minor"}), None)
+    if tonic is None or mode is None:
+        return None, None
+    return tonic, mode
+
+
 def key_name(tonic: int | None, mode: str | None) -> str | None:
     if tonic is None or mode is None:
         return None
@@ -863,7 +910,7 @@ def ensure_library_tunebat(path: Path, db_path: Path, analyzer: Path) -> sqlite3
     if row is None:
         conn.close()
         return None
-    if row["tunebat_bpm"] is not None and row["tunebat_camelot"]:
+    if row["tunebat_bpm"] is not None and (row["tunebat_camelot"] or row["tunebat_key"]):
         conn.close()
         return row
     target_path = Path(row["preferred_path"] or path)
@@ -885,6 +932,10 @@ def with_library_tunebat(analysis: TrackAnalysis, row: sqlite3.Row | None) -> Tr
     if row["tunebat_mode"]:
         mode = str(row["tunebat_mode"])
     key_value = str(row["tunebat_key"] or "") or key_name(tonic, mode)
+    if tonic is None or mode is None:
+        key_tonic, key_mode = tonic_mode_from_key(key_value)
+        tonic = key_tonic if tonic is None else tonic
+        mode = key_mode if mode is None else mode
     confidence = dict(analysis.confidence)
     confidence["bpm"] = 1.0
     if camelot_value or key_value:
@@ -913,25 +964,29 @@ def relative_tonic(tonic: int, mode: str) -> int:
     return (tonic + 3) % 12 if mode == "minor" else (tonic - 3) % 12
 
 
+def major_equivalent_tonic(tonic: int, mode: str) -> int:
+    return (tonic + 3) % 12 if mode == "minor" else tonic
+
+
 def key_match(source: TrackAnalysis, target: TrackAnalysis, max_pitch_shift: int) -> tuple[float, int, str, list[str]]:
     notes: list[str] = []
     if source.tonic is None or target.tonic is None or source.mode is None or target.mode is None:
         return 0.25, 0, "unknown", ["missing key metadata"]
     if source.tonic == target.tonic and source.mode == target.mode:
         return 1.0, 0, "same key", notes
-    if source.mode != target.mode and relative_tonic(source.tonic, source.mode) == target.tonic:
-        notes.append("mode-rotation match: same pitch set, reinterpret minor/major root")
-        return 0.96, 0, "relative major/minor rotation", notes
 
-    same_mode_shift = semitone_distance(target.tonic, source.tonic)
-    if source.mode == target.mode and abs(same_mode_shift) <= max_pitch_shift:
-        return 0.86 - (abs(same_mode_shift) * 0.04), same_mode_shift, "pitch-shift same mode", notes
-
-    rotated_target = relative_tonic(target.tonic, target.mode)
-    rotation_shift = semitone_distance(rotated_target, source.tonic)
-    if source.mode != target.mode and abs(rotation_shift) <= max_pitch_shift:
-        notes.append("pitch then rotate mode against the relative major/minor")
-        return 0.80 - (abs(rotation_shift) * 0.04), rotation_shift, "pitch-shift mode rotation", notes
+    source_major = major_equivalent_tonic(source.tonic, source.mode)
+    target_major = major_equivalent_tonic(target.tonic, target.mode)
+    if source.mode == "minor":
+        notes.append("source minor normalized to relative major")
+    if target.mode == "minor":
+        notes.append("target minor normalized to relative major")
+    shift = semitone_distance(target_major, source_major)
+    if shift == 0:
+        return 0.96, 0, "relative-major normalized key", notes
+    if abs(shift) <= max_pitch_shift:
+        relation = "pitch-shift relative-major normalized" if source.mode != target.mode else "pitch-shift same mode"
+        return 0.86 - (abs(shift) * 0.04), shift, relation, notes
 
     camelot_score = camelot_compatibility(source.camelot, target.camelot)
     return camelot_score, 0, "camelot neighbor" if camelot_score >= 0.65 else "clash", notes
@@ -1115,8 +1170,12 @@ def analyze_with_cache(
         if stored is not None:
             row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
             analysis = with_library_tunebat(stored, row)
+            if not has_full_track_key_metadata(analysis):
+                analysis = analyze_track(path, backend=backend, sample_rate=sample_rate)
+                analysis = with_library_tunebat(analysis, row)
             analysis = replace(analysis, cues=cue_points_for_analysis(analysis))
             cache[key] = asdict(analysis)
+            store_analysis_in_db(db_path, path, analysis)
             changed = True
             analyses.append(analysis)
             continue
@@ -1124,6 +1183,9 @@ def analyze_with_cache(
             analysis = coerce_analysis(cache[key])
             row = ensure_library_tunebat(path, db_path, tunebat_analyzer)
             analysis = with_library_tunebat(analysis, row)
+            if not has_full_track_key_metadata(analysis):
+                analysis = analyze_track(path, backend=backend, sample_rate=sample_rate)
+                analysis = with_library_tunebat(analysis, row)
             analysis = replace(analysis, cues=cue_points_for_analysis(analysis))
             cache[key] = asdict(analysis)
             store_analysis_in_db(db_path, path, analysis)

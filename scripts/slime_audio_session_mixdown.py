@@ -4,17 +4,20 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import re
 import subprocess
 import tempfile
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, SlipEvent, StemGroup, StemState, load_payload, load_session, parse_ms
 
 
 BED_ROLE_NAMES = {"rhythm-bed", "bed", "mashup-bed"}
+DEFAULT_KOKORO_URL = os.environ.get("SLIME_AUDIO_KOKORO_URL", "http://robokrabs.tail4cb51.ts.net:7862")
 
 
 def seconds(ms: int) -> str:
@@ -367,18 +370,23 @@ def group_automation_windows(session: MixSession, group: StemGroup, param: str) 
 
 def stem_automation_windows(session: MixSession, group: StemGroup, stem_name: str, stem: StemState, param: str) -> list[tuple[int, int, float]]:
     target = f"stem-group:{group.id}:{stem_name}"
-    windows: list[tuple[int, int, float]] = []
+    points: list[Any] = []
     for automation in [*stem.automations, *(item for item in session.automations if item.target == target)]:
         if automation.param != param:
             continue
-        points = sorted(automation.points, key=lambda point: point.at_ms)
-        if len(points) < 2:
-            continue
-        start_ms = max(0, points[0].at_ms - group.start_ms)
-        end_ms = max(0, points[-1].at_ms - group.start_ms)
+        points.extend(automation.points)
+    points = sorted(points, key=lambda point: point.at_ms)
+    windows: list[tuple[int, int, float]] = []
+    if not points:
+        return windows
+    group_end_ms = group.end_ms if group.end_ms is not None else points[-1].at_ms
+    for index, point in enumerate(points):
+        next_at_ms = points[index + 1].at_ms if index + 1 < len(points) else group_end_ms
+        start_ms = max(0, point.at_ms - group.start_ms)
+        end_ms = max(0, next_at_ms - group.start_ms)
         if end_ms <= start_ms:
             continue
-        value = points[0].value
+        value = point.value
         if param in {"mute", "solo"}:
             value = 1.0 if bool(value) else 0.0
         windows.append((start_ms, end_ms, float(value)))
@@ -566,7 +574,11 @@ def manifest_stem_paths(group: StemGroup) -> dict[str, str]:
 
 def stem_group_inputs(group: StemGroup) -> list[tuple[str, StemState, str, bool]]:
     manifest_paths = manifest_stem_paths(group)
-    active_items = [(name, stem) for name, stem in group.stems.items() if stem.enabled and not stem.mute]
+    active_items = [
+        (name, stem)
+        for name, stem in group.stems.items()
+        if (stem.enabled and not stem.mute) or bool(stem.automations)
+    ]
     solo_items = [(name, stem) for name, stem in active_items if stem.solo]
     selected = solo_items or active_items
     inputs: list[tuple[str, StemState, str, bool]] = []
@@ -574,9 +586,7 @@ def stem_group_inputs(group: StemGroup) -> list[tuple[str, StemState, str, bool]
         path = stem.path or manifest_paths.get(stem_name)
         if path:
             inputs.append((stem_name, stem, path, False))
-    if inputs:
-        return inputs
-    return [("full", StemState(path=group.source_path), group.source_path, True)]
+    return inputs
 
 
 def stem_static_filters(stem: StemState) -> list[str]:
@@ -968,12 +978,13 @@ def ffmpeg_command(
         clip_input_indices[clip_index] = input_index
     for group_index, group in enumerate(session.stem_groups):
         for stem_name, _stem, path, _is_fallback in stem_group_inputs(group):
-            try:
-                input_index = input_paths.index(path)
-            except ValueError:
-                input_index = len(input_paths)
-                input_paths.append(path)
-                command.extend(["-i", path])
+            # Deck-clock cue/jump/loop actions compile into adjacent stem-group
+            # segments that often read the same stem file repeatedly. Allocate a
+            # fresh ffmpeg input for each rendered stem segment; reusing one
+            # input label can cause later loop/jump segments to disappear.
+            input_index = len(input_paths)
+            input_paths.append(path)
+            command.extend(["-i", path])
             stem_group_input_indices[(group_index, stem_name)] = input_index
     for lean_in in session.mic_lean_ins:
         audio_path = lean_in_audio.get(lean_in.id)
@@ -1423,7 +1434,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Render a planned SlimeAudio mix session to one Snapcast-ready audio file.")
     parser.add_argument("session", type=Path)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--kokoro-url", default="http://robokrabs:7862")
+    parser.add_argument("--kokoro-url", default=DEFAULT_KOKORO_URL)
     parser.add_argument("--voice", default="am_eric")
     parser.add_argument("--tts-timeout-seconds", type=int, default=90)
     parser.add_argument("--sample-rate", type=int, default=48_000)

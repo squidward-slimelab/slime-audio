@@ -68,7 +68,12 @@ public sealed class AudioPacketTests
             SharedStreamLastStderr: "snapclient audio error",
             SharedStreamStartCommand: "snapclient.exe -h 192.168.0.122",
             SharedStreamUptimeMs: 42_000,
-            SharedStreamReconnectAttempts: 3);
+            SharedStreamReconnectAttempts: 3,
+            SharedStreamSnapserverOk: true,
+            SharedStreamSnapserverError: null,
+            SharedStreamSnapserverClientConnected: true,
+            SharedStreamSnapserverClientStream: "default",
+            SharedStreamSnapserverStreamStatus: "playing");
         var original = new DiscoveryResponse("slime-audio", "SPATULA", "slimeq", "0.3.0", 47777, 123, StreamMuted: true, Diagnostics: diagnostics);
 
         var decoded = DiscoveryResponse.FromJson(original.ToJson());
@@ -94,6 +99,10 @@ public sealed class AudioPacketTests
         Assert.Equal("snapclient.exe -h 192.168.0.122", decoded.Diagnostics?.SharedStreamStartCommand);
         Assert.Equal(42_000, decoded.Diagnostics?.SharedStreamUptimeMs);
         Assert.Equal(3, decoded.Diagnostics?.SharedStreamReconnectAttempts);
+        Assert.True(decoded.Diagnostics?.SharedStreamSnapserverOk);
+        Assert.True(decoded.Diagnostics?.SharedStreamSnapserverClientConnected);
+        Assert.Equal("default", decoded.Diagnostics?.SharedStreamSnapserverClientStream);
+        Assert.Equal("playing", decoded.Diagnostics?.SharedStreamSnapserverStreamStatus);
     }
 
     [Fact]

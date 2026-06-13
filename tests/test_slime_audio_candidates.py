@@ -210,7 +210,8 @@ class SlimeAudioCandidateTests(unittest.TestCase):
             duplicate = root / "Artist" / "duplicates" / "01 - Duplicate.flac"
             duplicated = root / "Artist" / "duplicated" / "01 - Duplicated.flac"
             duplicate_singular = root / "Artist" / "duplicate" / "01 - Duplicate Singular.flac"
-            for path in [keep, duplicate, duplicated, duplicate_singular]:
+            isolated = root / "Artist" / "isolated" / "01 - Keep_Vocal.wav"
+            for path in [keep, duplicate, duplicated, duplicate_singular, isolated]:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"a" * 100)
             conn = connect(temp / "library.sqlite3")

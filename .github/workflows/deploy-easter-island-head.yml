@@ -1,0 +1,37 @@
+name: deploy-easter-island-head
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  DEPLOY_PATH: /home/squidward/.openclaw/workspace/slime-audio
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: easter-island-head-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on:
+      - self-hosted
+      - easter-island-head
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync repository
+        run: |
+          mkdir -p "$DEPLOY_PATH"
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.venv/' \
+            --exclude='runtime/' \
+            ./ "$DEPLOY_PATH/"
+
+      - name: Apply deployment
+        run: |
+          cd "$DEPLOY_PATH"
+          bash scripts/deploy_easter_island_head.sh

@@ -78,7 +78,12 @@ public sealed record AudioDiagnostics(
     string? SharedStreamLastStderr = null,
     string? SharedStreamStartCommand = null,
     long SharedStreamUptimeMs = 0,
-    int SharedStreamReconnectAttempts = 0);
+    int SharedStreamReconnectAttempts = 0,
+    bool SharedStreamSnapserverOk = false,
+    string? SharedStreamSnapserverError = null,
+    bool SharedStreamSnapserverClientConnected = false,
+    string? SharedStreamSnapserverClientStream = null,
+    string? SharedStreamSnapserverStreamStatus = null);
 
 public sealed record EffectEnvelope(
     long StartUnixTimeMs,

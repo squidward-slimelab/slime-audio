@@ -104,6 +104,10 @@ class SlimeAudioStreamTests(unittest.TestCase):
                 "SharedStreamStartCommand": "snapclient.exe -h 192.168.0.122",
                 "SharedStreamUptimeMs": 42000,
                 "SharedStreamReconnectAttempts": 3,
+                "SharedStreamSnapserverOk": True,
+                "SharedStreamSnapserverClientConnected": True,
+                "SharedStreamSnapserverClientStream": "default",
+                "SharedStreamSnapserverStreamStatus": "playing",
             },
             now_ms=1_250,
             clock_offset_ms=50,
@@ -117,6 +121,10 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertIn("shared_stream_exits=2", text)
         self.assertIn("shared_stream_uptime_ms=42000", text)
         self.assertIn("shared_stream_reconnect_attempts=3", text)
+        self.assertIn("shared_stream_snapserver_ok=true", text)
+        self.assertIn("shared_stream_client_connected=true", text)
+        self.assertIn("shared_stream_client_stream=default", text)
+        self.assertIn("shared_stream_server_stream_status=playing", text)
         self.assertIn("telemetry_path=", text)
         self.assertIn("output_device=default", text)
         self.assertIn("last_exit_status=Shared stream disconnected: -1073741819", text)
@@ -133,6 +141,8 @@ class SlimeAudioStreamTests(unittest.TestCase):
 
         self.assertIn("output_device=Speakers", text)
         self.assertIn("output_devices=Headphones,Speakers", text)
+        self.assertIn("shared_stream_snapserver_ok=unknown", text)
+        self.assertIn("shared_stream_client_connected=unknown", text)
 
     def test_output_device_control_message_prefix_is_stable(self):
         self.assertEqual(OUTPUT_DEVICE_MESSAGE_PREFIX, b"SLIME_AUDIO_OUTPUT_DEVICE_V1 ")
@@ -267,10 +277,8 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertIn("failed_at", payload)
         self.assertNotIn("completed_at", payload)
 
-    def test_default_snapcast_fifo_is_process_scoped(self):
-        fifo = stream.default_snapcast_fifo_path()
-
-        self.assertEqual(fifo.name, f"slime-audio-snapfifo-{stream.os.getpid()}")
+    def test_system_snapcast_fifo_is_stable_system_fifo(self):
+        self.assertEqual(stream.system_snapcast_fifo_path(), Path("/tmp/snapfifo"))
 
     def test_connected_snapclient_ids_reads_snapserver_status(self):
         status = {
@@ -295,36 +303,6 @@ class SlimeAudioStreamTests(unittest.TestCase):
 
         self.assertEqual(stream.snapserver_stream_ids(status), {"slime-audio", "other"})
 
-    def test_ensure_snapcast_ports_free_rejects_busy_port(self):
-        with patch.object(stream, "tcp_port_accepts", side_effect=lambda port: port == 1705):
-            with self.assertRaisesRegex(RuntimeError, "1705"):
-                stream.ensure_snapcast_ports_free(1704)
-
-    def test_wait_for_snapserver_ready_rejects_live_process_without_control_status(self):
-        process = Mock()
-        process.poll.return_value = None
-
-        with patch.object(stream, "snapserver_status", side_effect=ConnectionRefusedError("refused")):
-            with patch.object(stream.time, "sleep"):
-                with self.assertRaisesRegex(RuntimeError, "did not become ready"):
-                    stream.wait_for_snapserver_ready(process, timeout_s=0.01)
-
-    def test_wait_for_snapserver_ready_rejects_exited_server(self):
-        process = Mock()
-        process.poll.return_value = 1
-        process.returncode = 1
-
-        with self.assertRaises(subprocess.CalledProcessError):
-            stream.wait_for_snapserver_ready(process, timeout_s=0.01)
-
-    def test_wait_for_snapserver_ready_accepts_control_status_with_stream(self):
-        process = Mock()
-        process.poll.return_value = None
-        status = {"result": {"server": {"streams": [{"id": "slime-audio", "status": "idle"}]}}}
-
-        with patch.object(stream, "snapserver_status", return_value=status):
-            self.assertEqual(stream.wait_for_snapserver_ready(process, timeout_s=0.01), status)
-
     def test_wait_for_snapclients_raises_when_expected_client_missing(self):
         receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPATULA", "user", "0.4.28")
 
@@ -332,6 +310,71 @@ class SlimeAudioStreamTests(unittest.TestCase):
             with patch.object(stream.time, "sleep"):
                 with self.assertRaises(RuntimeError):
                     stream.wait_for_snapclients([receiver], timeout_s=0.01)
+
+    def test_snapcast_stream_uses_existing_system_fifo(self):
+        receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPATULA", "user", "0.4.28")
+        status = {"result": {"server": {"streams": [{"id": "default"}], "groups": []}}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media = Path(temp_dir) / "song.mp3"
+            media.write_bytes(b"fake")
+            fifo = Path(temp_dir) / "snapfifo"
+            fifo.write_bytes(b"not-a-real-fifo")
+
+            with patch.object(stream, "snapserver_status", return_value=status):
+                with patch.object(stream, "stat_is_fifo", return_value=True):
+                    with patch.object(stream, "send_control") as send_control:
+                        with patch.object(stream, "wait_for_snapclients") as wait_for_snapclients:
+                            with patch.object(stream.time, "sleep"):
+                                with patch.object(stream.subprocess, "run") as run:
+                                    with patch.object(stream, "require_ffmpeg", return_value="ffmpeg"):
+                                        stream.run_snapcast_stream(
+                                            media,
+                                            [receiver],
+                                            fifo,
+                                            sample_rate=48_000,
+                                            channels=2,
+                                            delay_ms=0,
+                                        )
+
+            send_control.assert_called_once()
+            wait_for_snapclients.assert_called_once()
+            self.assertNotIn("stdout", run.call_args.kwargs)
+            self.assertEqual(run.call_args.args[0][-1], str(fifo))
+            self.assertIn("-y", run.call_args.args[0])
+
+    def test_snapcast_stream_runs_ffmpeg_as_fifo_owner_when_owner_differs(self):
+        receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPATULA", "user", "0.4.28")
+        status = {"result": {"server": {"streams": [{"id": "default"}], "groups": []}}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media = Path(temp_dir) / "song.mp3"
+            media.write_bytes(b"fake")
+            fifo = Path(temp_dir) / "snapfifo"
+            fifo.write_bytes(b"not-a-real-fifo")
+            stat_result = stream.os.stat(fifo)
+            fake_stat = stream.os.stat_result((stat_result.st_mode, stat_result.st_ino, stat_result.st_dev, stat_result.st_nlink, 12345, stat_result.st_gid, stat_result.st_size, stat_result.st_atime, stat_result.st_mtime, stat_result.st_ctime))
+            owner = Mock()
+            owner.pw_name = "_snapserver"
+
+            with patch.object(stream, "snapserver_status", return_value=status):
+                with patch.object(stream, "stat_is_fifo", return_value=True):
+                    with patch.object(stream, "send_control"):
+                        with patch.object(stream, "wait_for_snapclients"):
+                            with patch.object(stream.time, "sleep"):
+                                with patch.object(stream.os, "geteuid", return_value=999):
+                                    with patch.object(stream.os, "stat", return_value=fake_stat):
+                                        with patch.object(stream.pwd, "getpwuid", return_value=owner):
+                                            with patch.object(stream.subprocess, "run") as run:
+                                                with patch.object(stream, "require_ffmpeg", return_value="ffmpeg"):
+                                                    stream.run_snapcast_stream(
+                                                        media,
+                                                        [receiver],
+                                                        fifo,
+                                                        sample_rate=48_000,
+                                                        channels=2,
+                                                        delay_ms=0,
+                                                    )
+
+        self.assertEqual(run.call_args.args[0][:4], ["sudo", "-n", "-u", "_snapserver"])
 
 
 if __name__ == "__main__":

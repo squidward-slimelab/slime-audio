@@ -274,6 +274,7 @@ def candidate_rows(
     filters = [
         "preferred_path IS NOT NULL",
         "lower(preferred_path) NOT LIKE '%/separated/%'",
+        "lower(preferred_path) NOT LIKE '%/isolated/%'",
         "lower(preferred_path) NOT LIKE '%/duplicate/%'",
         "lower(preferred_path) NOT LIKE '%/duplicated/%'",
         "lower(preferred_path) NOT LIKE '%/duplicates/%'",

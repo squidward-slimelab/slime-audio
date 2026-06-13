@@ -46,7 +46,7 @@ function statusLabel(value) {
 }
 
 function shortMeta(event) {
-  if (!event) return "no current clip";
+  if (!event) return "no current load";
   return event.display_meta || event.artist || event.album || event.path || "";
 }
 
@@ -255,7 +255,7 @@ function renderNext(events) {
   if (!visible.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
-    empty.textContent = "no future song clips";
+    empty.textContent = "no future actions";
     els.nextList.append(empty);
     return;
   }
