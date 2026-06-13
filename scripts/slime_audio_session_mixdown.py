@@ -949,7 +949,7 @@ def build_filter_complex(
 
     output_filters = "alimiter=limit=0.98"
     if output_duration_ms is not None:
-        output_filters = f"atrim=duration={seconds(output_duration_ms)}," + output_filters
+        output_filters = f"aresample=async=1:first_pts=0,atrim=duration={seconds(output_duration_ms)}," + output_filters
     filters.append(f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=longest:normalize=0,{output_filters}[out]")
     return ";".join(filters)
 

@@ -267,6 +267,29 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
             args = runner.parse_args_from(["--target", "all", "--state", str(temp / "state.json")])
             self.assertFalse(runner.apply_audio_anchor(args, {}, temp / "absent.anchor.json"))
 
+    def test_completed_window_freezes_playhead_and_drops_window_anchor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "state.json"
+            args = runner.parse_args_from(["--target", "all", "--state", str(state_path)])
+            state = {
+                "window_started_at": "2026-06-13T10:00:00-04:00",
+                "window_start_ms": 10_000,
+                "window_end_ms": 20_000,
+                "window_audio_latency_ms": 1000,
+            }
+
+            updated = runner.freeze_completed_window(args, state, 20_000)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(updated["playhead_ms"], 20_000)
+        self.assertEqual(persisted["playhead_ms"], 20_000)
+        self.assertEqual(persisted["runner_status"], "running")
+        self.assertNotIn("window_started_at", persisted)
+        self.assertNotIn("window_start_ms", persisted)
+        self.assertNotIn("window_end_ms", persisted)
+        self.assertNotIn("window_audio_latency_ms", persisted)
+
     def test_completion_freezes_playhead_and_drops_window_anchor(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

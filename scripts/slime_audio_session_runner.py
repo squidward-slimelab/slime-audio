@@ -431,6 +431,18 @@ def apply_audio_anchor(args: argparse.Namespace, state: dict[str, Any], anchor_p
     return True
 
 
+def freeze_completed_window(args: argparse.Namespace, state: dict[str, Any], end_ms: int) -> dict[str, Any]:
+    now = iso_now()
+    state["playhead_ms"] = max(0, end_ms)
+    for key in ("window_started_at", "window_start_ms", "window_end_ms", "window_audio_latency_ms"):
+        state.pop(key, None)
+    state["runner_status"] = "running"
+    state["runner_updated_at"] = now
+    state["updated_at"] = now
+    write_json(args.state, state)
+    return state
+
+
 def render_window(args: argparse.Namespace, start_ms: int, duration_ms: int, output: Path) -> list[str]:
     command = mixdown_command(args, start_ms, duration_ms, output)
     if not args.dry_run:
@@ -634,6 +646,7 @@ def run_session(args: argparse.Namespace) -> int:
                     "clips": [clip.id for clip in active_clips],
                 },
             )
+            state = freeze_completed_window(args, state, end_ms)
     finally:
         if prepared is not None:
             prepared.cleanup()

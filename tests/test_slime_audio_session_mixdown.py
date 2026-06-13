@@ -1399,7 +1399,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertEqual([clip.id for clip in shifted.clips], ["bed"])
         self.assertEqual(shifted.clips[0].trim_start_ms, 6_000)
         self.assertEqual(shifted.clips[0].duration_ms, 8_000)
-        self.assertIn("atrim=duration=8.000,alimiter", filters)
+        self.assertIn("aresample=async=1:first_pts=0,atrim=duration=8.000,alimiter", filters)
 
     def test_routine_window_and_taste_report_accept_named_routine(self):
         payload = {
