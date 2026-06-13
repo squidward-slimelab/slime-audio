@@ -217,6 +217,11 @@ def next_event_start_ms(session: MixSession, playhead_ms: int) -> int | None:
     return min(starts) if starts else None
 
 
+def window_anchor_path(audio_path: Path) -> Path:
+    """Sidecar file the stream writes when this window's audio becomes audible."""
+    return audio_path.with_suffix(".anchor.json")
+
+
 def stream_command(args: argparse.Namespace, audio_path: Path) -> list[str]:
     command = [
         "python3",
@@ -235,9 +240,13 @@ def stream_command(args: argparse.Namespace, audio_path: Path) -> list[str]:
             str(args.discover_timeout_ms),
             "--delay-ms",
             str(args.delay_ms),
+            "--anchor-file",
+            str(window_anchor_path(audio_path)),
             "--no-active-pointer",
         ]
     )
+    if args.snapcast_buffer_ms is not None:
+        command.extend(["--snapcast-buffer-ms", str(args.snapcast_buffer_ms)])
     if args.mode == "snapcast":
         command.extend(["--snapcast-fifo", str(args.snapcast_fifo)])
     if args.mode == "multicast":
@@ -366,7 +375,9 @@ def write_window_state(
         current_path = getattr(active_clips[0], "path", None) or getattr(active_clips[0], "source_path", None)
     if not state.get("mix_started_at"):
         state["mix_started_at"] = now
-    for key in ("runner_exit_at", "runner_exit_reason", "signal", "traceback"):
+    # A new window is live: drop any frozen completion playhead and the previous
+    # window's audio anchor so playhead_ms_from_state extrapolates from this window.
+    for key in ("runner_exit_at", "runner_exit_reason", "signal", "traceback", "playhead_ms", "mix_playhead_ms", "completed_at", "window_audio_latency_ms"):
         state.pop(key, None)
     state.update(
         {
@@ -399,6 +410,25 @@ def write_window_state(
     state.setdefault("runner_started_at", now)
     write_json(args.state, state)
     return state
+
+
+def apply_audio_anchor(args: argparse.Namespace, state: dict[str, Any], anchor_path: Path) -> bool:
+    """Re-anchor the playhead to real audio start once the stream reports it.
+
+    The stream writes ``audio_started_at`` the moment ffmpeg feeds the FIFO,
+    offset by the snapcast buffer so it marks when the listener actually hears
+    the window's first sample. Replacing the launch-time ``window_started_at``
+    with it removes the constant lead between the dashboard and the audio.
+    """
+    anchor = load_json(anchor_path)
+    audio_started_at = anchor.get("audio_started_at")
+    if not audio_started_at:
+        return False
+    state["window_started_at"] = audio_started_at
+    state["window_audio_latency_ms"] = anchor.get("latency_ms")
+    state["updated_at"] = audio_started_at
+    write_json(args.state, state)
+    return True
 
 
 def render_window(args: argparse.Namespace, start_ms: int, duration_ms: int, output: Path) -> list[str]:
@@ -459,6 +489,11 @@ def run_session(args: argparse.Namespace) -> int:
                 state["runner_pid"] = os.getpid()
                 state["runner_status"] = "completed"
                 state["runner_updated_at"] = state["completed_at"]
+                # Freeze the playhead explicitly so playhead_ms_from_state stops
+                # extrapolating from the (now stale) window anchor after we exit.
+                state["playhead_ms"] = total_ms
+                for key in ("window_started_at", "window_start_ms", "window_end_ms", "window_audio_latency_ms"):
+                    state.pop(key, None)
                 write_json(args.state, state)
                 append_history(
                     args.history_log,
@@ -529,11 +564,18 @@ def run_session(args: argparse.Namespace) -> int:
                 },
             )
             returncode = 0
+            anchor_path = window_anchor_path(window.output)
+            anchor_applied = False
             while True:
                 polled = running.process.poll()
                 if polled is not None:
                     returncode = wait_window_stream(running)
                     break
+                if not anchor_applied and anchor_path.exists() and apply_audio_anchor(args, state, anchor_path):
+                    anchor_applied = True
+                    # The window's audio just began; measure remaining time from here
+                    # so prerender lead is relative to playback, not the launch.
+                    started_monotonic = time.monotonic()
                 remaining_ms = (end_ms - start_ms) - int((time.monotonic() - started_monotonic) * 1000)
                 if (
                     args.prerender_next
@@ -621,6 +663,12 @@ def parse_args_from(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--retry-seconds", type=int, default=5)
     parser.add_argument("--discover-timeout-ms", type=int, default=4000)
     parser.add_argument("--delay-ms", type=int, default=0)
+    parser.add_argument(
+        "--snapcast-buffer-ms",
+        type=int,
+        default=None,
+        help="Override the snapcast end-to-end latency (ms) used to anchor the playhead. Default queries the snapserver.",
+    )
     parser.add_argument("--snapcast-fifo", type=Path, default=None)
     parser.add_argument("--multicast-group", default="239.77.77.77")
     parser.add_argument("--multicast-port", type=int, default=47778)

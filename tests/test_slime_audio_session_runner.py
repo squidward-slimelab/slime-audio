@@ -230,6 +230,75 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
 
         self.assertIn("--ignore-pause", command)
 
+    def test_stream_command_requests_window_anchor_file(self):
+        args = runner.parse_args_from(["--target", "all", "--mode", "snapcast"])
+
+        command = runner.stream_command(args, Path("/tmp/window-0-10000.wav"))
+
+        self.assertIn("--anchor-file", command)
+        self.assertEqual(
+            command[command.index("--anchor-file") + 1],
+            "/tmp/window-0-10000.anchor.json",
+        )
+
+    def test_apply_audio_anchor_repoints_window_started_at(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "state.json"
+            anchor_path = temp / "window.anchor.json"
+            anchor_path.write_text(
+                json.dumps({"audio_started_at": "2026-06-13T10:00:01.250-04:00", "latency_ms": 1000}),
+                encoding="utf-8",
+            )
+            args = runner.parse_args_from(["--target", "all", "--state", str(state_path)])
+            state = {"window_started_at": "2026-06-13T09:59:59-04:00", "window_start_ms": 0}
+
+            applied = runner.apply_audio_anchor(args, state, anchor_path)
+
+            self.assertTrue(applied)
+            self.assertEqual(state["window_started_at"], "2026-06-13T10:00:01.250-04:00")
+            self.assertEqual(state["window_audio_latency_ms"], 1000)
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["window_started_at"], "2026-06-13T10:00:01.250-04:00")
+
+    def test_apply_audio_anchor_ignores_missing_anchor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args = runner.parse_args_from(["--target", "all", "--state", str(temp / "state.json")])
+            self.assertFalse(runner.apply_audio_anchor(args, {}, temp / "absent.anchor.json"))
+
+    def test_completion_freezes_playhead_and_drops_window_anchor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            state_path = temp / "state.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "a", "deck": "deck-1", "path": "/music/a.flac", "start": 0, "duration": 20_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_path.write_text(
+                json.dumps({"window_started_at": "2026-06-13T09:00:00-04:00", "window_start_ms": 0}),
+                encoding="utf-8",
+            )
+            args = runner.parse_args_from(["--target", "all", "--state", str(state_path), "--session", str(session_path)])
+
+            with patch.object(runner, "append_history"):
+                with patch.object(runner, "session_duration_ms", return_value=20_000):
+                    with patch.object(runner, "playhead_ms_from_state", return_value=20_000):
+                        self.assertEqual(runner.run_session(args), 0)
+
+            persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["playhead_ms"], 20_000)
+        self.assertEqual(persisted["runner_status"], "completed")
+        self.assertNotIn("window_started_at", persisted)
+        self.assertNotIn("window_start_ms", persisted)
+
     def test_snapcast_uses_window_stream_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)

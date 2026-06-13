@@ -377,5 +377,97 @@ class SlimeAudioStreamTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][:4], ["sudo", "-n", "-u", "_snapserver"])
 
 
+    def test_snapserver_buffer_ms_adds_connected_client_latency(self):
+        status = {
+            "result": {
+                "server": {
+                    "groups": [
+                        {
+                            "clients": [
+                                {"connected": True, "config": {"latency": 40}},
+                                {"connected": False, "config": {"latency": 999}},
+                                {"connected": True, "config": {"latency": 120}},
+                            ]
+                        }
+                    ]
+                }
+            }
+        }
+        self.assertEqual(stream.snapserver_buffer_ms(status, default=1000), 1120)
+
+    def test_resolve_snapcast_latency_ms_prefers_override(self):
+        with patch.object(stream, "snapserver_status") as snapserver_status:
+            self.assertEqual(stream.resolve_snapcast_latency_ms(override_ms=250), 250)
+        snapserver_status.assert_not_called()
+
+    def test_resolve_snapcast_latency_ms_falls_back_when_query_fails(self):
+        with patch.object(stream, "snapserver_status", side_effect=OSError("no server")):
+            self.assertEqual(
+                stream.resolve_snapcast_latency_ms(override_ms=None, default=900),
+                900,
+            )
+
+    def test_snapcast_stream_writes_buffer_adjusted_anchor(self):
+        receiver = Receiver("127.0.0.1:47777", "127.0.0.1", 47777, "SPATULA", "user", "0.4.28")
+        status = {"result": {"server": {"streams": [{"id": "default"}], "groups": []}}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            media = Path(temp_dir) / "song.mp3"
+            media.write_bytes(b"fake")
+            fifo = Path(temp_dir) / "snapfifo"
+            fifo.write_bytes(b"not-a-real-fifo")
+            anchor = Path(temp_dir) / "window.anchor.json"
+
+            with patch.object(stream, "snapserver_status", return_value=status):
+                with patch.object(stream, "stat_is_fifo", return_value=True):
+                    with patch.object(stream, "send_control"):
+                        with patch.object(stream, "wait_for_snapclients"):
+                            with patch.object(stream.time, "sleep"):
+                                with patch.object(stream.time, "time", return_value=1_000.0):
+                                    with patch.object(stream.subprocess, "run"):
+                                        with patch.object(stream, "require_ffmpeg", return_value="ffmpeg"):
+                                            stream.run_snapcast_stream(
+                                                media,
+                                                [receiver],
+                                                fifo,
+                                                sample_rate=48_000,
+                                                channels=2,
+                                                delay_ms=0,
+                                                anchor_file=anchor,
+                                                latency_ms=1000,
+                                            )
+
+            payload = json.loads(anchor.read_text(encoding="utf-8"))
+        self.assertEqual(payload["audio_anchor_ms"], 1_001_000)
+        self.assertEqual(payload["latency_ms"], 1000)
+        self.assertTrue(payload["audio_started_at"])
+
+    def test_publish_active_stream_offsets_window_start_by_latency(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            media = temp / "song.mp3"
+            media.write_bytes(b"fake")
+            state = temp / "active-stream-state.json"
+            with patch.object(stream, "probe_duration_ms", return_value=200_000):
+                with patch.object(stream.time, "time", return_value=2_000.0):
+                    stream.publish_active_stream(
+                        input_path=media,
+                        targets=[],
+                        mode="snapcast",
+                        backend="ffmpeg",
+                        active_pointer=temp / "active-set.json",
+                        active_session=temp / "active-stream-session.json",
+                        active_state=state,
+                        source_session=None,
+                        dashboard_title=None,
+                        dashboard_slug=None,
+                        start_offset_ms=0,
+                        dry_run=False,
+                        start_latency_ms=1000,
+                    )
+                payload = json.loads(state.read_text(encoding="utf-8"))
+            # window_started_at is the audio-audible instant: now (2000s) + 1s latency.
+            self.assertEqual(payload["window_started_at"], stream.iso_from_unix_ms(2_001_000.0))
+
+
 if __name__ == "__main__":
     unittest.main()

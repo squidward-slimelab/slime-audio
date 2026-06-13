@@ -23,6 +23,11 @@ OUTPUT_DEVICE_MESSAGE_PREFIX = b"SLIME_AUDIO_OUTPUT_DEVICE_V1 "
 DEFAULT_PORT = 47777
 DEFAULT_LIVE_DELAY_MS = 7000
 DEFAULT_PREBUFFER_MS = 15000
+# Time between the snapserver reading a PCM chunk from the FIFO and the
+# snapclients playing it. This is the snapserver --buffer setting and is not
+# reported by Server.GetStatus, so we treat it as the baseline end-to-end
+# latency and add any client-configured latency on top.
+DEFAULT_SNAPCAST_BUFFER_MS = 1000
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ACTIVE_SET = REPO_ROOT / "runtime" / "active-set.json"
 DEFAULT_ACTIVE_STREAM_SESSION = REPO_ROOT / "runtime" / "active-stream-session.json"
@@ -231,6 +236,39 @@ def snapserver_stream_ids(status: dict) -> set[str]:
     return stream_ids
 
 
+def snapserver_buffer_ms(status: dict, default: int = DEFAULT_SNAPCAST_BUFFER_MS) -> int:
+    """Estimate end-to-end snapcast latency from a Server.GetStatus payload.
+
+    The server --buffer is not exposed by GetStatus, so we use ``default`` as the
+    baseline and add the largest connected client's configured added latency.
+    """
+    server = (status.get("result") or {}).get("server") or {}
+    client_latency = 0
+    for group in server.get("groups") or []:
+        for client in group.get("clients") or []:
+            if not client.get("connected"):
+                continue
+            latency = (client.get("config") or {}).get("latency")
+            if isinstance(latency, (int, float)):
+                client_latency = max(client_latency, int(latency))
+    return max(0, default) + max(0, client_latency)
+
+
+def resolve_snapcast_latency_ms(
+    control_port: int = 1705,
+    override_ms: int | None = None,
+    default: int = DEFAULT_SNAPCAST_BUFFER_MS,
+) -> int:
+    """Latency from "ffmpeg starts feeding the FIFO" to "listener hears it"."""
+    if override_ms is not None and override_ms >= 0:
+        return override_ms
+    try:
+        status = snapserver_status(control_port=control_port)
+    except Exception:
+        return default
+    return snapserver_buffer_ms(status, default)
+
+
 def connected_snapclient_ids(status: dict) -> set[str]:
     server = (status.get("result") or {}).get("server") or {}
     connected: set[str] = set()
@@ -264,6 +302,28 @@ def wait_for_snapclients(targets: list[Receiver], *, timeout_s: float = 10.0, co
 
 def iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def iso_from_unix_ms(unix_ms: float) -> str:
+    return datetime.fromtimestamp(unix_ms / 1000).astimezone().isoformat(timespec="milliseconds")
+
+
+def write_audio_anchor(anchor_file: Path, *, latency_ms: int) -> None:
+    """Record the wall-clock instant the first streamed sample becomes audible.
+
+    Called the moment ffmpeg begins feeding the FIFO; the listener hears that
+    sample ``latency_ms`` later, so the anchor is offset into the future. The
+    runner reads this to align the dashboard playhead with the actual audio.
+    """
+    anchor_ms = time.time() * 1000 + max(0, latency_ms)
+    write_json(
+        anchor_file,
+        {
+            "audio_started_at": iso_from_unix_ms(anchor_ms),
+            "audio_anchor_ms": int(round(anchor_ms)),
+            "latency_ms": int(latency_ms),
+        },
+    )
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -316,6 +376,7 @@ def publish_active_stream(
     dashboard_slug: str | None,
     start_offset_ms: int,
     dry_run: bool,
+    start_latency_ms: int = 0,
 ) -> None:
     if dry_run:
         return
@@ -329,6 +390,10 @@ def publish_active_stream(
     title = dashboard_title or display_title(resolved_input)
     slug = dashboard_slug or "active-stream"
     now = iso_now()
+    # The playhead anchor is when the audio becomes audible, which is the
+    # snapcast latency after this call (publish fires just before ffmpeg feeds
+    # the FIFO). started_at/updated_at stay "now" as plain bookkeeping.
+    window_started_at = iso_from_unix_ms(time.time() * 1000 + max(0, start_latency_ms))
     duration_ms = probe_duration_ms(resolved_input)
     receivers = [
         {
@@ -380,7 +445,7 @@ def publish_active_stream(
             ],
             "started_at": now,
             "updated_at": now,
-            "window_started_at": now,
+            "window_started_at": window_started_at,
             "window_start_ms": max(0, start_offset_ms),
             "window_end_ms": duration_ms,
             "duration_ms": duration_ms,
@@ -547,6 +612,8 @@ def run_snapcast_stream(
     on_ready: Callable[[], None] | None = None,
     control_port: int = 1705,
     stream_id: str = "default",
+    anchor_file: Path | None = None,
+    latency_ms: int = 0,
 ) -> None:
     status = snapserver_status(control_port=control_port)
     stream_ids = snapserver_stream_ids(status)
@@ -560,6 +627,10 @@ def run_snapcast_stream(
     send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
     wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=control_port)
     time.sleep(max(delay_ms, 0) / 1000)
+    # ffmpeg is about to start feeding the FIFO: anchor the playhead here, before
+    # the audible sample, so the dashboard tracks the audio instead of leading it.
+    if anchor_file is not None:
+        write_audio_anchor(anchor_file, latency_ms=latency_ms)
     if on_ready is not None:
         on_ready()
 
@@ -688,6 +759,8 @@ def main() -> int:
     parser.add_argument("--dashboard-slug", help="Slug shown by the dashboard for this stream.")
     parser.add_argument("--start-offset-ms", type=int, default=0, help="Start streaming this far into the file and publish that playhead to the dashboard.")
     parser.add_argument("--no-active-pointer", action="store_true", help="Do not publish this playback to the dashboard active pointer.")
+    parser.add_argument("--anchor-file", type=Path, help="Write the buffer-adjusted audio-start anchor here once the stream becomes audible.")
+    parser.add_argument("--snapcast-buffer-ms", type=int, default=-1, help="Override the snapcast end-to-end latency (ms). -1 queries the snapserver.")
     args = parser.parse_args()
     if args.snapcast_fifo is None:
         args.snapcast_fifo = system_snapcast_fifo_path()
@@ -787,6 +860,13 @@ def main() -> int:
     if not args.file.exists():
         raise SystemExit(f"file not found: {args.file}")
 
+    override_buffer_ms = None if args.snapcast_buffer_ms < 0 else args.snapcast_buffer_ms
+    stream_latency_ms = (
+        resolve_snapcast_latency_ms(override_ms=override_buffer_ms)
+        if args.mode == "snapcast"
+        else max(0, args.snapcast_buffer_ms)
+    )
+
     def publish_ready_stream() -> None:
         if args.no_active_pointer:
             return
@@ -803,6 +883,7 @@ def main() -> int:
             dashboard_slug=args.dashboard_slug,
             start_offset_ms=args.start_offset_ms,
             dry_run=args.dry_run,
+            start_latency_ms=stream_latency_ms,
         )
 
     if args.mode == "multicast":
@@ -810,6 +891,8 @@ def main() -> int:
         if not args.no_auto_listeners:
             send_control(targets, SHARED_STREAM_START_MESSAGE, "started listener")
             time.sleep(max(args.delay_ms, 0) / 1000)
+        if args.anchor_file is not None:
+            write_audio_anchor(args.anchor_file, latency_ms=stream_latency_ms)
         print(
             f"multicast backend={args.backend} file={args.file} "
             f"group={args.multicast_group}:{args.multicast_port} targets={len(targets)}",
@@ -858,6 +941,8 @@ def main() -> int:
                 args.delay_ms,
                 args.start_offset_ms,
                 on_ready=publish_ready_stream,
+                anchor_file=args.anchor_file,
+                latency_ms=stream_latency_ms,
             )
         except Exception as exc:
             if not args.no_active_pointer:

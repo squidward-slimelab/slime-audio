@@ -19,7 +19,11 @@ const dashboardState = {
   waveformHydrating: false,
 };
 
-const DASHBOARD_POLL_MS = 10000;
+const DASHBOARD_POLL_MS = 3000;
+// How far the locally-advanced playhead may diverge from the backend before we
+// snap the anchor back. Small enough to stay glued to the audio, large enough
+// to avoid visible jitter on every poll.
+const PLAYHEAD_SNAP_MS = 600;
 const SETS_POLL_MS = 30000;
 const WAVEFORM_FETCH_LIMIT = 2;
 const MIXER_FRAME_MS = 300;
@@ -107,23 +111,15 @@ function shortPath(path) {
   return parts.slice(Math.max(0, parts.length - 3)).join(" / ");
 }
 
-function generatedAtMs() {
-  const value = Date.parse(dashboardState.payload?.generated_at || "");
-  return Number.isNaN(value) ? Date.now() : value;
-}
-
+// The playhead has exactly one anchor: a backend playhead value and the local
+// clock time we adopted it. We advance from that anchor only while the backend
+// says playback is live, and otherwise mirror the frozen backend value verbatim.
 function livePlayheadMs() {
   const sync = dashboardState.playheadSync;
-  if (sync) {
-    if (!["playing", "window-active"].includes(sync.status)) return sync.baseMs;
-    return Math.min(sync.durationMs || sync.baseMs, sync.baseMs + Math.max(0, performance.now() - sync.clientMs));
-  }
-  const transport = dashboardState.dashboard?.transport || {};
-  const base = transport.playhead_ms;
-  if (base === null || base === undefined) return null;
-  if (!["playing", "window-active"].includes(transport.status)) return base;
-  const duration = transport.duration_ms || base;
-  return Math.min(duration, base + Math.max(0, Date.now() - generatedAtMs()));
+  if (!sync) return null;
+  if (!sync.playing) return sync.baseMs;
+  const advanced = sync.baseMs + Math.max(0, performance.now() - sync.clientMs);
+  return Math.min(sync.durationMs || advanced, advanced);
 }
 
 function syncPlayhead(transport) {
@@ -132,20 +128,19 @@ function syncPlayhead(transport) {
     dashboardState.playheadSync = null;
     return;
   }
+  const playing = Boolean(transport.playing);
+  const durationMs = transport.duration_ms || base;
   const current = livePlayheadMs();
+  const playingChanged = dashboardState.playheadSync?.playing !== playing;
   const drift = current === null ? Infinity : Math.abs(current - base);
-  const statusChanged = dashboardState.playheadSync?.status !== transport.status;
-  if (!dashboardState.playheadSync || drift > 1500 || statusChanged) {
-    dashboardState.playheadSync = {
-      baseMs: base,
-      clientMs: performance.now(),
-      durationMs: transport.duration_ms || base,
-      status: transport.status,
-    };
+  // Snap on first sync, on any play/stop transition, or once we drift past
+  // tolerance; otherwise keep the local clock running for smoothness.
+  if (!dashboardState.playheadSync || playingChanged || drift > PLAYHEAD_SNAP_MS) {
+    dashboardState.playheadSync = { baseMs: base, clientMs: performance.now(), durationMs, playing };
     return;
   }
-  dashboardState.playheadSync.durationMs = transport.duration_ms || base;
-  dashboardState.playheadSync.status = transport.status;
+  dashboardState.playheadSync.durationMs = durationMs;
+  dashboardState.playheadSync.playing = playing;
 }
 
 function eventSignature(dashboard) {

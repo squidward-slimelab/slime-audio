@@ -601,6 +601,10 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
     return {
         "status": status,
         "stale": stale,
+        # Single authoritative signal for whether the playhead is advancing. The
+        # frontend extrapolates only while this is true and otherwise mirrors the
+        # frozen playhead_ms verbatim.
+        "playing": status in {"playing", "window-active"},
         "updated_at": updated_at,
         "completed_at": completed_at,
         "failed_at": failed_at,

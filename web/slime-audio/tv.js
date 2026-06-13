@@ -1,4 +1,4 @@
-const POLL_MS = 5000;
+const POLL_MS = 3000;
 const WAVEFORM_BINS = 420;
 
 const state = {
@@ -50,31 +50,32 @@ function shortMeta(event) {
   return event.display_meta || event.artist || event.album || event.path || "";
 }
 
+// Mirror of the dashboard playhead model: one anchor, advanced only while the
+// backend reports playback live, otherwise frozen at the backend value.
+const PLAYHEAD_SNAP_MS = 600;
+
 function syncPlayhead(transport) {
   const base = transport.playhead_ms;
   if (base === null || base === undefined) {
     state.sync = null;
     return;
   }
-  const status = transport.status || "idle";
+  const playing = Boolean(transport.playing);
+  const durationMs = transport.duration_ms || Number(base);
   const live = livePlayheadMs();
-  const shouldReset = !state.sync || live === null || Math.abs(Number(base) - live) > 1500 || state.sync.status !== status;
+  const playingChanged = state.sync?.playing !== playing;
+  const shouldReset = !state.sync || live === null || playingChanged || Math.abs(Number(base) - live) > PLAYHEAD_SNAP_MS;
   if (shouldReset) {
-    state.sync = {
-      baseMs: Number(base),
-      syncedAt: performance.now(),
-      status,
-      durationMs: transport.duration_ms || Number(base),
-    };
+    state.sync = { baseMs: Number(base), syncedAt: performance.now(), playing, durationMs };
+    return;
   }
-  state.sync.durationMs = transport.duration_ms || state.sync.durationMs;
+  state.sync.durationMs = durationMs;
+  state.sync.playing = playing;
 }
 
 function livePlayheadMs() {
   if (!state.sync) return null;
-  const elapsed = state.sync.status === "playing" || state.sync.status === "window-active"
-    ? performance.now() - state.sync.syncedAt
-    : 0;
+  const elapsed = state.sync.playing ? performance.now() - state.sync.syncedAt : 0;
   return Math.min(state.sync.durationMs || state.sync.baseMs, state.sync.baseMs + elapsed);
 }
 
