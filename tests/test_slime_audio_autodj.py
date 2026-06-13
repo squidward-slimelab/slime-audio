@@ -386,6 +386,15 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             target_index = int(target_id.rsplit("-", 1)[1])
             adjacent = set(lead_paths[max(0, target_index - 1) : min(len(lead_paths), target_index + 2)])
             self.assertNotIn(clip["path"], adjacent)
+            plan = clip.get("stem_layer_plan")
+            self.assertIsInstance(plan, dict)
+            self.assertEqual(plan["source_stems"], ["drums", "bass", "other"])
+            self.assertIn("not a terminal", plan["entry_intent"])
+            target = next(item for item in payload["clips"] if item["id"] == target_id)
+            target_end = target["start_ms"] + target["duration_ms"]
+            self.assertLessEqual(clip["start_ms"] + clip["duration_ms"], target_end - 24_000)
+        automation_roles = {automation.get("planner_role") for automation in updated["deck_automations"]}
+        self.assertIn("planned-stem-layer-automation", automation_roles)
 
     def test_drum_only_structural_beds_are_not_buried_by_generic_bed_curve(self):
         args = autodj_args(bed_gain_db=-6.0, bed_lowpass_hz=1_800.0, bed_highpass_hz=90.0)
@@ -440,6 +449,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         self.assertEqual(drum_bed["play_stems"], ["drums"])
         self.assertGreaterEqual(drum_bed["gain_db"], -4.0)
         self.assertIn("component-aware drum bed", drum_bed["component_balance_strategy"])
+        self.assertEqual(drum_bed["stem_layer_plan"]["source_stems"], ["drums"])
         gain_points = [
             point["value"]
             for automation in updated["deck_automations"]
@@ -513,6 +523,13 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                                 "planner_role": "drum-bed",
                                 "play_stems": ["drums"],
                                 "component_balance_strategy": "component-aware drum bed: fader first, preserve kick/snare/hat attack",
+                                "stem_layer_plan": {
+                                    "source_stems": ["drums"],
+                                    "target_stems": ["vocals", "drums", "bass", "other"],
+                                    "entry_intent": "planned",
+                                    "exit_intent": "planned",
+                                    "automation_intent": {"gain_db": "planned"},
+                                },
                             },
                         ],
                     }
@@ -523,6 +540,38 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             result = validate_component_bed_balance(session_path, SimpleNamespace())
 
         self.assertEqual(result["checked"], 1)
+
+    def test_component_bed_balance_guard_rejects_balanced_bed_without_layer_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-4"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "unplanned-drums",
+                                "deck": "deck-4",
+                                "source_path": "/music/bed.flac",
+                                "at_ms": 16_000,
+                                "duration_ms": 32_000,
+                                "gain_db": -4.0,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                                "component_balance_strategy": "component-aware drum bed: fader first",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_component_bed_balance(session_path, SimpleNamespace())
+
+        self.assertIn("no explicit stem-layer plan", str(raised.exception))
 
     def test_scratch_material_policy_falls_back_when_only_scratch_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1185,6 +1185,73 @@ def structural_bed_balance_profile(play_stems: list[str], args: argparse.Namespa
     }
 
 
+def plan_structural_bed_layer(
+    lead: dict[str, Any],
+    source: SelectedTrack,
+    play_stems: list[str],
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    lead_start = int(lead.get("start_ms", lead.get("start", 0)) or 0)
+    lead_duration = int(lead.get("duration_ms", lead.get("duration", 0)) or 0)
+    if lead_duration < 48_000:
+        return None
+    source_duration = source.duration_ms or args.default_track_ms
+    desired_duration = min(int(args.bed_duration_ms), max(32_000, min(64_000, lead_duration // 3)))
+    latest_start = lead_start + max(0, lead_duration - desired_duration - 24_000)
+    entry_offset = min(max(16_000, lead_duration // 4), max(0, latest_start - lead_start))
+    bed_start = lead_start + entry_offset
+    bed_duration = min(desired_duration, max(32_000, lead_start + lead_duration - bed_start - 24_000))
+    if bed_duration < 32_000:
+        return None
+    bed_end = bed_start + bed_duration
+    trim_start = min(int(args.bed_trim_start_ms), max(0, source_duration - bed_duration - 1_000))
+    balance_profile = structural_bed_balance_profile(play_stems, args)
+    midpoint_ms = bed_start + max(1, bed_duration // 2)
+    end_ms = bed_end
+    gain_offsets = balance_profile["gain_offsets"]
+    lowpass_points = balance_profile["lowpass_points"]
+    highpass_points = balance_profile["highpass_points"]
+    return {
+        "strategy": "planned-stem-layer",
+        "role": "drum-bed" if set(play_stems) == {"drums"} else "rhythm-bed",
+        "source_stems": play_stems,
+        "target_stems": ["vocals", "drums", "bass", "other"],
+        "entry_intent": "mid-section groove injection; not a terminal next-track drum preview",
+        "exit_intent": "fade and filter out before the lead exit unless a transition plan explicitly takes over",
+        "lead_action_id": lead.get("id"),
+        "source_path": source.path,
+        "start_ms": bed_start,
+        "duration_ms": bed_duration,
+        "end_ms": bed_end,
+        "trim_start_ms": trim_start,
+        "balance_profile": balance_profile["strategy"],
+        "gain_db": balance_profile["gain_db"],
+        "automation_intent": {
+            "gain_db": "audible fader entrance, hold, then exit fade",
+            "lowpass_hz": "open enough for the selected stems to read, then soften the exit",
+            "highpass_hz": "carve mud without deleting kick/snare identity",
+        },
+        "automation_points": {
+            "gain_db": [
+                {"at_ms": bed_start, "value": balance_profile["gain_db"] + gain_offsets[0]},
+                {"at_ms": bed_start + min(8_000, bed_duration // 4), "value": balance_profile["gain_db"] + gain_offsets[1]},
+                {"at_ms": max(bed_start, end_ms - 8_000), "value": balance_profile["gain_db"] + gain_offsets[2]},
+                {"at_ms": end_ms, "value": balance_profile["gain_db"] + gain_offsets[3]},
+            ],
+            "lowpass_hz": [
+                {"at_ms": bed_start, "value": lowpass_points[0]},
+                {"at_ms": midpoint_ms, "value": lowpass_points[1]},
+                {"at_ms": end_ms, "value": lowpass_points[2]},
+            ],
+            "highpass_hz": [
+                {"at_ms": bed_start, "value": highpass_points[0]},
+                {"at_ms": midpoint_ms, "value": highpass_points[1]},
+                {"at_ms": end_ms, "value": highpass_points[2]},
+            ],
+        },
+    }
+
+
 def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
     payload = load_session_payload(session_path)
     compiled = compile_actions_payload(payload)
@@ -1268,32 +1335,16 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
         if source is None:
             continue
         used_source_paths.add(source.path)
-        lead_start = int(lead.get("start_ms", lead.get("start", 0)) or 0)
-        lead_duration = int(lead.get("duration_ms", lead.get("duration", 0)) or 0)
-        if lead_duration <= 0:
-            continue
-        bed_start = lead_start + min(24_000, max(0, lead_duration // 5))
-        bed_duration = min(args.bed_duration_ms, max(32_000, lead_duration - (bed_start - lead_start) - 4_000))
-        if bed_duration < 32_000:
-            continue
-        bed_end = bed_start + bed_duration
-        if any(overlaps(bed_start, bed_end, start, end) for start, end in bed_windows):
-            continue
-        source_duration = source.duration_ms or args.default_track_ms
-        trim_start = min(args.bed_trim_start_ms, max(0, source_duration - bed_duration - 1_000))
         bed_id = f"bed-{bed_number:03d}-{slugify(source.title)[:40]}"
         play_stems = ["drums", "bass", "other"]
         bed_event: dict[str, Any] = {
             "id": bed_id,
             "deck": "deck-4",
-            "start_ms": bed_start,
-            "trim_start_ms": trim_start,
-            "duration_ms": bed_duration,
             "fade_in_ms": args.bed_fade_in_ms,
             "fade_out_ms": args.bed_fade_out_ms,
             "planner_role": "rhythm-bed",
             "bed_under": lead.get("id"),
-            "bed_selection_reason": "sparse structural bed; avoids current, previous, and next lead when possible",
+            "bed_selection_reason": "sparse planned stem layer; avoids current, previous, and next lead when possible",
         }
         if rhythm_bed_score(source) <= 0:
             bed_event["planner_role"] = "drum-bed"
@@ -1347,9 +1398,20 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
                     bed_event["planner_role"] = "drum-bed"
                     play_stems = ["drums"]
                     bed_event["play_stems"] = play_stems
-        balance_profile = structural_bed_balance_profile(play_stems, args)
-        bed_event["gain_db"] = balance_profile["gain_db"]
-        bed_event["component_balance_strategy"] = balance_profile["strategy"]
+        plan = plan_structural_bed_layer(lead, source, play_stems, args)
+        if plan is None:
+            continue
+        bed_start = int(plan["start_ms"])
+        bed_duration = int(plan["duration_ms"])
+        bed_end = int(plan["end_ms"])
+        if any(overlaps(bed_start, bed_end, start, end) for start, end in bed_windows):
+            continue
+        bed_event["start_ms"] = bed_start
+        bed_event["trim_start_ms"] = int(plan["trim_start_ms"])
+        bed_event["duration_ms"] = bed_duration
+        bed_event["gain_db"] = float(plan["gain_db"])
+        bed_event["component_balance_strategy"] = str(plan["balance_profile"])
+        bed_event["stem_layer_plan"] = plan
         if bool(getattr(args, "stem_aware_remix", False)):
             payload = add_action(
                 payload,
@@ -1372,46 +1434,32 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
                 }
             )
         bed_windows.append((bed_start, bed_end))
-        end_ms = bed_start + bed_duration
-        midpoint_ms = bed_start + max(1, bed_duration // 2)
-        gain_offsets = balance_profile["gain_offsets"]
-        lowpass_points = balance_profile["lowpass_points"]
-        highpass_points = balance_profile["highpass_points"]
+        automation_points = plan["automation_points"]
         deck_automations.extend(
             [
                 {
                     "target": "deck-4",
                     "param": "gain_db",
                     "source_clip_id": bed_id,
-                    "planner_role": "bed-filter-carve",
-                    "points": [
-                        {"at_ms": bed_start, "value": balance_profile["gain_db"] + gain_offsets[0]},
-                        {"at_ms": bed_start + min(8_000, bed_duration // 4), "value": balance_profile["gain_db"] + gain_offsets[1]},
-                        {"at_ms": max(bed_start, end_ms - 8_000), "value": balance_profile["gain_db"] + gain_offsets[2]},
-                        {"at_ms": end_ms, "value": balance_profile["gain_db"] + gain_offsets[3]},
-                    ],
+                    "planner_role": "planned-stem-layer-automation",
+                    "stem_layer_plan_ref": bed_id,
+                    "points": automation_points["gain_db"],
                 },
                 {
                     "target": "deck-4",
                     "param": "lowpass_hz",
                     "source_clip_id": bed_id,
-                    "planner_role": "bed-filter-carve",
-                    "points": [
-                        {"at_ms": bed_start, "value": lowpass_points[0]},
-                        {"at_ms": midpoint_ms, "value": lowpass_points[1]},
-                        {"at_ms": end_ms, "value": lowpass_points[2]},
-                    ],
+                    "planner_role": "planned-stem-layer-automation",
+                    "stem_layer_plan_ref": bed_id,
+                    "points": automation_points["lowpass_hz"],
                 },
                 {
                     "target": "deck-4",
                     "param": "highpass_hz",
                     "source_clip_id": bed_id,
-                    "planner_role": "bed-filter-carve",
-                    "points": [
-                        {"at_ms": bed_start, "value": highpass_points[0]},
-                        {"at_ms": midpoint_ms, "value": highpass_points[1]},
-                        {"at_ms": end_ms, "value": highpass_points[2]},
-                    ],
+                    "planner_role": "planned-stem-layer-automation",
+                    "stem_layer_plan_ref": bed_id,
+                    "points": automation_points["highpass_hz"],
                 },
             ]
         )
@@ -1427,7 +1475,7 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
     )
     notes = payload.setdefault("notes", {})
     notes["bed_count"] = int(notes.get("bed_count") or 0) + len(added)
-    notes["structural_bed_strategy"] = "sparse non-adjacent rhythm beds with component-aware fader/EQ balance"
+    notes["structural_bed_strategy"] = "sparse non-adjacent planned stem layers with component-aware fader/EQ balance"
     notes["structural_bed_target_count"] = target_count
     write_payload(session_path, payload)
     return {"added": len(added), "beds": added}
@@ -1911,6 +1959,14 @@ def validate_component_bed_balance(session_path: Path, args: argparse.Namespace)
                     "reason": "drum bed uses old buried gain without component-aware fader/EQ balance",
                 }
             )
+        if strategy and "bed" in role and not isinstance(item.get("stem_layer_plan"), dict):
+            failures.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "planner_role": role,
+                    "reason": "bed has component balance but no explicit stem-layer plan for stems, timing, exit, and automation intent",
+                }
+            )
     if failures:
         raise SystemExit(f"component bed balance guard failed: {json.dumps(failures[:5], sort_keys=True)}")
     return {"checked": checked}
@@ -2073,70 +2129,92 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
     if bed_duration >= 32_000 and not has_structural_beds:
         ensure_utility_deck(session_path, "deck-4")
         bed_id = f"autodj-bed-{slugify(str(bed_source['id']))[:32]}"
-        balance_profile = structural_bed_balance_profile(["drums", "bass", "other"], args)
+        bed_source_track = SelectedTrack(
+            path=event_source(bed_source),
+            artist=str(bed_source.get("artist") or ""),
+            title=str(bed_source.get("id") or "bed source"),
+            album=str(bed_source.get("album") or ""),
+            score=0.0,
+            duration_ms=clip_duration_ms(bed_source),
+            last_played_at=None,
+            plays_seen=0,
+            reasons=[],
+        )
+        plan = plan_structural_bed_layer(target, bed_source_track, ["drums", "bass", "other"], args)
+        if plan is None:
+            failures.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "error": "no viable planned stem layer"})
+        else:
+            bed_start = int(plan["start_ms"])
+            bed_duration = int(plan["duration_ms"])
         try:
-            session_payload = load_session_payload(session_path)
-            session_payload = add_action(
-                session_payload,
-                action={
-                    "type": "load_track",
-                    "id": bed_id,
-                    "deck": "deck-4",
-                    "source_path": event_source(bed_source),
-                    "at_ms": bed_start,
-                    "trim_start_ms": min(60_000, max(0, clip_duration_ms(bed_source) - bed_duration - 1_000)),
-                    "duration_ms": bed_duration,
-                    "gain_db": balance_profile["gain_db"],
-                    "fade_in_ms": 3000,
-                    "fade_out_ms": 1500,
-                    "play_stems": ["drums", "bass", "other"],
-                    "planner_role": "rhythm-bed",
-                    "bed_under": target.get("id"),
-                    "component_balance_strategy": balance_profile["strategy"],
-                },
-                db_path=args.db,
-                lock_before_ms=None,
-                force=True,
-            )
-            gain_offsets = balance_profile["gain_offsets"]
-            lowpass_points = balance_profile["lowpass_points"]
-            highpass_points = balance_profile["highpass_points"]
-            for action in (
-                {
-                    "type": "knob_lerp",
-                    "id": f"{bed_id}-gain-ride",
-                    "target": "deck-4",
-                    "param": "gain_db",
-                    "at_ms": bed_start,
-                    "duration_ms": bed_duration,
-                    "from": balance_profile["gain_db"] + gain_offsets[0],
-                    "to": balance_profile["gain_db"] + gain_offsets[2],
-                },
-                {
-                    "type": "knob_lerp",
-                    "id": f"{bed_id}-lowpass-open",
-                    "target": "deck-4",
-                    "param": "lowpass_hz",
-                    "at_ms": bed_start,
-                    "duration_ms": bed_duration,
-                    "from": lowpass_points[0],
-                    "to": lowpass_points[1],
-                },
-                {
-                    "type": "knob_lerp",
-                    "id": f"{bed_id}-highpass-trim",
-                    "target": "deck-4",
-                    "param": "highpass_hz",
-                    "at_ms": bed_start,
-                    "duration_ms": bed_duration,
-                    "from": highpass_points[0],
-                    "to": highpass_points[1],
-                },
-            ):
-                session_payload = add_action(session_payload, action=action, db_path=args.db, lock_before_ms=None, force=True)
-            write_payload(session_path, session_payload)
-            moves.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "action_id": bed_id})
-            moves.append({"kind": "bed-filter-carve", "source": bed_id, "action_id": f"{bed_id}-lowpass-open"})
+            if plan is not None:
+                session_payload = load_session_payload(session_path)
+                session_payload = add_action(
+                    session_payload,
+                    action={
+                        "type": "load_track",
+                        "id": bed_id,
+                        "deck": "deck-4",
+                        "source_path": event_source(bed_source),
+                        "at_ms": bed_start,
+                        "trim_start_ms": int(plan["trim_start_ms"]),
+                        "duration_ms": bed_duration,
+                        "gain_db": float(plan["gain_db"]),
+                        "fade_in_ms": 3000,
+                        "fade_out_ms": 1500,
+                        "play_stems": ["drums", "bass", "other"],
+                        "planner_role": "rhythm-bed",
+                        "bed_under": target.get("id"),
+                        "component_balance_strategy": str(plan["balance_profile"]),
+                        "stem_layer_plan": plan,
+                    },
+                    db_path=args.db,
+                    lock_before_ms=None,
+                    force=True,
+                )
+                automation_points = plan["automation_points"]
+                for action in (
+                    {
+                        "type": "knob_lerp",
+                        "id": f"{bed_id}-gain-ride",
+                        "target": "deck-4",
+                        "param": "gain_db",
+                        "at_ms": bed_start,
+                        "duration_ms": bed_duration,
+                        "from": automation_points["gain_db"][0]["value"],
+                        "to": automation_points["gain_db"][2]["value"],
+                        "planner_role": "planned-stem-layer-automation",
+                        "stem_layer_plan_ref": bed_id,
+                    },
+                    {
+                        "type": "knob_lerp",
+                        "id": f"{bed_id}-lowpass-open",
+                        "target": "deck-4",
+                        "param": "lowpass_hz",
+                        "at_ms": bed_start,
+                        "duration_ms": bed_duration,
+                        "from": automation_points["lowpass_hz"][0]["value"],
+                        "to": automation_points["lowpass_hz"][1]["value"],
+                        "planner_role": "planned-stem-layer-automation",
+                        "stem_layer_plan_ref": bed_id,
+                    },
+                    {
+                        "type": "knob_lerp",
+                        "id": f"{bed_id}-highpass-trim",
+                        "target": "deck-4",
+                        "param": "highpass_hz",
+                        "at_ms": bed_start,
+                        "duration_ms": bed_duration,
+                        "from": automation_points["highpass_hz"][0]["value"],
+                        "to": automation_points["highpass_hz"][1]["value"],
+                        "planner_role": "planned-stem-layer-automation",
+                        "stem_layer_plan_ref": bed_id,
+                    },
+                ):
+                    session_payload = add_action(session_payload, action=action, db_path=args.db, lock_before_ms=None, force=True)
+                write_payload(session_path, session_payload)
+                moves.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "action_id": bed_id})
+                moves.append({"kind": "planned-stem-layer-automation", "source": bed_id, "action_id": f"{bed_id}-lowpass-open"})
         except Exception as error:
             failures.append(
                 {
