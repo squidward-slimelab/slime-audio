@@ -8,6 +8,7 @@ import math
 import re
 import sqlite3
 import subprocess
+import wave
 from dataclasses import dataclass, field
 from datetime import datetime
 from fractions import Fraction
@@ -1401,23 +1402,28 @@ def slug(value: str, fallback: str) -> str:
 
 
 def probe_duration_ms(path: str) -> int:
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=nw=1:nk=1",
-            path,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    duration_seconds = float(result.stdout.strip())
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nw=1:nk=1",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        duration_seconds = float(result.stdout.strip())
+    except FileNotFoundError:
+        with wave.open(path, "rb") as audio:
+            frame_rate = audio.getframerate()
+            duration_seconds = audio.getnframes() / frame_rate if frame_rate else 0
     if duration_seconds <= 0:
         raise ValueError(f"could not determine positive duration for {path}")
     return int(round(duration_seconds * 1000))

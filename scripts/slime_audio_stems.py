@@ -86,31 +86,39 @@ def resolve_track(conn: sqlite3.Connection, value: str) -> tuple[Path, str | Non
 
 
 def probe_audio(path: Path) -> dict[str, int | float]:
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-show_entries",
-            "format=duration:stream=sample_rate,channels",
-            "-select_streams",
-            "a:0",
-            "-of",
-            "json",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    payload = json.loads(result.stdout)
-    stream = (payload.get("streams") or [{}])[0]
-    duration_s = float((payload.get("format") or {}).get("duration") or 0)
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-show_entries",
+                "format=duration:stream=sample_rate,channels",
+                "-select_streams",
+                "a:0",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(result.stdout)
+        stream = (payload.get("streams") or [{}])[0]
+        duration_s = float((payload.get("format") or {}).get("duration") or 0)
+        sample_rate = int(stream.get("sample_rate") or 0)
+        channels = int(stream.get("channels") or 0)
+    except FileNotFoundError:
+        with wave.open(str(path), "rb") as audio:
+            sample_rate = int(audio.getframerate())
+            channels = int(audio.getnchannels())
+            duration_s = audio.getnframes() / sample_rate if sample_rate else 0
     return {
         "duration_ms": int(round(duration_s * 1000)),
-        "sample_rate": int(stream.get("sample_rate") or 0),
-        "channels": int(stream.get("channels") or 0),
+        "sample_rate": sample_rate,
+        "channels": channels,
     }
 
 
