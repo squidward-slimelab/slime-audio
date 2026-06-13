@@ -1880,6 +1880,42 @@ def validate_no_vanilla_leads(session_path: Path, args: argparse.Namespace) -> d
     return {"checked": len(leads), "max_allowed_gap_ms": args.max_vanilla_lead_ms}
 
 
+def validate_component_bed_balance(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    payload = load_session_payload(session_path)
+    candidates = [
+        item
+        for item in [*payload.get("clips", []), *payload.get("actions", [])]
+        if isinstance(item, dict)
+        and item.get("type") in {None, "load_track"}
+        and ("bed" in str(item.get("planner_role") or "") or item.get("play_stems") == ["drums"])
+    ]
+    failures: list[dict[str, Any]] = []
+    checked = 0
+    for item in candidates:
+        play_stems = item.get("play_stems") if isinstance(item.get("play_stems"), list) else []
+        role = str(item.get("planner_role") or "")
+        if role != "drum-bed" and set(play_stems) != {"drums"}:
+            continue
+        checked += 1
+        try:
+            gain_db = float(item.get("gain_db", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            gain_db = 0.0
+        strategy = str(item.get("component_balance_strategy") or "")
+        if gain_db <= -6.0 and "component-aware drum bed" not in strategy:
+            failures.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "gain_db": gain_db,
+                    "planner_role": role,
+                    "reason": "drum bed uses old buried gain without component-aware fader/EQ balance",
+                }
+            )
+    if failures:
+        raise SystemExit(f"component bed balance guard failed: {json.dumps(failures[:5], sort_keys=True)}")
+    return {"checked": checked}
+
+
 def stem_group_to_guard_event(group: dict[str, Any], actions_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
     event = dict(group)
     source_action_id = str(group.get("source_action_id") or group.get("id") or "")
@@ -2208,6 +2244,7 @@ def continue_set(args: argparse.Namespace) -> int:
         transition_decision_guard = validate_transition_decisions(session_path, args)
         harmonic_guard = validate_harmonic_overlaps(session_path, args)
         vocal_guards = validate_vocal_guards(session_path, args)
+        component_bed_balance_guard = validate_component_bed_balance(session_path, args)
         stem_readiness = stem_readiness_report(selected, args)
         if args.remix_focus:
             move_kinds = {str(move.get("kind") or "") for move in creative.get("moves", [])}
@@ -2240,6 +2277,7 @@ def continue_set(args: argparse.Namespace) -> int:
             "transition_decision_guard": transition_decision_guard,
             "harmonic_guard": harmonic_guard,
             "vocal_guards": vocal_guards,
+            "component_bed_balance_guard": component_bed_balance_guard,
             "stem_readiness": stem_readiness,
             "tracks": [asdict(track) for track in selected],
             "structure_rejections": structure_rejections,
@@ -2276,6 +2314,7 @@ def validate_dj_session(args: argparse.Namespace) -> int:
         "transition_decision_guard": validate_transition_decisions(args.session, args),
         "harmonic_guard": validate_harmonic_overlaps(args.session, args),
         "vocal_guards": validate_vocal_guards(args.session, args),
+        "component_bed_balance_guard": validate_component_bed_balance(args.session, args),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
@@ -2349,6 +2388,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--bed-fade-out-ms", type=int, default=1_500)
     cont.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
     cont.add_argument("--bed-highpass-hz", type=float, default=90.0)
+    cont.add_argument("--max-structural-beds", type=int, default=4)
     cont.add_argument("--vocal-drop-count", type=int)
     cont.add_argument("--vocal-drop-volume", type=float, default=1.65)
     cont.add_argument("--vocal-drop-duck-volume", type=float, default=0.42)

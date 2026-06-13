@@ -27,6 +27,7 @@ from slime_audio_autodj import (
     select_tracks,
     structural_bed_balance_profile,
     stem_readiness_report,
+    validate_component_bed_balance,
     taste_affinity,
     validate_harmonic_overlaps,
     validate_no_vanilla_leads,
@@ -453,6 +454,75 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(min(gain_points), -6.0)
         self.assertGreaterEqual(min(lowpass_points), 4_200.0)
+
+    def test_component_bed_balance_guard_rejects_old_buried_drum_beds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-4"],
+                        "clips": [
+                            {
+                                "id": "lead-a",
+                                "deck": "deck-1",
+                                "path": "/music/lead.flac",
+                                "start_ms": 0,
+                                "duration_ms": 64_000,
+                                "planner_role": "lead",
+                            },
+                            {
+                                "id": "buried-drums",
+                                "deck": "deck-4",
+                                "path": "/music/bed.flac",
+                                "start_ms": 16_000,
+                                "duration_ms": 32_000,
+                                "gain_db": -6.5,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_component_bed_balance(session_path, SimpleNamespace())
+
+        self.assertIn("component bed balance guard failed", str(raised.exception))
+
+    def test_component_bed_balance_guard_accepts_component_aware_drum_beds(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-4"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "balanced-drums",
+                                "deck": "deck-4",
+                                "source_path": "/music/bed.flac",
+                                "at_ms": 16_000,
+                                "duration_ms": 32_000,
+                                "gain_db": -4.0,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                                "component_balance_strategy": "component-aware drum bed: fader first, preserve kick/snare/hat attack",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = validate_component_bed_balance(session_path, SimpleNamespace())
+
+        self.assertEqual(result["checked"], 1)
 
     def test_scratch_material_policy_falls_back_when_only_scratch_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
