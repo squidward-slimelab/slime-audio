@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import audioop
 import hashlib
 import json
 import math
@@ -247,6 +248,132 @@ def measure_wav(path: Path, window_ms: int = WINDOW_MS) -> tuple[dict[str, float
         },
         windows,
     )
+
+
+def parse_stems(value: str) -> list[str]:
+    stems = list(CANONICAL_STEMS) if value == "all" else [item.strip() for item in value.split(",") if item.strip()]
+    unknown = [stem for stem in stems if stem not in CANONICAL_STEMS]
+    if unknown:
+        raise SystemExit(f"unknown stem(s): {', '.join(unknown)}")
+    if not stems:
+        raise SystemExit("at least one stem is required")
+    return stems
+
+
+def ready_stem_set(conn: sqlite3.Connection, track: str, *, model: str, profile: str, sample_rate: int | None, channels: int | None) -> sqlite3.Row | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM track_stem_sets
+        WHERE (id = ? OR source_path = ?)
+          AND status = 'ready'
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (track, track),
+    ).fetchone()
+    if row is not None:
+        return row
+    source_path, duplicate_key = resolve_track(conn, track)
+    audio = probe_audio(source_path)
+    identity = identity_for(
+        source_path,
+        duplicate_key,
+        model=model,
+        profile=profile,
+        sample_rate=sample_rate or int(audio["sample_rate"]),
+        channels=channels or int(audio["channels"]),
+    )
+    return fresh_stem_set(conn, identity)
+
+
+def stem_paths_for_set(conn: sqlite3.Connection, stem_set_id: str) -> dict[str, Path]:
+    return {
+        row["stem_name"]: Path(row["path"])
+        for row in conn.execute("SELECT * FROM track_stems WHERE stem_set_id = ?", (stem_set_id,))
+    }
+
+
+def measure_stem_slice(
+    stem_paths: dict[str, Path],
+    selected_stems: list[str],
+    *,
+    start_ms: int,
+    duration_ms: int,
+    gain_db: float = 0.0,
+) -> dict[str, Any]:
+    if start_ms < 0:
+        raise ValueError("start_ms must be >= 0")
+    if duration_ms <= 0:
+        raise ValueError("duration_ms must be > 0")
+    missing = [stem for stem in selected_stems if stem not in stem_paths or not stem_paths[stem].exists()]
+    if missing:
+        raise ValueError(f"missing stem file(s): {', '.join(missing)}")
+
+    handles = [wave.open(str(stem_paths[stem]), "rb") for stem in selected_stems]
+    try:
+        first = handles[0]
+        channels = first.getnchannels()
+        sample_rate = first.getframerate()
+        sample_width = first.getsampwidth()
+        if sample_width != 2:
+            raise ValueError("only 16-bit PCM stem wav files are supported")
+        for handle, stem_name in zip(handles[1:], selected_stems[1:]):
+            if handle.getnchannels() != channels or handle.getframerate() != sample_rate or handle.getsampwidth() != sample_width:
+                raise ValueError(f"stem format mismatch: {stem_name}")
+
+        start_frame = int(round(start_ms * sample_rate / 1000))
+        requested_frames = max(1, int(round(duration_ms * sample_rate / 1000)))
+        for handle in handles:
+            handle.setpos(min(start_frame, handle.getnframes()))
+
+        gain = 10 ** (gain_db / 20.0)
+        total_samples = 0
+        total_square = 0.0
+        peak = 0.0
+        frames_remaining = requested_frames
+        bytes_per_frame = sample_width * channels
+        while frames_remaining > 0:
+            chunk_frames = min(sample_rate, frames_remaining)
+            target_bytes = chunk_frames * bytes_per_frame
+            combined = b"\x00" * target_bytes
+            for handle in handles:
+                raw = handle.readframes(chunk_frames)
+                if len(raw) < target_bytes:
+                    raw += b"\x00" * (target_bytes - len(raw))
+                combined = audioop.add(combined, raw, sample_width)
+            if gain != 1.0:
+                combined = audioop.mul(combined, sample_width, gain)
+            chunk_samples = len(combined) // sample_width
+            chunk_rms = audioop.rms(combined, sample_width) / 32768.0
+            total_samples += chunk_samples
+            total_square += chunk_rms * chunk_rms * chunk_samples
+            peak = max(peak, audioop.max(combined, sample_width) / 32768.0)
+            frames_remaining -= chunk_frames
+    finally:
+        for handle in handles:
+            handle.close()
+
+    if total_samples <= 0:
+        loudness_db = -120.0
+        peak_db = -120.0
+        actual_duration_ms = 0
+    else:
+        rms = math.sqrt(total_square / total_samples) or 1e-9
+        loudness_db = 20 * math.log10(rms)
+        peak_db = 20 * math.log10(peak or 1e-9)
+        actual_duration_ms = int(round((total_samples / channels) / sample_rate * 1000))
+    return {
+        "stems": selected_stems,
+        "start_ms": start_ms,
+        "duration_ms": duration_ms,
+        "actual_duration_ms": actual_duration_ms,
+        "gain_db": gain_db,
+        "loudness_db": loudness_db,
+        "peak_db": peak_db,
+        "sample_rate": sample_rate,
+        "channels": channels,
+    }
 
 
 def copy_stems(source_dir: Path, artifact_root: Path) -> dict[str, Path]:
@@ -561,15 +688,10 @@ def command_split(args: argparse.Namespace) -> int:
 
 def command_analyze(args: argparse.Namespace) -> int:
     conn = connect(args.db)
-    row = conn.execute("SELECT * FROM track_stem_sets WHERE id = ? OR source_path = ? ORDER BY updated_at DESC LIMIT 1", (args.track, args.track)).fetchone()
-    if row is None:
-        source_path, duplicate_key = resolve_track(conn, args.track)
-        audio = probe_audio(source_path)
-        identity = identity_for(source_path, duplicate_key, model=args.model, profile=args.profile, sample_rate=args.sample_rate or int(audio["sample_rate"]), channels=args.channels or int(audio["channels"]))
-        row = fresh_stem_set(conn, identity)
+    row = ready_stem_set(conn, args.track, model=args.model, profile=args.profile, sample_rate=args.sample_rate, channels=args.channels)
     if row is None:
         raise SystemExit(f"no ready stem set found: {args.track}")
-    stems = {stem["stem_name"]: Path(stem["path"]) for stem in conn.execute("SELECT * FROM track_stems WHERE stem_set_id = ?", (row["id"],))}
+    stems = stem_paths_for_set(conn, row["id"])
     metrics: dict[str, dict[str, Any]] = {}
     windows: dict[str, list[tuple[int, int, float]]] = {}
     for stem_name, stem_path in stems.items():
@@ -577,6 +699,24 @@ def command_analyze(args: argparse.Namespace) -> int:
     write_stem_rows(conn, row["id"], stems, metrics, windows)
     conn.commit()
     print(json.dumps({"status": "analyzed", "id": row["id"], "windows": sum(len(items) for items in windows.values())}, indent=2))
+    return 0
+
+
+def command_measure_slice(args: argparse.Namespace) -> int:
+    conn = connect(args.db)
+    row = ready_stem_set(conn, args.track, model=args.model, profile=args.profile, sample_rate=args.sample_rate, channels=args.channels)
+    if row is None:
+        raise SystemExit(f"no ready stem set found: {args.track}")
+    selected_stems = parse_stems(args.stems)
+    measurement = measure_stem_slice(
+        stem_paths_for_set(conn, row["id"]),
+        selected_stems,
+        start_ms=args.start_ms,
+        duration_ms=args.duration_ms,
+        gain_db=args.gain_db,
+    )
+    measurement.update({"track": row["source_path"], "stem_set_id": row["id"]})
+    print(json.dumps(measurement, indent=2, sort_keys=True))
     return 0
 
 
@@ -644,6 +784,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     analyze = sub.add_parser("analyze")
     analyze.add_argument("track")
     analyze.set_defaults(func=command_analyze)
+
+    measure_slice = sub.add_parser("measure-slice")
+    measure_slice.add_argument("track")
+    measure_slice.add_argument("--stems", default="all", help="Comma-separated stems or all.")
+    measure_slice.add_argument("--start-ms", type=int, required=True)
+    measure_slice.add_argument("--duration-ms", type=int, required=True)
+    measure_slice.add_argument("--gain-db", type=float, default=0.0)
+    measure_slice.set_defaults(func=command_measure_slice)
 
     verify = sub.add_parser("verify")
     verify.add_argument("track")
