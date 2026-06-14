@@ -5,6 +5,7 @@ The SlimeAudio dashboard is a local web UI served by `scripts/slime_audio_web.py
 ## Responsibilities
 
 - Show active runner state and stale/playback status.
+- Provide basic live transport controls for the active session: play, pause, restart, and seek. These controls call `POST /api/transport`; the backend freezes the authoritative state playhead, stops any active runner/stream processes, and relaunches `slime_audio_session_runner.py` from the stored playhead for play/restart/seek.
 - Render the canonical DJ session timeline, including normal decks, attached effect lanes, the dedicated `deck-5` vocal lane, fader assignments, automation, effects, slip events, and mic lean-ins.
 - Order deck lanes and the mixer mirror as `deck-3`, `deck-1`, `MIC`, `deck-2`, `deck-4`, matching the physical/operator view.
 - Overlay per-deck mixer state curves on timeline rows. Each music deck row synthesizes full-mix lines for level, gain, trim, high/mid/low EQ, and filter state from `deck_automations`, clip occupancy, and legacy clip automation fallback. Top-level `deck_automations` target deck names directly and render on that deck row; legacy clip-owned EQ/filter automation is still remapped from generic automation events back onto the target clip lane, while legacy clip `gain_db` automation is collapsed into one deck gain/fader curve for compatibility. Crossfader automation remains on the fader lane. Hovering a curve shows the deck values at the hovered timestamp, rather than every future automation event on that deck.
@@ -56,6 +57,8 @@ Unknown `/api/*` routes must return JSON errors, not static HTML. The frontend s
 `/api/waveform?path=...&trim_start_ms=...&duration_ms=...&bins=...` returns `{available, peaks, bands}` JSON, where `bands.low`, `bands.mid`, and `bands.high` are normalized arrays used for red/green/blue waveform rendering. Missing files or decode failures should return a JSON payload with `available: false`, not break the timeline.
 
 `POST /api/feedback` appends one JSON object per line to `runtime/dashboard-feedback.jsonl`. The request body uses `category`, optional `rating`, optional `note`, and a `context` object with `session_path`, `active_set`, `transport.playhead_ms`, and the selected normalized timeline event. `GET /api/feedback?limit=8` returns recent feedback for the operator panel. This file is runtime data for later selector/planner review and should not be committed.
+
+`POST /api/transport` accepts `{"action":"play"|"pause"|"restart"|"seek","position_ms":12345,"target":["all"]}`. `position_ms` is required only for `seek`. `pause` writes `runtime/dj-watchdog.paused`, stops the current runner/stream, clears live window anchors, and leaves `runner_status` as `paused`. `play`, `restart`, and `seek` remove the pause file, store the requested playhead, and spawn the native session runner against the active session/state pointers without `--reset-state`.
 
 ## Verification
 

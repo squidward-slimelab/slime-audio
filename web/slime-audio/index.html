@@ -32,6 +32,18 @@
             <strong id="updated-time">--</strong>
           </div>
         </div>
+        <div class="transport-controls" aria-label="playback controls">
+          <div class="transport-buttons">
+            <button id="transport-play" type="button" title="play">▶</button>
+            <button id="transport-pause" type="button" title="pause">⏸</button>
+            <button id="transport-restart" type="button" title="restart">↺</button>
+          </div>
+          <label class="seek-control">
+            <span class="label">seek</span>
+            <input id="transport-seek" type="range" min="0" max="1000" value="0" />
+            <strong id="transport-seek-time">--:--</strong>
+          </label>
+        </div>
       </header>
 
       <section class="status-grid" aria-label="live status">

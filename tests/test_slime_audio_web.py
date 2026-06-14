@@ -633,6 +633,74 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(health["runner_state"], "fatal")
         self.assertEqual(health["runner_exit_reason"], "RuntimeError: boom")
 
+    def test_transport_pause_freezes_playhead_and_sets_pause_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "state.json"
+            session_path = temp / "session.json"
+            pause_file = temp / "dj.paused"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "playhead_ms": 42_000,
+                        "runner_pid": 123,
+                        "stream_pid": 456,
+                        "window_started_at": "2026-05-30T12:00:00-0400",
+                        "window_start_ms": 40_000,
+                        "window_end_ms": 100_000,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session_path.write_text("{}", encoding="utf-8")
+
+            with patch.object(web, "DEFAULT_DJ_PAUSE_FILE", pause_file):
+                with patch.object(web, "stop_transport_processes", return_value={"runner": True, "stream": True}) as stop_mock:
+                    result = web.transport_control(action="pause", state_path=state_path, session_path=session_path)
+
+            updated = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["action"], "pause")
+            self.assertEqual(updated["playhead_ms"], 42_000)
+            self.assertEqual(updated["runner_status"], "paused")
+            self.assertNotIn("window_started_at", updated)
+            self.assertTrue(pause_file.exists())
+            stop_mock.assert_called_once()
+
+    def test_transport_seek_stores_position_and_relaunches_runner(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            state_path = temp / "state.json"
+            session_path = temp / "session.json"
+            pause_file = temp / "dj.paused"
+            state_path.write_text(json.dumps({"playhead_ms": 10_000, "runner_pid": 123}), encoding="utf-8")
+            session_path.write_text("{}", encoding="utf-8")
+            pause_file.write_text("paused\n", encoding="utf-8")
+
+            class FakeProcess:
+                pid = 789
+
+            with patch.object(web, "DEFAULT_DJ_PAUSE_FILE", pause_file):
+                with patch.object(web, "stop_transport_processes", return_value={"runner": True, "stream": False}):
+                    with patch.object(web.subprocess, "Popen", return_value=FakeProcess()) as popen_mock:
+                        result = web.transport_control(
+                            action="seek",
+                            state_path=state_path,
+                            session_path=session_path,
+                            position_ms=90_000,
+                            target=["all"],
+                        )
+
+            updated = json.loads(state_path.read_text(encoding="utf-8"))
+            command = popen_mock.call_args.args[0]
+            self.assertEqual(result["runner"]["pid"], 789)
+            self.assertEqual(updated["playhead_ms"], 90_000)
+            self.assertEqual(updated["runner_status"], "starting")
+            self.assertFalse(pause_file.exists())
+            self.assertIn("--session", command)
+            self.assertIn(str(session_path), command)
+            self.assertNotIn("--reset-state", command)
+
     def test_dashboard_marks_dead_direct_stream_process(self):
         with patch.object(web, "stream_process_alive", return_value=False):
             health = web.runner_health(

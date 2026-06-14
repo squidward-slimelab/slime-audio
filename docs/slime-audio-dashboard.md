@@ -17,6 +17,7 @@ The same server also exposes `/tv` for the living-room TV on SPONGEBOT. That vie
 ## Required Views
 
 - Transport strip: runner status, playhead, render window, and last update.
+- Transport controls: play, pause, restart, and a seek slider for the active session.
 - Now panel: current clip title, source context, status, and whole-session progress.
 - Upcoming panels: future song clips, commentary lean-ins, and runner/receiver health.
 - Arrangement timeline: absolute mix timeline with stable deck lanes ordered `3 1 2 4`, plus utility lanes for voice and automation.
@@ -42,6 +43,8 @@ The dashboard view model includes:
 The frontend should render this view model directly instead of reconstructing timeline semantics from raw session JSON.
 
 `/api/feedback` stores operator feedback in `runtime/dashboard-feedback.jsonl` as append-only JSONL. Each entry includes `created_at`, category, optional rating/note, playhead, active set, session path, and the selected normalized timeline event so future selector/planner fixes can use concrete evidence instead of vague complaints.
+
+`POST /api/transport` powers the dashboard playback controls. Pause freezes the current playhead in the active state file, stops the runner/stream, and writes the DJ pause file. Play, restart, and seek clear the pause file, update the playhead when needed, and relaunch the native session runner from the active session/state pointers.
 
 ## Verification
 

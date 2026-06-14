@@ -17,6 +17,8 @@ const dashboardState = {
   lastSetsRefresh: 0,
   tickInFlight: false,
   waveformHydrating: false,
+  seekDragging: false,
+  transportBusy: false,
 };
 
 const DASHBOARD_POLL_MS = 3000;
@@ -35,6 +37,11 @@ const els = {
   playheadTime: document.querySelector("#playhead-time"),
   windowTime: document.querySelector("#window-time"),
   updatedTime: document.querySelector("#updated-time"),
+  transportPlay: document.querySelector("#transport-play"),
+  transportPause: document.querySelector("#transport-pause"),
+  transportRestart: document.querySelector("#transport-restart"),
+  transportSeek: document.querySelector("#transport-seek"),
+  transportSeekTime: document.querySelector("#transport-seek-time"),
   currentTitle: document.querySelector("#current-title"),
   currentState: document.querySelector("#current-state"),
   currentDetail: document.querySelector("#current-detail"),
@@ -857,6 +864,22 @@ function renderTopline() {
   setBadgeState(els.currentState, transport.status || "idle");
   const pct = transport.duration_ms && playhead !== null ? Math.max(0, Math.min(100, (playhead / transport.duration_ms) * 100)) : 0;
   els.sessionProgress.style.width = `${pct}%`;
+  renderTransportControls(transport, playhead, Boolean(viewedSet));
+}
+
+function renderTransportControls(transport, playhead, archived = false) {
+  const duration = Math.max(0, Number(transport.duration_ms || 0));
+  const disabled = archived || dashboardState.transportBusy || !duration;
+  for (const button of [els.transportPlay, els.transportPause, els.transportRestart]) {
+    if (button) button.disabled = disabled;
+  }
+  if (!els.transportSeek) return;
+  els.transportSeek.disabled = disabled;
+  els.transportSeek.max = String(Math.max(1, duration));
+  if (!dashboardState.seekDragging) {
+    els.transportSeek.value = String(Math.max(0, Math.min(duration || 0, Math.round(playhead || 0))));
+    if (els.transportSeekTime) els.transportSeekTime.textContent = fmtMs(playhead);
+  }
 }
 
 function listItem(event) {
@@ -1116,6 +1139,10 @@ function updatePlayhead() {
   const left = Math.max(0, Math.min(scale.stageWidth, (ms / scale.duration) * scale.stageWidth));
   playhead.style.left = `${left}px`;
   els.playheadTime.textContent = fmtMs(ms);
+  if (!dashboardState.seekDragging && els.transportSeek && !els.transportSeek.disabled) {
+    els.transportSeek.value = String(Math.round(ms));
+    if (els.transportSeekTime) els.transportSeekTime.textContent = fmtMs(ms);
+  }
   if (dashboardState.follow) {
     const viewportStart = els.timelineScroll.scrollLeft;
     const viewportEnd = viewportStart + els.timelineScroll.clientWidth;
@@ -1194,6 +1221,23 @@ async function postJson(url, body = {}) {
     body: JSON.stringify(body),
   });
   return readJsonResponse(response);
+}
+
+async function sendTransport(action, extra = {}) {
+  if (dashboardState.transportBusy) return;
+  dashboardState.transportBusy = true;
+  renderTransportControls(dashboardState.dashboard?.transport || {}, livePlayheadMs(), Boolean(dashboardState.dashboard?.viewed_set));
+  try {
+    els.transportStatus.textContent = action === "seek" ? "seeking" : action;
+    await postJson("/api/transport", { action, target: ["all"], ...extra });
+    dashboardState.signature = "";
+    await tick();
+  } catch (error) {
+    els.transportStatus.textContent = error.message;
+  } finally {
+    dashboardState.transportBusy = false;
+    renderTransportControls(dashboardState.dashboard?.transport || {}, livePlayheadMs(), Boolean(dashboardState.dashboard?.viewed_set));
+  }
 }
 
 function animatePlayhead() {
@@ -1276,6 +1320,36 @@ els.saveLoadedSet.addEventListener("click", async () => {
     els.archiveStatus.textContent = error.message;
   }
 });
+
+if (els.transportPlay) {
+  els.transportPlay.addEventListener("click", () => sendTransport("play"));
+}
+
+if (els.transportPause) {
+  els.transportPause.addEventListener("click", () => sendTransport("pause"));
+}
+
+if (els.transportRestart) {
+  els.transportRestart.addEventListener("click", () => sendTransport("restart"));
+}
+
+if (els.transportSeek) {
+  els.transportSeek.addEventListener("input", () => {
+    dashboardState.seekDragging = true;
+    if (els.transportSeekTime) els.transportSeekTime.textContent = fmtMs(Number(els.transportSeek.value));
+  });
+  els.transportSeek.addEventListener("change", () => {
+    const positionMs = Math.max(0, Number(els.transportSeek.value || 0));
+    dashboardState.seekDragging = false;
+    sendTransport("seek", { position_ms: Math.round(positionMs) });
+  });
+  els.transportSeek.addEventListener("pointerdown", () => {
+    dashboardState.seekDragging = true;
+  });
+  els.transportSeek.addEventListener("pointerup", () => {
+    dashboardState.seekDragging = false;
+  });
+}
 
 els.followPlayhead.addEventListener("change", (event) => {
   dashboardState.follow = event.currentTarget.checked;

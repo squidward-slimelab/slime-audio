@@ -6,6 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import signal
 import socket
 import subprocess
 import time
@@ -21,6 +22,7 @@ from slime_audio_session import VOCAL_DECK, compile_actions_payload, load_payloa
 from slime_audio_sets import (
     DEFAULT_ACTIVE_SET,
     DEFAULT_SETS_DIR,
+    iso_now,
     activate_set,
     get_set,
     list_sets,
@@ -29,6 +31,7 @@ from slime_audio_sets import (
     render_set,
     replay_set,
     save_loaded_set,
+    write_json,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +40,7 @@ DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 DEFAULT_WAVEFORM_CACHE = REPO_ROOT / "runtime" / "waveform-cache.json"
 DEFAULT_FEEDBACK_LOG = REPO_ROOT / "runtime" / "dashboard-feedback.jsonl"
+DEFAULT_DJ_PAUSE_FILE = REPO_ROOT / "runtime" / "dj-watchdog.paused"
 DECK_ORDER = ["deck-3", "deck-1", VOCAL_DECK, "deck-2", "deck-4"]
 LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
@@ -574,7 +578,9 @@ def transport_status(state: dict[str, Any], playhead_ms: int | None, duration_ms
     current = state.get("current")
     runner_status = str(state.get("runner_status") or "")
     status = "idle"
-    if runner_status in {"failed", "fatal", "stopped"} or failed_at:
+    if runner_status == "paused":
+        status = "paused"
+    elif runner_status in {"failed", "fatal", "stopped"} or failed_at:
         status = "failed" if runner_status == "failed" or failed_at else runner_status
     elif completed_at:
         status = "completed"
@@ -686,7 +692,9 @@ def runner_health(state: dict[str, Any], transport: dict[str, Any]) -> dict[str,
     if status == "streaming" and state.get("stream_mode") == "snapcast" and stream_alive is not False:
         snapcast_health = snapcast_stream_health()
     health = "ok"
-    if status in {"failed", "fatal", "stopped"}:
+    if status == "paused":
+        health = "paused"
+    elif status in {"failed", "fatal", "stopped"}:
         health = status
     elif status == "completed" or transport.get("status") == "completed":
         health = "completed"
@@ -839,6 +847,118 @@ def load_dashboard_state(state_path: Path, session_path: Path | None) -> dict[st
     if not session_path or not session_path.exists():
         raise FileNotFoundError(f"native mix session is required: {session_path or DEFAULT_SESSION}")
     return dashboard_payload_from_state(state, state_path, session_path, load_payload(session_path))
+
+
+def stop_pid(pid_value: object, *, process_group: bool = False, timeout_s: float = 2.0) -> bool:
+    if not isinstance(pid_value, int) or pid_value <= 0:
+        return False
+    proc_path = Path("/proc") / str(pid_value)
+    try:
+        if process_group:
+            os.killpg(pid_value, signal.SIGTERM)
+        else:
+            os.kill(pid_value, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not proc_path.exists():
+            return True
+        time.sleep(0.05)
+    if proc_path.exists():
+        try:
+            if process_group:
+                os.killpg(pid_value, signal.SIGKILL)
+            else:
+                os.kill(pid_value, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return True
+
+
+def freeze_transport_state(state_path: Path, playhead_ms: int, *, status: str, reason: str) -> dict[str, Any]:
+    state = load_json(state_path, {})
+    now = iso_now()
+    state.update(
+        {
+            "playhead_ms": max(0, int(playhead_ms)),
+            "runner_status": status,
+            "runner_updated_at": now,
+            "runner_exit_at": now,
+            "runner_exit_reason": reason,
+        }
+    )
+    for key in ("window_started_at", "window_start_ms", "window_end_ms", "window_audio_latency_ms", "completed_at", "failed_at"):
+        state.pop(key, None)
+    write_json(state_path, state)
+    return state
+
+
+def stop_transport_processes(state: dict[str, Any]) -> dict[str, bool]:
+    stopped = {
+        "runner": stop_pid(state.get("runner_pid"), process_group=False),
+        "stream": stop_pid(state.get("stream_pid"), process_group=True),
+    }
+    return stopped
+
+
+def launch_transport_runner(session_path: Path, state_path: Path, *, reset_state: bool = False, target: list[str] | None = None) -> dict[str, Any]:
+    command = [
+        "python3",
+        "scripts/slime_audio_session_runner.py",
+        "--session",
+        session_path.as_posix(),
+        "--state",
+        state_path.as_posix(),
+    ]
+    for value in target or ["all"]:
+        command.extend(["--target", value])
+    if reset_state:
+        command.append("--reset-state")
+    process = subprocess.Popen(command, cwd=REPO_ROOT)
+    return {"command": command, "pid": process.pid}
+
+
+def transport_control(
+    *,
+    action: str,
+    state_path: Path,
+    session_path: Path,
+    position_ms: int | None = None,
+    target: list[str] | None = None,
+) -> dict[str, Any]:
+    state = load_json(state_path, {})
+    current_playhead = playhead_ms_from_state(state_path) if state_path.exists() else 0
+    stopped = stop_transport_processes(state)
+    DEFAULT_DJ_PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if action == "pause":
+        DEFAULT_DJ_PAUSE_FILE.write_text(f"paused from dashboard at {iso_now()}\n", encoding="utf-8")
+        updated = freeze_transport_state(state_path, current_playhead, status="paused", reason="dashboard pause")
+        return {"ok": True, "action": action, "playhead_ms": updated["playhead_ms"], "stopped": stopped}
+
+    if action == "play":
+        DEFAULT_DJ_PAUSE_FILE.unlink(missing_ok=True)
+        freeze_transport_state(state_path, current_playhead, status="starting", reason="dashboard play")
+        launched = launch_transport_runner(session_path, state_path, reset_state=False, target=target)
+        return {"ok": True, "action": action, "playhead_ms": int(current_playhead), "stopped": stopped, "runner": launched}
+
+    if action == "restart":
+        DEFAULT_DJ_PAUSE_FILE.unlink(missing_ok=True)
+        freeze_transport_state(state_path, 0, status="starting", reason="dashboard restart")
+        launched = launch_transport_runner(session_path, state_path, reset_state=False, target=target)
+        return {"ok": True, "action": action, "playhead_ms": 0, "stopped": stopped, "runner": launched}
+
+    if action == "seek":
+        if position_ms is None:
+            raise ValueError("seek requires position_ms")
+        DEFAULT_DJ_PAUSE_FILE.unlink(missing_ok=True)
+        seek_ms = max(0, int(position_ms))
+        freeze_transport_state(state_path, seek_ms, status="starting", reason="dashboard seek")
+        launched = launch_transport_runner(session_path, state_path, reset_state=False, target=target)
+        return {"ok": True, "action": action, "playhead_ms": seek_ms, "stopped": stopped, "runner": launched}
+
+    raise ValueError(f"unsupported transport action: {action}")
 
 
 def load_archived_dashboard_state(slug: str) -> dict[str, Any]:
@@ -1238,6 +1358,27 @@ class SlimeAudioHandler(BaseHTTPRequestHandler):
                         keep=int(body.get("keep", 3)),
                         max_age_hours=float(body.get("max_age_hours", 12)),
                         max_total_mb=float(body.get("max_total_mb", 256)),
+                    )
+                )
+                return
+            if parsed.path == "/api/transport":
+                target = body.get("target") or ["all"]
+                if isinstance(target, str):
+                    target = [target]
+                state_path, session_path = resolve_live_request_paths(
+                    parse_qs(parsed.query),
+                    self.server.state_path,
+                    self.server.session_path,
+                    fixed_state_path=self.server.fixed_state_path,
+                    fixed_session_path=self.server.fixed_session_path,
+                )
+                self.send_json(
+                    transport_control(
+                        action=str(body["action"]),
+                        state_path=state_path,
+                        session_path=session_path,
+                        position_ms=int(body["position_ms"]) if body.get("position_ms") is not None else None,
+                        target=[str(item) for item in target],
                     )
                 )
                 return
