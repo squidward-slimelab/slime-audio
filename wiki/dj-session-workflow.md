@@ -105,6 +105,8 @@ python3 scripts/slime_audio_mix_planner.py --session runtime/mix-session.json --
 
 The planner can add phrase-aware overlays, drop doubles, rendered tempo/key correction, transition automation, and top-level `transition_plans` explaining each adjacent-pair decision. For live repair passes, add `--cached-analysis-only --horizon-ms 1200000` so the planner only uses existing DB analysis and touches a bounded future block. A straight playlist import is not a finished DJ set.
 
+Playlist import is not a valid set-building path. All requested sets must go through the full system: selection intent, analysis, stem preparation where needed, native session actions or stem groups, beat/key decisions, proof renders, and an audit trail. If a text playlist exists, treat it as raw source material only.
+
 For overlapping transitions, key fit is the default target. Use TuneBat-backed DB metadata where available, prefer exact same-key or relative major/minor compatible overlaps, and use conservative rendered correction only when it makes the overlap better. If song key metadata is missing, run the analyzer first. Unsafe transitions should remain hard cuts.
 
 Before the planner runs, selection needs a taste pass:

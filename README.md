@@ -208,7 +208,6 @@ python3 scripts/slime_audio_sets.py cleanup-renders --keep 3 --max-age-hours 12 
 python3 scripts/slime_audio_session.py template > runtime/mix-session.json
 python3 scripts/slime_audio_session.py validate runtime/mix-session.json
 python3 scripts/slime_audio_session.py summary runtime/mix-session.json
-python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json --playlist runtime/set.txt --start 00:00.000 --decks deck-1,deck-2,deck-3,deck-4
 python3 scripts/slime_audio_live_edit.py add-mic --id drop-2 --deck deck-5 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --reason "scheduled lean-in"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]' --reason "shape bed entrance"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param eq_low_db --points-json '[{"at":"01:16.000","value":-4},{"at":"01:48.000","value":-4}]' --reason "thin bed lows under lead"
@@ -236,7 +235,7 @@ python3 scripts/slime_audio_session_mixdown.py runtime/mix-session.json --routin
 python3 scripts/slime_audio_session_runner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --target all
 ```
 
-`import-playlist` is a migration helper: it probes track durations with `ffprobe`, assigns clips to decks, and writes absolute `start_ms` values. After import, future edits should add/move/remove timestamped clips instead of mutating playlist slots.
+Playlist import is intentionally not exposed as a session command. Requested DJ sets must be authored through the full system: analyzed material, native actions or stem groups, explicit cue/tempo/key decisions, proof renders, and an audit trail. A text playlist or timestamped clip sequence is not a finished set.
 
 `scripts/slime_audio_live_edit.py` is the active-session control wrapper. It defaults to `runtime/mix-session.json`, reads `runtime/mix-session-state.json` as the live playhead lock, routes to the existing session edit primitives, and appends `live_edit_applied` events to `runtime/play-history.jsonl`. Use `--force` only for deliberate repair work before the playhead. The lower-level `scripts/slime_audio_session.py` edit commands still exist for setup, tests, and non-active archived sessions.
 

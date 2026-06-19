@@ -1384,23 +1384,6 @@ def playhead_ms_from_state(path: Path, now: float | None = None) -> int:
     return sum(durations.get(track, 0) for track in prior_tracks) + elapsed_ms
 
 
-def read_playlist(path: Path) -> list[str]:
-    tracks = [
-        line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-    if not tracks:
-        raise ValueError(f"playlist is empty: {path}")
-    return tracks
-
-
-def slug(value: str, fallback: str) -> str:
-    stem = Path(value).stem or fallback
-    text = re.sub(r"[^a-zA-Z0-9]+", "-", stem.lower()).strip("-")
-    return text or fallback
-
-
 def probe_duration_ms(path: str) -> int:
     try:
         result = subprocess.run(
@@ -1555,56 +1538,6 @@ def audit_hidden_volume_sag(
             "min_duck_volume": min_duck_volume,
         },
     }
-
-
-def playlist_to_session_payload(
-    tracks: list[str],
-    *,
-    start_ms: int,
-    decks: list[str],
-    gap_ms: int,
-    overlap_ms: int,
-    default_duration_ms: int | None,
-    probe: bool,
-) -> dict[str, Any]:
-    if gap_ms and overlap_ms:
-        raise ValueError("gap_ms and overlap_ms cannot both be set")
-    if not decks:
-        decks = list(DEFAULT_MUSIC_DECKS)
-    if len(decks) > MAX_DECKS:
-        raise ValueError(f"too many decks: {len(decks)} > {MAX_DECKS}")
-
-    cursor_ms = start_ms
-    clips: list[dict[str, Any]] = []
-    for index, track in enumerate(tracks):
-        if probe:
-            duration_ms = probe_duration_ms(track)
-        elif default_duration_ms is not None:
-            duration_ms = default_duration_ms
-        else:
-            duration_ms = None
-        clip: dict[str, Any] = {
-            "id": f"clip-{index + 1:03d}-{slug(track, f'track-{index + 1}')}",
-            "deck": decks[index % len(decks)],
-            "path": track,
-            "start_ms": cursor_ms,
-            "trim_start_ms": 0,
-        }
-        if duration_ms is not None:
-            clip["duration_ms"] = duration_ms
-            cursor_ms += max(0, duration_ms + gap_ms - overlap_ms)
-        clips.append(clip)
-
-    payload = {
-        "version": 1,
-        "decks": decks,
-        "clips": clips,
-        "mic_lean_ins": [],
-        "automations": [],
-        "deck_automations": [],
-    }
-    parse_session(payload)
-    return payload
 
 
 def parse_session(payload: dict[str, Any]) -> MixSession:
@@ -3152,16 +3085,6 @@ def main() -> int:
     audit_volume_parser.add_argument("--fail", action=argparse.BooleanOptionalAction, default=True)
     sub.add_parser("template")
 
-    import_playlist_parser = sub.add_parser("import-playlist")
-    import_playlist_parser.add_argument("session", type=Path)
-    import_playlist_parser.add_argument("--playlist", type=Path, required=True)
-    import_playlist_parser.add_argument("--start", default="0")
-    import_playlist_parser.add_argument("--decks", default="deck-1,deck-2,deck-3,deck-4")
-    import_playlist_parser.add_argument("--gap-ms", type=int, default=0)
-    import_playlist_parser.add_argument("--overlap-ms", type=int, default=0)
-    import_playlist_parser.add_argument("--default-duration")
-    import_playlist_parser.add_argument("--probe", action=argparse.BooleanOptionalAction, default=True)
-
     add_action_parser = sub.add_parser("add-action")
     add_action_parser.add_argument("session", type=Path)
     add_action_parser.add_argument("--create", action="store_true")
@@ -3318,22 +3241,6 @@ def main() -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
         if args.fail and report["finding_count"]:
             return 1
-        return 0
-
-    if args.command == "import-playlist":
-        tracks = read_playlist(args.playlist)
-        decks = [deck.strip() for deck in args.decks.split(",") if deck.strip()]
-        payload = playlist_to_session_payload(
-            tracks,
-            start_ms=parse_ms(args.start, "timeline start"),
-            decks=decks,
-            gap_ms=args.gap_ms,
-            overlap_ms=args.overlap_ms,
-            default_duration_ms=parse_ms(args.default_duration, "default duration") if args.default_duration else None,
-            probe=args.probe,
-        )
-        write_payload(args.session, payload)
-        print(f"imported {len(tracks)} playlist tracks into timestamped session {args.session}")
         return 0
 
     if args.command == "add-action":

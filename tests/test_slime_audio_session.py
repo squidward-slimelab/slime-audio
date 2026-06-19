@@ -1035,14 +1035,14 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertIn("deck-5", session.decks)
         self.assertEqual(session.fader_routing["deck-5"], "THRU")
 
-    def test_cli_imports_playlist_as_timestamped_timeline(self):
+    def test_cli_import_playlist_is_not_available(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             playlist = temp / "playlist.txt"
             session_path = temp / "session.json"
             playlist.write_text("/music/one.flac\n/music/two.flac\n/music/three.flac\n", encoding="utf-8")
 
-            self.assertEqual(
+            with self.assertRaises(SystemExit) as exc:
                 run_cli(
                     [
                         "slime_audio_session.py",
@@ -1050,25 +1050,11 @@ class SlimeAudioSessionTests(unittest.TestCase):
                         str(session_path),
                         "--playlist",
                         str(playlist),
-                        "--start",
-                        "00:05.000",
-                        "--decks",
-                        "deck-1,deck-2",
-                        "--default-duration",
-                        "00:10.000",
-                        "--overlap-ms",
-                        "2000",
-                        "--no-probe",
                     ]
-                ),
-                0,
-            )
+                )
 
-            session = load_session(session_path)
-
-        self.assertEqual([clip.start_ms for clip in session.clips], [5_000, 13_000, 21_000])
-        self.assertEqual([clip.deck for clip in session.clips], ["deck-1", "deck-2", "deck-1"])
-        self.assertEqual([clip.duration_ms for clip in session.clips], [10_000, 10_000, 10_000])
+        self.assertEqual(exc.exception.code, 2)
+        self.assertFalse(session_path.exists())
 
     def test_cli_remove_deletes_targeted_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
