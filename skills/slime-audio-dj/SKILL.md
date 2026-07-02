@@ -374,6 +374,8 @@ python3 scripts/slime_audio_autodj.py extend \
   --remix-focus
 ```
 
+For operator-requested restrained sets (sleep, background listening), pass `--operator-restraint` to `continue`/`extend`: the vanilla guard keeps its gap check but stops requiring overlapping musical material on every lead, because sparse gentle moves are the deliberate arrangement there. Never pass it by default — it encodes an explicit operator request.
+
 `extend` is safe to run on a short cron/heartbeat cadence: it exits immediately when at least `--ahead-ms` of music is still scheduled ahead of the playhead, and stops adding at `--target-length-ms` (pass `0` for an endless set).
 
 Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron job so the cached cue pool grows without decoding audio on the live recovery path. Likewise keep `scripts/slime_audio_stems.py backfill` on a cron: autodj queues stem splits for tracks it wanted but could not stem-load (`runtime/stem-split-queue.jsonl`), and the backfill turns those into ready artifacts so later blocks get real stem loads. Never run Demucs on the live path.

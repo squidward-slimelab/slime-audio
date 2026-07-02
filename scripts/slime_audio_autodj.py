@@ -2136,7 +2136,11 @@ def validate_no_vanilla_leads(session_path: Path, args: argparse.Namespace) -> d
                 if start is not None:
                     record_move_window(windows, start - 2_000, (end or start) + 2_000, lead_start, lead_end)
         gap = max_gap_ms(lead_start, lead_end, windows)
-        if gap > args.max_vanilla_lead_ms or not material_windows:
+        # Operator-requested restraint (a sleep/background set) keeps the gap
+        # check but drops the overlapping-material requirement: sparse gentle
+        # moves are the deliberate arrangement, not an unfinished set.
+        restraint = bool(getattr(args, "operator_restraint", False))
+        if gap > args.max_vanilla_lead_ms or (not material_windows and not restraint):
             failure = {"id": lead_id, "max_vanilla_gap_ms": gap, "duration_ms": lead_end - lead_start}
             if not material_windows:
                 failure["reason"] = "no material DJ move overlaps this lead; filter/eq rides alone do not count"
@@ -3683,6 +3687,11 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     parser.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
     parser.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
+    parser.add_argument(
+        "--operator-restraint",
+        action="store_true",
+        help="The operator explicitly asked for a restrained set (sleep/background): keep the vanilla gap check but allow leads without overlapping material.",
+    )
     parser.add_argument("--dry-run", action="store_true")
 
 
