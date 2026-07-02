@@ -668,6 +668,25 @@ def stat_is_fifo(path: Path) -> bool:
     return path.exists() and os.stat(path).st_mode & 0o170000 == 0o010000
 
 
+def heal_shared_stream_listeners(*, port: int = DEFAULT_PORT, timeout_ms: int = 2500) -> list[str]:
+    """Kick receivers whose shared-stream client is down.
+
+    The Windows tray receivers do not restart their shared-stream client after
+    a crash, so a room can fall silent while the server streams on. Discovery
+    reports SharedStreamListening per receiver; any that are down get a start
+    message. Returns the kicked endpoints; a healthy fleet is a no-op.
+    """
+    receivers = discover_receivers(port, timeout_ms)
+    down = [
+        receiver
+        for receiver in receivers
+        if receiver.diagnostics is not None and not bool(receiver.diagnostics.get("SharedStreamListening"))
+    ]
+    if down:
+        send_control(down, SHARED_STREAM_START_MESSAGE, "restarted listener")
+    return [receiver.endpoint for receiver in down]
+
+
 def send_control(targets: list[Receiver], payload: bytes, label: str) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         for target in targets:

@@ -2667,6 +2667,26 @@ def extend_set(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    # extend is the heartbeat, so it also heals the room: receivers whose
+    # shared-stream client crashed never restart it themselves, and a silent
+    # receiver under a healthy server is otherwise invisible until a human
+    # notices. Never let healing block the timeline work.
+    try:
+        from slime_audio_stream import heal_shared_stream_listeners
+
+        kicked = heal_shared_stream_listeners()
+        if kicked and args.history is not None:
+            args.history.parent.mkdir(parents=True, exist_ok=True)
+            with args.history.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {"event": "receiver_listener_restarted", "endpoints": kicked, "timestamp": iso_now()},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+    except Exception as error:
+        print(f"receiver heal skipped: {error}", file=sys.stderr)
     lock_fd = acquire_lock()
     try:
         session_path, state_path = resolve_live_session_paths(args)
