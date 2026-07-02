@@ -1880,6 +1880,11 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
     if failures:
         raise SystemExit(f"harmonic overlap guard failed: {json.dumps(failures[:5], sort_keys=True)}")
     min_checks = int(getattr(args, "min_harmonic_checks", 0) or 0)
+    # A restrained set (explicit operator request) is cut-only by design, so
+    # zero overlaps is valid; any overlap that does exist above is still fully
+    # key-checked and can still fail.
+    if bool(getattr(args, "operator_restraint", False)):
+        min_checks = 0
     if checked < min_checks:
         raise SystemExit(
             "harmonic overlap guard failed: "
