@@ -1154,6 +1154,10 @@ def run_planner(session_path: Path, args: argparse.Namespace, *, lock_before_ms:
         "--no-routines",
         "--apply",
     ]
+    if getattr(args, "planner_blends", True):
+        # Compatible-key/tempo overlaps with transition carving are the point
+        # of a DJ set; without this the planner only emits hard cuts.
+        command.append("--allow-blends")
     if lock_before_ms is not None:
         command.extend(["--lock-before-ms", str(lock_before_ms)])
     result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
@@ -3279,6 +3283,8 @@ def continue_set(args: argparse.Namespace) -> int:
             append_selection_history(selected, args, session_path=session_path, dry_run=args.dry_run)
             stage = "mix_planner"
             planner = run_planner(session_path, args)
+            if planner["returncode"] != 0:
+                raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
             stage = "structural_beds"
             structural = add_structural_beds(session_path, selected, args)
             stage = "creative_pass"
@@ -3568,6 +3574,12 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     parser.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
     parser.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
+    parser.add_argument(
+        "--planner-blends",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Let the mix planner create compatible-key/tempo overlaps with transition carving instead of hard cuts only.",
+    )
     parser.add_argument("--no-creative-pass", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
