@@ -49,7 +49,6 @@ def autodj_args(**overrides):
         "min_section_clip_ms": 32_000,
         "min_anchor_section_ms": 8_000,
         "min_section_confidence": 0.45,
-        "require_section_analysis": False,
         "remix_focus": False,
         "stem_aware_remix": False,
         "fade_in_ms": 0,
@@ -66,6 +65,7 @@ def autodj_args(**overrides):
         "max_per_artist": 1,
         "min_track_ms": 1,
         "structured_source_only": False,
+        "analyze_missing_sections": True,
         "taste_profile": Path("/missing/taste-profile.json"),
         "pause_file": Path("/missing/dj-watchdog.paused"),
         "ignore_pause": False,
@@ -76,7 +76,6 @@ def autodj_args(**overrides):
         "scratch_material_penalty": 0.8,
         "recent_material_policy": "penalty",
         "db": Path("/missing/library.sqlite3"),
-        "runner_single_window": True,
         "bed_duration_ms": 72_000,
         "bed_trim_start_ms": 30_000,
         "bed_gain_db": -6.0,
@@ -1125,14 +1124,14 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         track = selected_track()
         args = autodj_args()
 
-        payload = session_payload([track], args)
+        payload = session_payload([track], args, {track.path: analysis()})
 
         self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
         self.assertEqual(payload["notes"]["max_lead_clip_ms"], 90_000)
 
     def test_session_payload_prefers_detected_structure_window(self):
         track = selected_track()
-        args = autodj_args(require_section_analysis=True)
+        args = autodj_args()
 
         payload = session_payload([track], args, {track.path: analysis()})
 
@@ -1142,7 +1141,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
     def test_session_payload_extends_short_drop_anchor_to_phrase_window(self):
         track = selected_track()
-        args = autodj_args(require_section_analysis=True)
+        args = autodj_args()
         short_drop = replace(
             analysis(),
             structure=[
@@ -1161,7 +1160,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         track = selected_track()
         args = autodj_args(remix_focus=True)
 
-        payload = session_payload([track], args)
+        payload = session_payload([track], args, {track.path: analysis()})
 
         self.assertTrue(payload["notes"]["remix_focus"])
         self.assertIn("hard-techno", payload["notes"]["remix_policy"])
@@ -1208,16 +1207,16 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         self.assertIn("deck-4", payload["decks"])
         self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-4"], "THRU")
 
-    def test_session_payload_requires_structure_when_configured(self):
+    def test_session_payload_always_requires_structure(self):
         track = selected_track()
-        args = autodj_args(require_section_analysis=True)
+        args = autodj_args()
 
         with self.assertRaises(SystemExit):
             session_payload([track], args)
 
-    def test_session_payload_rejects_phrase_only_analysis_when_structure_required(self):
+    def test_session_payload_rejects_phrase_only_analysis(self):
         track = selected_track()
-        args = autodj_args(require_section_analysis=True)
+        args = autodj_args()
         phrase_only = replace(analysis(), structure=[])
 
         with self.assertRaises(SystemExit):
@@ -1226,7 +1225,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
     def test_filter_defensible_source_tracks_drops_unstructured_tracks(self):
         good = selected_track("/music/good.flac")
         bad = selected_track("/music/bad.flac")
-        args = autodj_args(require_section_analysis=True)
+        args = autodj_args()
 
         accepted, rejected = filter_defensible_source_tracks([bad, good], {good.path: analysis(good.path)}, args)
 
@@ -2034,7 +2033,6 @@ class SlimeAudioAutodjExtendTests(unittest.TestCase):
             str(temp / "constraints.json"),
             "--db",
             str(temp / "library.sqlite3"),
-            "--no-require-section-analysis",
             "--no-analyze-missing-sections",
             "--min-tracks",
             "1",
@@ -2092,7 +2090,11 @@ class SlimeAudioAutodjExtendTests(unittest.TestCase):
 
         return captured, [
             patch.object(autodj, "select_tracks", side_effect=fake_select),
-            patch.object(autodj, "load_or_analyze_selected", return_value={}),
+            patch.object(
+                autodj,
+                "load_or_analyze_selected",
+                side_effect=lambda tracks, _args: {track.path: analysis(track.path) for track in tracks},
+            ),
             patch.object(autodj, "run_planner", return_value={"returncode": 0, "stdout": "", "stderr": "", "command": []}),
             patch.object(autodj, "add_structural_beds", return_value={"added": 0}),
             patch.object(autodj, "apply_creative_pass", return_value={"required": True, "moves": [], "failures": []}),

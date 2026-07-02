@@ -587,7 +587,7 @@ def manifest_stem_paths(group: StemGroup) -> dict[str, str]:
     return result
 
 
-def stem_group_inputs(group: StemGroup) -> list[tuple[str, StemState, str, bool]]:
+def stem_group_inputs(group: StemGroup) -> list[tuple[str, StemState, str]]:
     manifest_paths = manifest_stem_paths(group)
     active_items = [
         (name, stem)
@@ -596,11 +596,11 @@ def stem_group_inputs(group: StemGroup) -> list[tuple[str, StemState, str, bool]
     ]
     solo_items = [(name, stem) for name, stem in active_items if stem.solo]
     selected = solo_items or active_items
-    inputs: list[tuple[str, StemState, str, bool]] = []
+    inputs: list[tuple[str, StemState, str]] = []
     for stem_name, stem in selected:
         path = stem.path or manifest_paths.get(stem_name)
         if path:
-            inputs.append((stem_name, stem, path, False))
+            inputs.append((stem_name, stem, path))
     return inputs
 
 
@@ -834,7 +834,7 @@ def build_filter_complex(
 
     for group_index, group in enumerate(session.stem_groups):
         stem_labels: list[str] = []
-        for stem_name, stem, _path, is_fallback in stem_group_inputs(group):
+        for stem_name, stem, _path in stem_group_inputs(group):
             if stem_group_input_indices is None:
                 input_index = len(session.clips) + len(stem_labels)
             else:
@@ -852,7 +852,7 @@ def build_filter_complex(
             retime_filters = ",".join(time_pitch_filters(group, sample_rate))
             retime_filters = f"{retime_filters}," if retime_filters else ""
             reverse_filter = "areverse," if group.reverse else ""
-            stem_filters = [] if is_fallback else [*stem_static_filters(stem), *stem_dynamic_filters(session, group, stem_name, stem)]
+            stem_filters = [*stem_static_filters(stem), *stem_dynamic_filters(session, group, stem_name, stem)]
             stem_filter_text = ",".join(stem_filters)
             stem_filter_text = f"{stem_filter_text}," if stem_filter_text else ""
             filters.append(
@@ -1048,7 +1048,7 @@ def ffmpeg_command(
             command.extend(["-i", clip.path])
         clip_input_indices[clip_index] = input_index
     for group_index, group in enumerate(session.stem_groups):
-        for stem_name, _stem, path, _is_fallback in stem_group_inputs(group):
+        for stem_name, _stem, path in stem_group_inputs(group):
             # Deck-clock cue/jump/loop actions compile into adjacent stem-group
             # segments that often read the same stem file repeatedly. Allocate a
             # fresh ffmpeg input for each rendered stem segment; reusing one

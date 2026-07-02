@@ -176,7 +176,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             group = session.stem_groups[0]
             stem = group.stems["bass"]
 
-        self.assertEqual([(name, path) for name, _stem, path, fallback in stem_group_inputs(group)], [("bass", "/stems/bass.wav")])
+        self.assertEqual([(name, path) for name, _stem, path in stem_group_inputs(group)], [("bass", "/stems/bass.wav")])
         self.assertEqual(stem_automation_windows(session, group, "bass", stem, "mute"), [(0, 2_000, 1.0), (2_000, 8_000, 0.0), (8_000, 10_000, 1.0)])
 
     def beep_centers_seconds(self, samples: list[float], sample_rate: int) -> list[float]:

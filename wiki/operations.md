@@ -82,9 +82,11 @@ which skips receiver discovery, listener control, and snapclient waits so the
 window handoff has no multi-second discovery gap. If the hold cannot be
 acquired (`session_fifo_hold_unavailable`), the runner falls back to full
 re-establishment on every window. Because windowed playback now hands off
-cleanly, autodj launches the runner in windowed mode by default
-(`--runner-single-window` is off), which is what lets live edits land at
-window boundaries; `--single-window` remains available for debugging.
+cleanly, autodj always launches the runner in windowed mode, which is what
+lets live edits land at window boundaries. The runner's own `--single-window`
+flag exists only for manual receiver/FIFO debugging; autodj deliberately does
+not expose it, because a live set that cannot be live-edited is a degraded
+path.
 
 ## Timed Drops
 

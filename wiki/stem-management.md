@@ -1,6 +1,6 @@
 # Stem Management
 
-SlimeAudio supports first-class 4-stem artifacts for DJ-focused vocal remixing and low-end control. Stems are optional: normal full-track sessions still work, and stem groups fall back to the source track when no stem artifact path is available.
+SlimeAudio supports first-class 4-stem artifacts for DJ-focused vocal remixing and low-end control. Stems are optional in the sense that normal full-track sessions still work, but there is no silent fallback: a stem group whose artifact paths are missing renders nothing rather than substituting the full source track, and a clip requesting `play_stems` fails the render when the artifacts are not ready.
 
 ## Artifact Layout
 

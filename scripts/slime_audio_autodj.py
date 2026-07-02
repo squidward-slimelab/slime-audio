@@ -596,10 +596,13 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
             break
         if row.get("downloaded_material"):
             try_select(row)
-    # Structured-source mode rejects tracks without cached structure later, so
-    # select a bounded surplus instead of exhausting the pool: analyzing the
+    # Every lead must survive the structure filter. When analysis of missing
+    # tracks is disabled (cached-only live path) rejections are likely, so
+    # select a bounded 2x surplus; structured-source-only pools are already
+    # pre-filtered and need no surplus. Never exhaust the pool: analyzing the
     # whole pool up front is what used to keep the room silent for 20+ minutes.
-    runway_stop_ms = args.min_runway_ms * (2 if args.structured_source_only else 1)
+    expect_rejections = not args.analyze_missing_sections and not args.structured_source_only
+    runway_stop_ms = args.min_runway_ms * (2 if expect_rejections else 1)
     for row in ranked:
         if try_select(row):
             if len(selected) >= args.max_tracks:
@@ -925,15 +928,11 @@ def source_window_for_track(track: SelectedTrack, analysis: TrackAnalysis | None
                 reason=f"cue:{cue.kind}",
                 structure_kind=cue.kind,
             )
-        phrase_ms = analysis.beatgrid.phrase_ms if analysis.beatgrid and analysis.beatgrid.phrase_ms else None
-        if phrase_ms and not args.require_section_analysis:
-            phrases = max(1, max_clip_ms // phrase_ms)
-            duration_ms = min(source_duration_ms, phrases * phrase_ms)
-            if duration_ms >= min_clip_ms:
-                return SourceWindow(0, duration_ms, "phrase-aligned-fallback", None)
-    if args.require_section_analysis:
-        raise SystemExit(f"no defensible structure window for {track.artist} - {track.title}")
-    return SourceWindow(0, min(source_duration_ms, max_clip_ms), "duration-fallback", None)
+    # No fallback window. A lead without a defensible analyzed section is
+    # rejected per-track by filter_defensible_source_tracks, and selection
+    # simply picks other candidates; "play the first 90 seconds from 0:00" is
+    # not a DJ move.
+    raise SystemExit(f"no defensible structure window for {track.artist} - {track.title}")
 
 
 def fast_section_mode_for(tracks: list[SelectedTrack]) -> bool:
@@ -2498,7 +2497,6 @@ def write_decision_audit_trail(
         "launch_facts": {
             "session": str(session_path),
             "state": str(args.runtime / f"{args.slug}-state.json"),
-            "runner_single_window": bool(getattr(args, "runner_single_window", False)),
             "target": list(getattr(args, "target", []) or []),
             "dry_run": bool(args.dry_run),
         },
@@ -2551,7 +2549,6 @@ def write_generation_failure_audit(
             "structure_rejections": structure_rejections or [],
         },
         "launch_facts": {
-            "runner_single_window": bool(getattr(args, "runner_single_window", False)),
             "target": list(getattr(args, "target", []) or []),
             "dry_run": bool(args.dry_run),
         },
@@ -2652,7 +2649,6 @@ def write_failed_session_decision_audit(
         "launch_facts": {
             "session": str(session_path),
             "state": str(args.runtime / f"{args.slug}-state.json"),
-            "runner_single_window": bool(getattr(args, "runner_single_window", False)),
             "target": list(getattr(args, "target", []) or []),
             "dry_run": bool(args.dry_run),
             "launched": False,
@@ -2751,9 +2747,6 @@ def vocal_target_score(clip: dict[str, Any]) -> int:
 
 
 def apply_creative_pass(session_path: Path, args: argparse.Namespace, *, min_start_ms: int = 0) -> dict[str, Any]:
-    if args.no_creative_pass:
-        return {"required": False, "moves": [], "skipped": "disabled"}
-
     payload = load_session_payload(session_path)
     compiled = compile_actions_payload(payload)
     actions_by_id = {
@@ -3077,9 +3070,6 @@ def launch_runner(session_path: Path, state_path: Path, args: argparse.Namespace
         str(args.discover_timeout_ms),
         "--reset-state",
     ]
-    if args.runner_single_window:
-        command.append("--single-window")
-        command.append("--no-prerender-next")
     for target in args.target:
         command.extend(["--target", target])
     if args.ignore_pause:
@@ -3627,7 +3617,6 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--max-tracks", type=int, default=DEFAULT_MAX_TRACKS)
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)
-    cont.add_argument("--runner-single-window", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--discover-timeout-ms", type=int, default=4000)
     cont.add_argument("--force", action="store_true", help="Generate and launch even when playback looks healthy.")
     extend = sub.add_parser("extend", help="Append a planned, guarded block to the live session behind the playhead.")
@@ -3676,7 +3665,6 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--analysis-sample-rate", type=int, default=44_100)
     parser.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
     parser.add_argument("--analyze-missing-sections", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--require-section-analysis", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--structured-source-only", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-per-artist", type=int, default=1)
     parser.add_argument("--recent-limit", type=int, default=120)
@@ -3720,7 +3708,6 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     parser.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
     parser.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
-    parser.add_argument("--no-creative-pass", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
 
