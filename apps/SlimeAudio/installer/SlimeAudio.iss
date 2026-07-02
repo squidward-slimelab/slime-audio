@@ -44,6 +44,10 @@ var
   ResultCode: Integer;
 begin
   Exec(ExpandConstant('{cmd}'), '/C taskkill /IM {#MyAppExeName} /F >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { The tray's child players keep running after the tray dies and would hold
+    locks on the bundled exes during a silent update. }
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /IM snapclient.exe /F >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /IM ffplay.exe /F >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
 end;
 

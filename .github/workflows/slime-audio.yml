@@ -77,10 +77,10 @@ jobs:
       - name: Bundle snapclient
         shell: pwsh
         run: |
-          $snapVersion = "v0.25.0"
+          $snapVersion = "v0.35.0"
           $zip = "$env:RUNNER_TEMP\snapclient_win64.zip"
           $extract = "$env:RUNNER_TEMP\snapclient_win64"
-          Invoke-WebRequest "https://github.com/badaix/snapcast/releases/download/$snapVersion/snapclient_0.25.0-1_win64.zip" -OutFile $zip
+          Invoke-WebRequest "https://github.com/badaix/snapcast/releases/download/$snapVersion/snapclient_win64.zip" -OutFile $zip
           Expand-Archive $zip -DestinationPath $extract
           Copy-Item "$extract\*" artifacts/slime-audio-tray-win-x64/ -Recurse -Force
           $bundled = Get-Item artifacts/slime-audio-tray-win-x64/snapclient.exe

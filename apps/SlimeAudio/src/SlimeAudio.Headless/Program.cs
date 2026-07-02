@@ -82,7 +82,9 @@ internal sealed class HeadlessReceiver : IDisposable
 {
     private const int ReceiveBufferBytes = 4 * 1024 * 1024;
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(60);
     private const int MaxReconnectAttempts = 12;
+    private const long StableRunMs = 60_000;
     private readonly HeadlessOptions _options;
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentDictionary<Guid, HeadlessPlaybackSession> _sessions = new();
@@ -273,6 +275,12 @@ internal sealed class HeadlessReceiver : IDisposable
                 var exitedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 Interlocked.Increment(ref _multicastExitCount);
                 Interlocked.Exchange(ref _multicastLastExitUnixTimeMs, exitedAtMs);
+                if (exitedAtMs - Interlocked.Read(ref _multicastStartedUnixTimeMs) >= StableRunMs)
+                {
+                    // A stable run ends the previous crash episode; refresh the
+                    // reconnect budget so occasional snapclient aborts self-heal.
+                    Interlocked.Exchange(ref _reconnectAttempts, 0);
+                }
                 var stopRequested = _multicastStopRequested;
                 _multicastLastExitStatus = stopRequested ? $"snapclient stopped: {process.ExitCode}" : $"snapclient disconnected: {process.ExitCode}";
                 SetMulticastStatus(_multicastLastExitStatus);
@@ -336,7 +344,7 @@ internal sealed class HeadlessReceiver : IDisposable
                     }
 
                     SetMulticastStatus($"snapclient reconnecting ({attempt}/{MaxReconnectAttempts}) after exit {exitCode}");
-                    await Task.Delay(ReconnectDelay, tokenSource.Token).ConfigureAwait(false);
+                    await Task.Delay(ReconnectDelayFor(attempt), tokenSource.Token).ConfigureAwait(false);
                     if (tokenSource.IsCancellationRequested)
                     {
                         return;
@@ -370,6 +378,12 @@ internal sealed class HeadlessReceiver : IDisposable
                 }
             }
         });
+    }
+
+    private static TimeSpan ReconnectDelayFor(int attempt)
+    {
+        var seconds = ReconnectDelay.TotalSeconds * Math.Pow(2, Math.Max(0, attempt - 1));
+        return TimeSpan.FromSeconds(Math.Min(MaxReconnectDelay.TotalSeconds, seconds));
     }
 
     private void CancelReconnect()
