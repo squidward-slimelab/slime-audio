@@ -466,7 +466,42 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
     return pool
 
 
+def selected_tracks_from_paths(paths: list[Path], args: argparse.Namespace) -> list[SelectedTrack]:
+    """Hand-picked arrangement: the DJ chose these tracks in this order. They
+    still go through analysis, arrangement, the planner, and the guards."""
+    conn = connect(args.db)
+    selected: list[SelectedTrack] = []
+    for path in paths:
+        resolved = str(path)
+        if not Path(resolved).exists():
+            raise SystemExit(f"picked track does not exist: {resolved}")
+        row = conn.execute(
+            "SELECT artist_guess, title_guess, album_guess FROM tracks WHERE preferred_path = ?",
+            (resolved,),
+        ).fetchone()
+        artist, title, album = (row if row else ("", Path(resolved).stem, ""))
+        selected.append(
+            SelectedTrack(
+                path=resolved,
+                artist=str(artist or ""),
+                title=str(title or Path(resolved).stem),
+                album=str(album or ""),
+                score=1.0,
+                duration_ms=probe_duration_ms(resolved),
+                last_played_at=None,
+                plays_seen=0,
+                reasons=["hand-picked by the DJ"],
+            )
+        )
+    if len(selected) < 2:
+        raise SystemExit("a hand-picked set needs at least 2 tracks")
+    return selected
+
+
 def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = None) -> list[SelectedTrack]:
+    picked = [Path(p) for p in (getattr(args, "track", None) or [])]
+    if picked:
+        return selected_tracks_from_paths(picked, args)
     pool = candidate_pool(args)
     if exclude_paths:
         pool = [row for row in pool if str(row.get("preferred_path") or "") not in exclude_paths]
@@ -1040,7 +1075,7 @@ def order_by_key_chain(selected: list[SelectedTrack], analyses: dict[str, TrackA
 
 def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, analyses: dict[str, TrackAnalysis] | None = None) -> dict[str, Any]:
     analyses = analyses or {}
-    if getattr(args, "target_bpm", None) is not None:
+    if getattr(args, "target_bpm", None) is not None and not getattr(args, "track", None):
         selected = order_by_key_chain(selected, analyses)
     rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
     leads = [track for track in selected if track not in rhythm_sources]
@@ -1069,8 +1104,12 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         target_bpm = getattr(args, "target_bpm", None)
         if target_bpm is not None and analysis is not None and analysis.bpm:
             # Tempo-locked set: every lead renders at the target tempo. This is
-            # the deliberate slowed/sped remix move, not drift correction.
+            # the deliberate slowed/sped remix move, not drift correction. A
+            # track beyond the stretch limit plays neutral rather than warped.
             lock_pct = (float(target_bpm) / float(analysis.bpm) - 1.0) * 100.0
+            stretch_limit = abs(float(getattr(args, "max_tempo_stretch_pct", 16.0)))
+            if abs(lock_pct) > stretch_limit:
+                lock_pct = 0.0
             transform = {"tempo_shift_pct": round(lock_pct, 3), "pitch_shift_semitones": 0}
             transform["transition_decision"] = {
                 "tempo_shift_pct": transform["tempo_shift_pct"],
@@ -3012,6 +3051,12 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--min-bpm", type=float, help="Only select tracks with analyzed BPM at or above this (tempo-column browsing).")
     parser.add_argument("--max-bpm", type=float, help="Only select tracks with analyzed BPM at or below this (tempo-column browsing).")
+    parser.add_argument(
+        "--track",
+        type=Path,
+        action="append",
+        help="Hand-pick this track (repeatable, in play order). Skips mechanical selection; analysis, arrangement, planning, and guards still run.",
+    )
     parser.add_argument(
         "--target-bpm",
         type=float,
