@@ -417,7 +417,7 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
             order = []
             original_write_window_state = runner.write_window_state
 
-            def start_window_stream(*_args):
+            def start_window_stream(*_args, **_kwargs):
                 order.append("stream")
                 return runner.RunningWindow(process), ["stream"]
 
@@ -594,6 +594,38 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
         args = runner.parse_args_from(["--target", "all", "--dry-run"])
 
         self.assertEqual(args.snapcast_fifo, Path("/tmp/snapfifo"))
+
+    def test_fifo_hold_acquires_and_releases_real_fifo(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fifo_path = Path(temp_dir) / "snapfifo"
+            os.mkfifo(fifo_path)
+            reader = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                hold = runner.FifoHold(fifo_path)
+                self.assertTrue(hold.acquire(retries=1))
+                self.assertTrue(hold.active)
+                hold.release()
+                self.assertFalse(hold.active)
+            finally:
+                os.close(reader)
+
+    def test_fifo_hold_unavailable_without_fifo(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            hold = runner.FifoHold(Path(temp_dir) / "missing-fifo")
+            self.assertFalse(hold.acquire(retries=1, retry_delay_s=0))
+            self.assertFalse(hold.active)
+
+    def test_stream_command_continuation_flag(self):
+        args = runner.parse_args_from(["--target", "SPONGEBOT", "--mode", "snapcast"])
+
+        base = runner.stream_command(args, Path("/tmp/window.wav"))
+        continued = runner.stream_command(args, Path("/tmp/window.wav"), continuation=True)
+
+        self.assertNotIn("--continuation", base)
+        self.assertIn("--continuation", continued)
+        self.assertIn("--no-active-pointer", continued)
 
 
 if __name__ == "__main__":

@@ -614,19 +614,20 @@ def run_snapcast_stream(
     stream_id: str = "default",
     anchor_file: Path | None = None,
     latency_ms: int = 0,
+    continuation: bool = False,
 ) -> None:
-    status = snapserver_status(control_port=control_port)
-    stream_ids = snapserver_stream_ids(status)
-    if stream_id not in stream_ids:
-        raise RuntimeError(f"system snapserver missing stream {stream_id!r}; streams={sorted(stream_ids)}")
     if not fifo_path.exists():
         raise FileNotFoundError(f"system snapserver fifo does not exist: {fifo_path}")
     if not stat_is_fifo(fifo_path):
         raise RuntimeError(f"system snapserver fifo is not a fifo: {fifo_path}")
-
-    send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
-    wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=control_port)
-    time.sleep(max(delay_ms, 0) / 1000)
+    if not continuation:
+        status = snapserver_status(control_port=control_port)
+        stream_ids = snapserver_stream_ids(status)
+        if stream_id not in stream_ids:
+            raise RuntimeError(f"system snapserver missing stream {stream_id!r}; streams={sorted(stream_ids)}")
+        send_control(targets, SHARED_STREAM_START_MESSAGE, "started snapclient")
+        wait_for_snapclients(targets, timeout_s=max(10.0, delay_ms / 1000), control_port=control_port)
+        time.sleep(max(delay_ms, 0) / 1000)
     # ffmpeg is about to start feeding the FIFO: anchor the playhead here, before
     # the audible sample, so the dashboard tracks the audio instead of leading it.
     if anchor_file is not None:
@@ -760,6 +761,15 @@ def main() -> int:
     parser.add_argument("--start-offset-ms", type=int, default=0, help="Start streaming this far into the file and publish that playhead to the dashboard.")
     parser.add_argument("--no-active-pointer", action="store_true", help="Do not publish this playback to the dashboard active pointer.")
     parser.add_argument("--anchor-file", type=Path, help="Write the buffer-adjusted audio-start anchor here once the stream becomes audible.")
+    parser.add_argument(
+        "--continuation",
+        action="store_true",
+        help=(
+            "Runner-internal: continue an already-established snapcast stream. Skips receiver "
+            "discovery, listener control, and snapclient waits so back-to-back render windows "
+            "hand off without dead air. Requires --no-active-pointer and snapcast mode."
+        ),
+    )
     parser.add_argument("--snapcast-buffer-ms", type=int, default=-1, help="Override the snapcast end-to-end latency (ms). -1 queries the snapserver.")
     args = parser.parse_args()
     if args.snapcast_fifo is None:
@@ -782,19 +792,28 @@ def main() -> int:
             "--default-output-device are mutually exclusive"
         )
 
-    discovered = discover_receivers(args.port, args.discover_timeout_ms)
-    include_muted = (
-        args.include_muted
-        or args.start_listeners
-        or args.stop_listeners
-        or args.reset_audio
-        or args.output_device is not None
-        or args.default_output_device
-        or args.dry_run
-    )
-    targets = resolve_targets(args.target, discovered, args.port, include_muted=include_muted)
-    if not targets:
-        raise SystemExit("no targets resolved")
+    if args.continuation:
+        if args.mode != "snapcast":
+            raise SystemExit("--continuation only applies to snapcast mode")
+        if not args.no_active_pointer:
+            raise SystemExit("--continuation requires --no-active-pointer; the runner owns the dashboard pointer")
+        if args.dry_run or control_count:
+            raise SystemExit("--continuation cannot be combined with dry-run or listener control flags")
+        targets: list[Receiver] = []
+    else:
+        discovered = discover_receivers(args.port, args.discover_timeout_ms)
+        include_muted = (
+            args.include_muted
+            or args.start_listeners
+            or args.stop_listeners
+            or args.reset_audio
+            or args.output_device is not None
+            or args.default_output_device
+            or args.dry_run
+        )
+        targets = resolve_targets(args.target, discovered, args.port, include_muted=include_muted)
+        if not targets:
+            raise SystemExit("no targets resolved")
 
     if args.dry_run:
         now_ms = time.time() * 1000
@@ -943,6 +962,7 @@ def main() -> int:
                 on_ready=publish_ready_stream,
                 anchor_file=args.anchor_file,
                 latency_ms=stream_latency_ms,
+                continuation=args.continuation,
             )
         except Exception as exc:
             if not args.no_active_pointer:

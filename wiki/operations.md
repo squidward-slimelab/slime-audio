@@ -74,6 +74,18 @@ Snapcast mode uses the system Snapserver and writes decoded audio to its FIFO,
 `/tmp/snapfifo`. Do not start ad hoc Snapserver instances for normal room
 playback.
 
+The session runner holds one persistent write handle on the FIFO for the whole
+session (`session_fifo_hold_acquired` in play history) so per-window ffmpeg
+writers can exit without the Snapserver seeing EOF between render windows.
+Windows after the first stream with `slime_audio_stream.py --continuation`,
+which skips receiver discovery, listener control, and snapclient waits so the
+window handoff has no multi-second discovery gap. If the hold cannot be
+acquired (`session_fifo_hold_unavailable`), the runner falls back to full
+re-establishment on every window. Because windowed playback now hands off
+cleanly, autodj launches the runner in windowed mode by default
+(`--runner-single-window` is off), which is what lets live edits land at
+window boundaries; `--single-window` remains available for debugging.
+
 ## Timed Drops
 
 `scripts/slime_audio_drops.py` watches Spotify playback and sends timed phrase drops from a JSON plan. It polls `spogo status`, matches the active track, and avoids firing over paused or unknown-progress playback.

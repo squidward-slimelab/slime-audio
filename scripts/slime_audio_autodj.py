@@ -3187,7 +3187,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--no-creative-pass", action="store_true")
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)
-    cont.add_argument("--runner-single-window", action=argparse.BooleanOptionalAction, default=True)
+    cont.add_argument("--runner-single-window", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--discover-timeout-ms", type=int, default=4000)
     cont.add_argument("--force", action="store_true")
     cont.add_argument("--dry-run", action="store_true")

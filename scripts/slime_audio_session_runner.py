@@ -16,6 +16,7 @@ from slime_audio_session import Clip, MixSession, load_session, parse_ms, playhe
 from slime_audio_session_mixdown import session_duration_ms
 from slime_audio_stream import (
     require_ffmpeg,
+    stat_is_fifo,
     system_snapcast_fifo_path,
 )
 
@@ -222,7 +223,81 @@ def window_anchor_path(audio_path: Path) -> Path:
     return audio_path.with_suffix(".anchor.json")
 
 
-def stream_command(args: argparse.Namespace, audio_path: Path) -> list[str]:
+class FifoHold:
+    """Keep one long-lived write handle on the snapcast FIFO across render windows.
+
+    snapserver treats the FIFO as ended only when every writer has closed it, so a
+    parent-held handle lets per-window ffmpeg writers come and go without the
+    server emitting EOF and dropping the stream between windows.
+    """
+
+    def __init__(self, fifo_path: Path):
+        self.fifo_path = fifo_path
+        self.fd: int | None = None
+        self.holder: subprocess.Popen[bytes] | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.fd is not None or (self.holder is not None and self.holder.poll() is None)
+
+    def acquire(self, *, retries: int = 10, retry_delay_s: float = 0.5) -> bool:
+        if not stat_is_fifo(self.fifo_path):
+            return False
+        for _ in range(retries):
+            try:
+                # Non-blocking so a missing snapserver reader fails fast (ENXIO)
+                # instead of hanging the runner before the first window.
+                self.fd = os.open(self.fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+                return True
+            except OSError as error:
+                if error.errno == 6:  # ENXIO: no reader yet
+                    time.sleep(retry_delay_s)
+                    continue
+                if isinstance(error, PermissionError):
+                    return self._acquire_via_owner()
+                return False
+        return False
+
+    def _acquire_via_owner(self) -> bool:
+        import pwd
+
+        try:
+            owner = pwd.getpwuid(os.stat(self.fifo_path).st_uid).pw_name
+        except (OSError, KeyError):
+            return False
+        command = ["sudo", "-n", "-u", owner, "sh", "-c", 'exec sleep infinity > "$0"', str(self.fifo_path)]
+        try:
+            self.holder = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return False
+        time.sleep(0.2)
+        if self.holder.poll() is not None:
+            self.holder = None
+            return False
+        return True
+
+    def release(self) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+        if self.holder is not None:
+            try:
+                os.killpg(self.holder.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            self.holder = None
+
+
+def stream_command(args: argparse.Namespace, audio_path: Path, *, continuation: bool = False) -> list[str]:
     command = [
         "python3",
         str(REPO_ROOT / "scripts" / "slime_audio_stream.py"),
@@ -258,6 +333,8 @@ def stream_command(args: argparse.Namespace, audio_path: Path) -> list[str]:
             command.append("--stop-listeners-when-done")
     if args.ignore_pause:
         command.append("--ignore-pause")
+    if continuation:
+        command.append("--continuation")
     return command
 
 
@@ -337,8 +414,8 @@ def wait_stream(process: subprocess.Popen[bytes]) -> int:
             _active_stream = None
 
 
-def start_window_stream(args: argparse.Namespace, window: PreparedWindow) -> tuple[RunningWindow, list[str]]:
-    stream = stream_command(args, window.output)
+def start_window_stream(args: argparse.Namespace, window: PreparedWindow, *, continuation: bool = False) -> tuple[RunningWindow, list[str]]:
+    stream = stream_command(args, window.output, continuation=continuation)
     process = start_stream(stream)
     return RunningWindow(process), stream
 
@@ -490,6 +567,31 @@ def run_session(args: argparse.Namespace) -> int:
     write_runner_status(args, "running")
 
     prepared: PreparedWindow | None = None
+    fifo_hold = FifoHold(args.snapcast_fifo) if args.mode == "snapcast" and not args.dry_run else None
+    windows_streamed = 0
+    if fifo_hold is not None:
+        if fifo_hold.acquire():
+            append_history(
+                args.history_log,
+                {
+                    "event": "session_fifo_hold_acquired",
+                    "fifo": str(args.snapcast_fifo),
+                    "session": str(args.session),
+                    "timestamp": iso_now(),
+                },
+            )
+        else:
+            # Without the hold, per-window writer exits can EOF the snapserver
+            # stream; fall back to full re-establishment on every window.
+            append_history(
+                args.history_log,
+                {
+                    "event": "session_fifo_hold_unavailable",
+                    "fifo": str(args.snapcast_fifo),
+                    "session": str(args.session),
+                    "timestamp": iso_now(),
+                },
+            )
     try:
         while True:
             session = load_session(args.session)
@@ -560,7 +662,9 @@ def run_session(args: argparse.Namespace) -> int:
                 window.cleanup()
                 return 0
 
-            running, stream = start_window_stream(args, window)
+            continuation = windows_streamed > 0 and fifo_hold is not None and fifo_hold.active
+            running, stream = start_window_stream(args, window, continuation=continuation)
+            windows_streamed += 1
             started_monotonic = time.monotonic()
             state = write_window_state(args, state, session=session, start_ms=start_ms, end_ms=end_ms, active_clips=active_clips)
             append_history(
@@ -631,6 +735,9 @@ def run_session(args: argparse.Namespace) -> int:
                 if prepared is not None:
                     prepared.cleanup()
                     prepared = None
+                # Re-establish snapclient control on the next attempt instead of
+                # assuming the failed window left receivers in a good state.
+                windows_streamed = 0
                 time.sleep(args.retry_seconds)
                 continue
 
@@ -648,6 +755,8 @@ def run_session(args: argparse.Namespace) -> int:
             )
             state = freeze_completed_window(args, state, end_ms)
     finally:
+        if fifo_hold is not None:
+            fifo_hold.release()
         if prepared is not None:
             prepared.cleanup()
 

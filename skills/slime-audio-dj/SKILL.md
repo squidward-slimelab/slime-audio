@@ -365,7 +365,7 @@ Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron jo
 1. Check receiver/session state and recent history so the new set does not repeat stale material:
 
    ```bash
-   python3 scripts/slime_audio_stream.py discover
+   python3 scripts/slime_audio_stream.py --target all --mode snapcast --dry-run --discover-timeout-ms 2500
    tail -n 80 runtime/play-history.jsonl
    python3 scripts/slime_audio_sets.py list --json
    ```
@@ -389,14 +389,12 @@ Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron jo
    python3 scripts/slime_audio_dj.py rank ./lead.flac --playlist runtime/bed-candidates.txt --limit 12
    ```
 
-4. Create or activate a named set and build the first playable buffer. The base timeline is only scaffolding; do not stop here, but also do not delay playback for the whole future set.
+4. Create or activate a named set and build the first playable buffer. The base timeline is only scaffolding; do not stop here, but also do not delay playback for the whole future set. There is no playlist importer; build the base timeline as explicit `load_track` actions on the middle decks, one per lead, at analyzed cue windows.
 
    ```bash
    python3 scripts/slime_audio_sets.py new --title "Named set"
-   python3 scripts/slime_audio_session.py import-playlist runtime/mix-session.json \
-     --playlist runtime/current-playlist.txt \
-     --start 00:00.000 \
-     --decks deck-2,deck-3
+   python3 scripts/slime_audio_session.py add-action runtime/mix-session.json \
+     --action-json '{"type":"load_track","id":"lead-001","deck":"deck-2","source_path":"./lead.flac","at":"00:00.000","trim_start":"00:32.000","duration":"01:04.000","play_stems":["vocals","drums","bass","other"]}'
    ```
 
 5. Run the mix planner for phrase-aware overlaps, safe transition automation, automatic routines, and filter/EQ carving on the first buffer.
