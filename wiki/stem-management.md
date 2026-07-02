@@ -66,6 +66,20 @@ python3 scripts/slime_audio_stems.py verify TRACK_OR_STEM_SET_ID
 
 The CLI records failed separations in the DB instead of marking partial artifacts as ready.
 
+`split` is idempotent: it checks the DB for a fresh `ready` stem set (same source path, size, mtime, model, and profile) and returns immediately without running Demucs unless `--force` is passed. Never re-rip by habit.
+
+## Background Split Queue
+
+Planning code must never block live audio on Demucs. When autodj selects a stem-aware lead without ready stems, it loads the track as a plain clip for this block and appends the path to `runtime/stem-split-queue.jsonl`. Work the queue from a cron/heartbeat:
+
+```bash
+python3 scripts/slime_audio_stems.py backfill --limit 2
+```
+
+`backfill` dedupes the queue, drops entries whose sources are gone, skips entries that became ready, runs at most `--limit` Demucs jobs per invocation (remote by default), and retries failures up to `--max-attempts` before dropping them. Once stems land, later autodj blocks pick the track up as a real stem-resolved `load_track`.
+
+Selection is taste-driven, not stem-driven: stem-aware mode gives ready-stem candidates only a small tie-break bonus, so stem coverage grows toward what the DJ actually wants to play instead of the set list shrinking toward what already has stems.
+
 ## Session Stem Groups
 
 Use `stem_groups` for one conceptual deck event with independently controlled child stems:

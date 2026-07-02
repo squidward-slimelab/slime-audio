@@ -1910,6 +1910,44 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         self.assertIn("vocal overlap guard failed", str(raised.exception))
 
 
+class SlimeAudioAutodjStemMixedModeTests(unittest.TestCase):
+    def test_stem_aware_payload_falls_back_to_clips_and_queues_splits(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            runtime = temp / "runtime"
+            runtime.mkdir()
+            ready_path = str(temp / "ready.flac")
+            missing_path = str(temp / "missing.flac")
+            db_path = create_ready_stem_db(temp, [ready_path])
+            tracks = [
+                replace(selected_track(ready_path), title="Ready Track", artist="Ready Artist"),
+                replace(selected_track(missing_path), title="Missing Track", artist="Missing Artist"),
+            ]
+            args = autodj_args(
+                stem_aware_remix=True,
+                remix_focus=True,
+                min_tracks=2,
+                max_tracks=2,
+                db=db_path,
+                runtime=runtime,
+            )
+
+            payload = session_payload(tracks, args, analyses={track.path: analysis(track.path) for track in tracks})
+            queue_lines = [
+                json.loads(line) for line in (runtime / "stem-split-queue.jsonl").read_text(encoding="utf-8").splitlines()
+            ]
+
+        actions = [action for action in payload["actions"] if action.get("type") == "load_track"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["source_path"], ready_path)
+        self.assertEqual(set(actions[0]["stems"]), {"vocals", "drums", "bass", "other"})
+        clips = payload["clips"]
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0]["path"], missing_path)
+        self.assertEqual(payload["notes"]["stem_split_queued"], [missing_path])
+        self.assertEqual([entry["path"] for entry in queue_lines], [missing_path])
+
+
 class SlimeAudioAutodjBedMotionTests(unittest.TestCase):
     def test_bed_plan_snaps_to_phrase_grid_and_opens_into_lead_drop(self):
         lead = {

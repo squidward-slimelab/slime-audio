@@ -471,10 +471,14 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
     if not pool:
         raise SystemExit("no candidates available")
     if bool(getattr(args, "stem_aware_remix", False)):
+        # Prefer tracks with ready stems, but never let stem coverage narrow
+        # taste: selection is driven by the library, history, and constraints,
+        # and missing stems are queued for background splitting instead.
         ready_paths = ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
-        ready_pool = [row for row in pool if str(row.get("preferred_path") or "") in ready_paths]
-        if ready_pool:
-            pool = ready_pool
+        for row in pool:
+            if str(row.get("preferred_path") or "") in ready_paths:
+                row["stem_ready"] = True
+                row.setdefault("reasons", []).append("ready stem artifacts")
     pool = apply_scratch_material_policy(pool, args)
     pool = apply_recent_material_policy(pool, args)
     rng = random.SystemRandom()
@@ -505,22 +509,22 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
             if taste_profile.available and not edm_bed and not is_taste_anchor(row, taste_profile):
                 row["spotify_leftfield_download"] = True
                 row.setdefault("reasons", []).append("spotify left-field download lane")
+    def selection_score(item: dict[str, Any]) -> float:
+        # Small readiness bonus acts as a tie-break inside a taste band; it
+        # must stay well below typical score gaps so stems never drive taste.
+        return (
+            float(item.get("score") or 0.0)
+            + float(item.get("spotify_taste_affinity") or 0.0)
+            + (0.15 if item.get("stem_ready") else 0.0)
+            + rng.uniform(0.0, args.selection_jitter)
+        )
+
     quota_ranked = list(pool)
     rng.shuffle(quota_ranked)
-    quota_ranked.sort(
-        key=lambda item: float(item.get("score") or 0.0)
-        + float(item.get("spotify_taste_affinity") or 0.0)
-        + rng.uniform(0.0, args.selection_jitter),
-        reverse=True,
-    )
+    quota_ranked.sort(key=selection_score, reverse=True)
     ranked = list(pool[:top_window])
     rng.shuffle(ranked)
-    ranked.sort(
-        key=lambda item: float(item.get("score") or 0.0)
-        + float(item.get("spotify_taste_affinity") or 0.0)
-        + rng.uniform(0.0, args.selection_jitter),
-        reverse=True,
-    )
+    ranked.sort(key=selection_score, reverse=True)
 
     def try_select(row: dict[str, Any]) -> bool:
         nonlocal runway_ms
@@ -965,6 +969,26 @@ def filter_defensible_source_tracks(
     return accepted, rejected
 
 
+def queue_stem_splits(paths: list[str], args: argparse.Namespace, *, reason: str) -> None:
+    if not paths:
+        return
+    queue_path = Path(getattr(args, "runtime", DEFAULT_RUNTIME)) / "stem-split-queue.jsonl"
+    queued: set[str] = set()
+    if queue_path.exists():
+        for line in queue_path.read_text(encoding="utf-8").splitlines():
+            try:
+                queued.add(str(json.loads(line).get("path") or ""))
+            except (json.JSONDecodeError, AttributeError):
+                continue
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    with queue_path.open("a", encoding="utf-8") as handle:
+        for path in paths:
+            if path in queued:
+                continue
+            handle.write(json.dumps({"path": path, "queued_at": iso_now(), "reason": reason}, sort_keys=True) + "\n")
+            queued.add(path)
+
+
 def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, analyses: dict[str, TrackAnalysis] | None = None) -> dict[str, Any]:
     analyses = analyses or {}
     rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
@@ -976,6 +1000,12 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
     cursor_ms = 0
     lead_clips: list[dict[str, Any]] = []
     lead_actions: list[dict[str, Any]] = []
+    stem_ready_paths = (
+        ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
+        if bool(getattr(args, "stem_aware_remix", False))
+        else set()
+    )
+    stem_split_queued: list[str] = []
     transition_plans: list[dict[str, Any]] = []
     previous_track: SelectedTrack | None = None
     for index, track in enumerate(leads[: args.max_tracks]):
@@ -1029,7 +1059,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
                 value = getattr(analysis, key, None)
                 if value is not None:
                     base_event[key] = value
-        if bool(getattr(args, "stem_aware_remix", False)):
+        if bool(getattr(args, "stem_aware_remix", False)) and track.path in stem_ready_paths:
             action = {
                 "type": "load_track",
                 **base_event,
@@ -1037,9 +1067,16 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
                 "at_ms": cursor_ms,
                 "play_stems": ["vocals", "drums", "bass", "other"],
             }
-            action = prepare_load_track_action_stems(action, db_path=Path(getattr(args, "db", DEFAULT_DB)))
+            # prepare_stems=False: readiness was checked above, and generation
+            # must never block on Demucs. Missing stems load as plain clips and
+            # get queued for background splitting instead.
+            action = prepare_load_track_action_stems(
+                action, db_path=Path(getattr(args, "db", DEFAULT_DB)), prepare_stems=False
+            )
             lead_actions.append(action)
         else:
+            if bool(getattr(args, "stem_aware_remix", False)):
+                stem_split_queued.append(track.path)
             clip = {
                 **base_event,
                 "path": track.path,
@@ -1048,12 +1085,9 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         cursor_ms += max(16_000, source_window.duration_ms - args.base_overlap_ms)
         previous_track = track
 
-    if bool(getattr(args, "stem_aware_remix", False)):
-        timeline_events: list[dict[str, Any]] = []
-        actions = lead_actions
-    else:
-        timeline_events = lead_clips
-        actions = []
+    queue_stem_splits(stem_split_queued, args, reason="stem-aware lead selected without ready stems")
+    timeline_events = lead_clips
+    actions = lead_actions
     lead_starts = [
         int(event.get("at_ms", event.get("start_ms", 0)) or 0)
         for event in (lead_actions or lead_clips)
@@ -1118,6 +1152,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         "max_lead_clip_ms": args.max_lead_clip_ms,
         "fast_section_mode": fast_mode,
         "stem_aware_load_tracks": bool(getattr(args, "stem_aware_remix", False)),
+        "stem_split_queued": stem_split_queued,
     }
     parse_session(payload)
     return payload
@@ -3254,7 +3289,7 @@ def extend_set(args: argparse.Namespace) -> int:
             creative = apply_creative_pass(work_path, args, min_start_ms=total_ms)
             stage = "vanilla_guard"
             vanilla_guard = validate_no_vanilla_leads(work_path, args)
-            args.require_stem_loads = bool(args.stem_aware_remix)
+            args.require_stem_loads = bool(args.stem_aware_remix) and not (block.get("notes") or {}).get("stem_split_queued")
             stage = "stem_load_guard"
             stem_load_guard = validate_stem_load_usage(work_path, args)
             stage = "transition_decision_guard"
@@ -3408,7 +3443,9 @@ def continue_set(args: argparse.Namespace) -> int:
             creative = apply_creative_pass(session_path, args)
             stage = "vanilla_guard"
             vanilla_guard = validate_no_vanilla_leads(session_path, args)
-            args.require_stem_loads = bool(args.stem_aware_remix)
+            # Leads without ready stems load as clips and queue a background
+            # split, so the stem-load guard only applies when nothing fell back.
+            args.require_stem_loads = bool(args.stem_aware_remix) and not payload.get("notes", {}).get("stem_split_queued")
             stage = "stem_load_guard"
             stem_load_guard = validate_stem_load_usage(session_path, args)
             stage = "transition_decision_guard"

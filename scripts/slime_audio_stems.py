@@ -23,6 +23,7 @@ from slime_music_library import DEFAULT_DB, connect
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STEM_ROOT = REPO_ROOT / "runtime" / "stems"
+DEFAULT_STEM_QUEUE = REPO_ROOT / "runtime" / "stem-split-queue.jsonl"
 DEFAULT_DEMUCS_HOSTS = os.environ.get(
     "SLIME_AUDIO_DEMUCS_HOSTS",
     os.environ.get("SLIME_AUDIO_DEMUCS_HOST", "squidward@robokrabs.tail4cb51.ts.net"),
@@ -739,6 +740,88 @@ def command_verify(args: argparse.Namespace) -> int:
     return 1 if errors else 0
 
 
+def has_fresh_stems(conn: sqlite3.Connection, source_path: Path, *, model: str, profile: str) -> bool:
+    try:
+        stat = source_path.stat()
+    except OSError:
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM track_stem_sets
+        WHERE source_path = ?
+          AND source_size = ?
+          AND source_mtime = ?
+          AND model = ?
+          AND profile = ?
+          AND status = 'ready'
+        """,
+        (str(source_path), stat.st_size, stat.st_mtime, model, profile),
+    ).fetchone()
+    return row is not None
+
+
+def command_backfill(args: argparse.Namespace) -> int:
+    """Split queued tracks in the background without touching live playback.
+
+    Planning code (autodj, session edits) appends tracks that need stems to the
+    queue file instead of blocking on Demucs; a cron/heartbeat runs this command
+    to work the queue. Already-ready tracks are dropped, failures are retried up
+    to --max-attempts, and --limit bounds work per invocation.
+    """
+    queue_path: Path = args.queue
+    summary = {"split": 0, "skipped_ready": 0, "dropped": 0, "failed": 0, "deferred": 0}
+    if not queue_path.exists():
+        print(json.dumps({"status": "ok", "queue": str(queue_path), **summary}, sort_keys=True))
+        return 0
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in queue_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        path = str(entry.get("path") or "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        entries.append(entry)
+    conn = connect(args.db)
+    remaining: list[dict[str, Any]] = []
+    for entry in entries:
+        source = Path(str(entry["path"]))
+        if not source.exists():
+            summary["dropped"] += 1
+            continue
+        if has_fresh_stems(conn, source, model=args.model, profile=args.profile):
+            summary["skipped_ready"] += 1
+            continue
+        if summary["split"] >= args.limit:
+            summary["deferred"] += 1
+            remaining.append(entry)
+            continue
+        split_args = argparse.Namespace(**{**vars(args), "track": str(source), "force": False, "source_stems_dir": None})
+        try:
+            command_split(split_args)
+            summary["split"] += 1
+        except Exception as exc:  # noqa: BLE001 - queue must survive one bad track
+            attempts = int(entry.get("attempts") or 0) + 1
+            summary["failed"] += 1
+            if attempts < args.max_attempts:
+                remaining.append({**entry, "attempts": attempts, "last_error": f"{exc.__class__.__name__}: {exc}"})
+            else:
+                summary["dropped"] += 1
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = queue_path.with_suffix(queue_path.suffix + ".tmp")
+    tmp.write_text("".join(json.dumps(entry, sort_keys=True) + "\n" for entry in remaining), encoding="utf-8")
+    tmp.replace(queue_path)
+    print(json.dumps({"status": "ok", "queue": str(queue_path), "remaining": len(remaining), **summary}, sort_keys=True))
+    return 0
+
+
 def command_gc(args: argparse.Namespace) -> int:
     conn = connect(args.db)
     rows = conn.execute("SELECT * FROM track_stem_sets WHERE status = 'failed'").fetchall()
@@ -796,6 +879,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     verify = sub.add_parser("verify")
     verify.add_argument("track")
     verify.set_defaults(func=command_verify)
+
+    backfill = sub.add_parser("backfill", help="Split queued tracks in the background; safe on a cron.")
+    backfill.add_argument("--queue", type=Path, default=DEFAULT_STEM_QUEUE)
+    backfill.add_argument("--limit", type=int, default=2, help="Maximum Demucs runs per invocation.")
+    backfill.add_argument("--max-attempts", type=int, default=3)
+    backfill.add_argument("--demucs-bin", default="demucs")
+    backfill.add_argument(
+        "--demucs-host",
+        default=DEFAULT_DEMUCS_HOSTS,
+        help="Comma-separated SSH host list that runs Demucs. Defaults to SLIME_AUDIO_DEMUCS_HOSTS, SLIME_AUDIO_DEMUCS_HOST, or patrick then robokrabs.",
+    )
+    backfill.add_argument("--local-demucs", action="store_true", help="Run Demucs on this machine instead of over SSH.")
+    backfill.add_argument("--remote-workdir", help="Remote parent directory for temporary Demucs work.")
+    backfill.add_argument("--jobs", type=int, default=1)
+    backfill.set_defaults(func=command_backfill)
 
     gc = sub.add_parser("gc")
     gc.add_argument("--older-than-days", type=int, default=30)

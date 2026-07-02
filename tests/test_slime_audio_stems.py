@@ -291,5 +291,101 @@ class SlimeAudioStemsTests(unittest.TestCase):
         self.assertAlmostEqual(payload["loudness_db"], 20 * math.log10(expected), places=3)
 
 
+class SlimeAudioStemBackfillTests(unittest.TestCase):
+    def _backfill_args(self, temp: Path, **overrides):
+        import argparse
+
+        values = {
+            "db": temp / "library.sqlite3",
+            "stem_root": temp / "stems",
+            "model": "htdemucs",
+            "profile": "4stem",
+            "sample_rate": None,
+            "channels": None,
+            "queue": temp / "queue.jsonl",
+            "limit": 2,
+            "max_attempts": 3,
+            "demucs_bin": "demucs",
+            "demucs_host": None,
+            "remote_workdir": None,
+            "jobs": 1,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_backfill_skips_ready_and_drops_missing_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args = self._backfill_args(temp)
+            ready_source = temp / "ready.wav"
+            write_tone(ready_source, frequency=220.0)
+            conn = connect(args.db)
+            identity = stems.identity_for(ready_source, None, model="htdemucs", profile="4stem", sample_rate=8000, channels=1)
+            stems.upsert_stem_set(conn, identity, temp / "stems" / identity.stem_set_id, status="ready", error=None)
+            conn.commit()
+            conn.close()
+            args.queue.write_text(
+                json.dumps({"path": str(ready_source)})
+                + "\n"
+                + json.dumps({"path": str(temp / "gone.flac")})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(stems.command_backfill(args), 0)
+            summary = json.loads(stdout.getvalue())
+
+        self.assertEqual(summary["skipped_ready"], 1)
+        self.assertEqual(summary["dropped"], 1)
+        self.assertEqual(summary["split"], 0)
+        self.assertEqual(summary["remaining"], 0)
+
+    def test_backfill_defers_work_beyond_limit_and_keeps_queue(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args = self._backfill_args(temp, limit=0)
+            pending_source = temp / "pending.wav"
+            write_tone(pending_source, frequency=220.0)
+            connect(args.db).close()
+            args.queue.write_text(json.dumps({"path": str(pending_source)}) + "\n", encoding="utf-8")
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(stems.command_backfill(args), 0)
+            summary = json.loads(stdout.getvalue())
+            remaining = [json.loads(line) for line in args.queue.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(summary["deferred"], 1)
+        self.assertEqual(summary["split"], 0)
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["path"], str(pending_source))
+
+    def test_backfill_retries_failures_up_to_max_attempts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            args = self._backfill_args(temp, max_attempts=2)
+            source = temp / "song.wav"
+            write_tone(source, frequency=220.0)
+            connect(args.db).close()
+            args.queue.write_text(json.dumps({"path": str(source), "attempts": 0}) + "\n", encoding="utf-8")
+
+            with patch.object(stems, "command_split", side_effect=RuntimeError("demucs down")):
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(stems.command_backfill(args), 0)
+                first = json.loads(stdout.getvalue())
+                stdout = StringIO()
+                with redirect_stdout(stdout):
+                    self.assertEqual(stems.command_backfill(args), 0)
+                second = json.loads(stdout.getvalue())
+
+        self.assertEqual(first["failed"], 1)
+        self.assertEqual(first["remaining"], 1)
+        self.assertEqual(second["failed"], 1)
+        self.assertEqual(second["remaining"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -367,7 +367,7 @@ python3 scripts/slime_audio_autodj.py extend \
 
 `extend` is safe to run on a short cron/heartbeat cadence: it exits immediately when at least `--ahead-ms` of music is still scheduled ahead of the playhead, and stops adding at `--target-length-ms` (pass `0` for an endless set).
 
-Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron job so the cached cue pool grows without decoding audio on the live recovery path.
+Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron job so the cached cue pool grows without decoding audio on the live recovery path. Likewise keep `scripts/slime_audio_stems.py backfill` on a cron: autodj queues stem splits for tracks it wanted but could not stem-load (`runtime/stem-split-queue.jsonl`), and the backfill turns those into ready artifacts so later blocks get real stem loads. Never run Demucs on the live path.
 
 ### Build Sequence
 
