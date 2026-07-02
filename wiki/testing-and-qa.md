@@ -26,6 +26,15 @@ python3 -m py_compile scripts/*.py src/spotify_brain/*.py
 
 Analysis commands require the native analyzer (`make -C native`); the DJ test suite builds it automatically when missing, but a g++ toolchain must be present.
 
+## Playback Performance Gates
+
+Underrun protection is tested at the two seams this host controls:
+
+- `tests/test_slime_audio_session_runner_performance.py` asserts window renders beat the live prerender budget, including a worst-case creative window (subdivided ramp automation, echo taps, convolution reverb, vinyl brake, layered stems) that must render at 3x realtime or better (`SLIME_AUDIO_PRERENDER_MIN_SPEEDUP`), because the runner only has `prerender_lead_ms` of the current window to produce the next one.
+- `tests/test_slime_audio_streaming_performance.py` drains a real FIFO like the snapserver and asserts the window handoff never starves it beyond `SLIME_AUDIO_MAX_HANDOFF_GAP_S` (default 0.5s, half the usual 1s snapcast client buffer), the FIFO never sees EOF mid-session (the runner's FIFO-hold contract), stream startup stays under `SLIME_AUDIO_MAX_STREAM_STARTUP_S`, and the feed arrives realtime-paced rather than as a burst.
+
+Whatever reaches the snapserver FIFO is what clients hear one buffer later, so these two gates cover server render latency and client feed continuity; the Windows tray receivers themselves are checked live via the receiver-health workflow (`shared_stream_exits` must not increase during playback).
+
 ## .NET Tests
 
 ```bash
