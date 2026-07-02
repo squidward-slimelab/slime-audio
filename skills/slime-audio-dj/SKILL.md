@@ -268,7 +268,7 @@ Hard source ducks are dangerous. They are correct for replacement moves like scr
 
 Placement and timing decide whether an effect reads as a DJ move or as noise. Every effect needs a musical job; if it cannot be named, do not add the effect.
 
-- Beat-sync echo delays. `delay_ms` comes from the analyzed BPM, not the default: quarter note = `60000 / bpm`, dotted eighth = `x 0.75`, eighth = `x 0.5`. An off-grid delay smears the groove instead of riding it.
+- Beat-sync echo delays. Use `--delay-beats` on `add-effect` (0.5 eighth, 0.75 dotted eighth, 1 quarter): it resolves against the target's cached beatgrid at the *rendered* tempo, including `tempo_shift_pct`. Reserve raw `--delay-ms` for deck/master targets or deliberate off-grid color; an off-grid delay smears the groove instead of riding it.
 - Throw echoes at exits: the last vocal word or hook hit before a cut, drop, or breakdown. Target a short source window (the phrase end, not a whole bar block), let the tail carry across the transition, and make sure the incoming material owns the space the tail decays into.
 - Use reverb as punctuation, not atmosphere. A short wash on the final snare/clap before a drop, or a tail on a vocal phrase end into a breakdown. Do not leave a reverb running under continuous full-mix material; that is mud, not space.
 - Brakes mark structural turns: the end of a lead before a genre or tempo flip, or as the fake-out before a drop. A brake in the middle of nothing reads as an error, not a gesture.

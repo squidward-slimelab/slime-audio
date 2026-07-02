@@ -137,6 +137,13 @@ def main() -> int:
     effect_parser.add_argument("--wet", type=float)
     effect_parser.add_argument("--gain-db", type=float)
     effect_parser.add_argument("--delay-ms", type=int)
+    effect_parser.add_argument(
+        "--delay-beats",
+        type=float,
+        help="Tempo-synced delay time in beats of the target's rendered tempo (0.5 eighth, 0.75 dotted eighth, 1 quarter). Uses the cached beatgrid.",
+    )
+    effect_parser.add_argument("--cache", type=Path, default=session.DEFAULT_DJ_CACHE)
+    effect_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
     effect_parser.add_argument("--feedback", type=float)
     effect_parser.add_argument("--room-size", type=float)
     effect_parser.add_argument("--damping", type=float)
@@ -253,6 +260,8 @@ def main() -> int:
         args.affected_ids = [f"deck:{deck}" for deck in assignments]
         apply_edit(args, lambda payload, _lock_ms: session.set_fader_routing(payload, assignments))
     elif args.command == "add-effect":
+        if args.delay_ms is not None and args.delay_beats is not None:
+            raise SystemExit("--delay-ms and --delay-beats are mutually exclusive")
         args.affected_ids = [args.id, args.target]
         effect_args = session.resolved_effect_args(args)
         apply_edit(
@@ -273,6 +282,9 @@ def main() -> int:
                 damping=effect_args["damping"],
                 lowpass_hz=effect_args["lowpass_hz"],
                 preset=effect_args["preset"],
+                delay_beats=args.delay_beats,
+                cache_path=args.cache,
+                beat_min_confidence=args.min_confidence,
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),

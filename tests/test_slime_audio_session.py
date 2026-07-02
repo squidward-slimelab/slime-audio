@@ -1612,6 +1612,120 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload["effects"][0]["room_size"], 0.72)
         self.assertEqual(payload["effects"][0]["damping"], 0.55)
 
+    def test_cli_add_effect_delay_beats_syncs_to_rendered_tempo(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            # Analyzed 120 BPM; the clip plays 25% faster, so the rendered
+            # tempo is 150 BPM and one beat is 400 ms.
+            cache.write_text(
+                json.dumps(
+                    {
+                        "key": {
+                            "path": "/music/lead.flac",
+                            "bpm": 120.0,
+                            "beat_offset_ms": 0,
+                            "confidence": {"bpm": 0.9},
+                            "beatgrid": {"bpm": 120.0, "beat_offset_ms": 0, "phrase_beats": 32, "phrase_ms": 16_000},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-1",
+                                "path": "/music/lead.flac",
+                                "start": 0,
+                                "duration": 30_000,
+                                "tempo_shift_pct": 25.0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "add-effect",
+                        str(path),
+                        "--id",
+                        "lead-echo",
+                        "--type",
+                        "echo",
+                        "--target",
+                        "lead",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:01.000",
+                        "--delay-beats",
+                        "0.75",
+                        "--cache",
+                        str(cache),
+                    ]
+                ),
+                0,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+
+        effect = payload["effects"][0]
+        # dotted eighth at rendered 150 BPM: 400 ms * 0.75 = 300 ms
+        self.assertEqual(effect["delay_ms"], 300)
+        self.assertEqual(effect["delay_beats"], 0.75)
+
+    def test_cli_add_effect_delay_beats_requires_analyzable_target(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            path = temp / "session.json"
+            cache = temp / "dj-cache.json"
+            cache.write_text("{}", encoding="utf-8")
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "lead", "deck": "deck-1", "path": "/music/lead.flac", "start": 0, "duration": 30_000}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError) as raised:
+                run_cli(
+                    [
+                        "slime_audio_session.py",
+                        "add-effect",
+                        str(path),
+                        "--id",
+                        "deck-echo",
+                        "--type",
+                        "echo",
+                        "--target",
+                        "deck:deck-1",
+                        "--start",
+                        "00:08.000",
+                        "--duration",
+                        "00:01.000",
+                        "--delay-beats",
+                        "1",
+                        "--cache",
+                        str(cache),
+                    ]
+                )
+
+        self.assertIn("delay in ms for deck/master targets", str(raised.exception))
+
     def test_cli_add_effect_uses_audacity_like_reverb_defaults(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"

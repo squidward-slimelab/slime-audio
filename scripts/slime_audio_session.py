@@ -2305,6 +2305,42 @@ def add_crossfader_automation(
     )
 
 
+def beat_synced_delay_ms(
+    payload: dict[str, Any],
+    target: str,
+    delay_beats: float,
+    *,
+    cache_path: Path = DEFAULT_DJ_CACHE,
+    min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
+    force: bool = False,
+) -> int:
+    """Resolve a hardware-style tempo-synced delay time for the target event.
+
+    One beat is a quarter note at the target's *rendered* tempo: the cached
+    analyzed BPM scaled by the event's tempo_shift_pct. Common divisions:
+    0.5 = eighth, 0.75 = dotted eighth, 1.0 = quarter, 1.5 = dotted quarter.
+    """
+    if delay_beats <= 0:
+        raise ValueError("delay beats must be positive")
+    found = find_event(payload, target)
+    if found is None:
+        raise ValueError(
+            f"beat-synced delay needs a clip/load target with analyzable audio; {target!r} is not an event id. "
+            "Use an explicit delay in ms for deck/master targets."
+        )
+    event = payload[found[0]][found[1]]
+    source_path = str(event.get("source_path") or event.get("path") or "").strip()
+    if not source_path:
+        raise ValueError(f"beat-synced delay target {target} has no source path to analyze")
+    bpm, _beat_offset_ms, _confidence = cached_beatgrid(
+        cache_path, source_path, min_confidence=min_confidence, force=force
+    )
+    rendered_bpm = bpm * (1 + float(event.get("tempo_shift_pct", 0.0) or 0.0) / 100)
+    if rendered_bpm <= 0:
+        raise ValueError(f"beat-synced delay target {target} has a non-positive rendered tempo")
+    return max(1, int(round((60_000.0 / rendered_bpm) * delay_beats)))
+
+
 def add_effect_event(
     payload: dict[str, Any],
     *,
@@ -2324,6 +2360,9 @@ def add_effect_event(
     preset: str | None = None,
     routine_id: str | None = None,
     routine_recipe: str | None = None,
+    delay_beats: float | None = None,
+    cache_path: Path = DEFAULT_DJ_CACHE,
+    beat_min_confidence: float = DEFAULT_MIN_BEATGRID_CONFIDENCE,
     lock_before_ms: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -2331,6 +2370,15 @@ def add_effect_event(
     require_unique_event_id(next_payload, effect_id)
     start_ms = parse_ms(start, f"effect {effect_id} start")
     guard_live_edit(label=f"effect {effect_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
+    if delay_beats is not None:
+        delay_ms = beat_synced_delay_ms(
+            next_payload,
+            target,
+            delay_beats,
+            cache_path=cache_path,
+            min_confidence=beat_min_confidence,
+            force=force,
+        )
     effect: dict[str, Any] = {
         "id": effect_id,
         "type": effect_type,
@@ -2353,6 +2401,8 @@ def add_effect_event(
         effect["routine_id"] = routine_id
     if routine_recipe is not None:
         effect["routine_recipe"] = routine_recipe
+    if delay_beats is not None:
+        effect["delay_beats"] = delay_beats
     next_payload.setdefault("effects", []).append(effect)
     parse_session(next_payload)
     return next_payload
@@ -3146,6 +3196,13 @@ def main() -> int:
     effect_parser.add_argument("--wet", type=float)
     effect_parser.add_argument("--gain-db", type=float)
     effect_parser.add_argument("--delay-ms", type=int)
+    effect_parser.add_argument(
+        "--delay-beats",
+        type=float,
+        help="Tempo-synced delay time in beats of the target's rendered tempo (0.5 eighth, 0.75 dotted eighth, 1 quarter). Uses the cached beatgrid.",
+    )
+    effect_parser.add_argument("--cache", type=Path, default=DEFAULT_DJ_CACHE)
+    effect_parser.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_BEATGRID_CONFIDENCE)
     effect_parser.add_argument("--feedback", type=float)
     effect_parser.add_argument("--room-size", type=float)
     effect_parser.add_argument("--damping", type=float)
@@ -3344,6 +3401,8 @@ def main() -> int:
         return 0
 
     if args.command == "add-effect":
+        if args.delay_ms is not None and args.delay_beats is not None:
+            raise SystemExit("--delay-ms and --delay-beats are mutually exclusive")
         lock_before_ms = live_edit_lock(args)
         effect_args = resolved_effect_args(args)
         write_payload(
@@ -3364,6 +3423,9 @@ def main() -> int:
                 damping=effect_args["damping"],
                 lowpass_hz=effect_args["lowpass_hz"],
                 preset=effect_args["preset"],
+                delay_beats=args.delay_beats,
+                cache_path=args.cache,
+                beat_min_confidence=args.min_confidence,
                 lock_before_ms=lock_before_ms,
                 force=args.force,
             ),
