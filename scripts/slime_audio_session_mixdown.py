@@ -834,10 +834,16 @@ def effect_stream_filter(
             f"adelay={effect.start_ms}:all=1",
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
         ]
-        # gtype=none: the synthesized IR is already unit-energy normalized, and
-        # afir's default peak normalization would crush it ~30 dB. afir outputs
-        # convolved (wet) signal only; dry/wet here are input/output gains.
-        convolve = f"[{label}dry][{ir_index}:a]afir=gtype=none," + ",".join(filter(None, post))
+        # afir landmines, spelled out so nobody "fixes" them back:
+        # - afir outputs convolved (wet) signal only. Its `dry` option is the
+        #   INPUT gain into the convolution, not a dry-mix control: dry=0
+        #   silences the effect entirely. Unity in/out is dry=1:wet=1.
+        # - gtype=none: the synthesized IR is already unit-energy normalized;
+        #   afir's default peak normalization (gtype=peak) crushes it ~30 dB
+        #   into inaudibility.
+        # The wet/dry musical balance is applied after this via the volume
+        # filters in `post`.
+        convolve = f"[{label}dry][{ir_index}:a]afir=dry=1:wet=1:gtype=none," + ",".join(filter(None, post))
         return ";".join([segment, convolve])
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:

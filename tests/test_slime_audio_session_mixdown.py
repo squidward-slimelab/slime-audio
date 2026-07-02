@@ -199,17 +199,26 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         return centers
 
     def dominant_frequency_hz(self, samples: list[float], sample_rate: int, center_s: float) -> float:
-        start = max(0, int((center_s - 0.03) * sample_rate))
-        end = min(len(samples), int((center_s + 0.03) * sample_rate))
+        # Goertzel scan over a tight window. The old zero-crossing count was
+        # diluted by silence inside its window and misread correct renders by
+        # up to a semitone in either direction.
+        start = max(0, int((center_s - 0.012) * sample_rate))
+        end = min(len(samples), int((center_s + 0.012) * sample_rate))
         window = samples[start:end]
-        crossings = 0
-        previous = window[0] if window else 0.0
-        for value in window[1:]:
-            if previous <= 0 < value or previous >= 0 > value:
-                crossings += 1
-            previous = value
-        duration_s = max(1e-9, len(window) / sample_rate)
-        return crossings / (2 * duration_s)
+        if not window:
+            return 0.0
+
+        def power(frequency_hz: float) -> float:
+            omega = 2 * math.pi * frequency_hz / sample_rate
+            coeff = 2 * math.cos(omega)
+            q0 = q1 = q2 = 0.0
+            for value in window:
+                q0 = coeff * q1 - q2 + value
+                q2 = q1
+                q1 = q0
+            return q1 * q1 + q2 * q2 - coeff * q1 * q2
+
+        return max((x * 2.5 for x in range(40, 1200)), key=power)
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for render-level DSP tests")
     def test_rendered_tempo_and_pitch_shifts_preserve_expected_beep_timing_and_frequency(self):
@@ -1022,7 +1031,10 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         self.assertIn("atrim=start=16.000:duration=2.000", filters)
         self.assertIn("apad=pad_dur=4.000", filters)
-        self.assertIn("[7:a]afir=gtype=none", filters)
+        # Exact afir gain options: dry is afir's INPUT gain (0 = silence, not
+        # a dry mix) and gtype=none preserves the unit-energy IR that afir's
+        # default peak normalization would crush into inaudibility.
+        self.assertIn("[7:a]afir=dry=1:wet=1:gtype=none", filters)
         self.assertIn("volume=0.380000", filters)
         self.assertNotIn("ladspa", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=4.000", filters)
