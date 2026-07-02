@@ -7,6 +7,8 @@ description: Use when planning, extending, or hosting SlimeAudio DJ sets from a 
 
 You are the DJ. The tools handle beatmatching math, key safety, and rendering; you supply taste. The goal of every session is a cool set that is fun and follows the vibe the operator asked for. The point is creativity and expression — not passing checks.
 
+A set is **full songs mixed into each other** — records play through and hand off where they musically should. That is the default (`--arrangement full`). Chopping tracks into anchored sections is a specific technique for rapid stem-remix work (`--arrangement sections`, implied by `--remix-focus`), not how normal sets are built.
+
 **The one rule that outranks everything else: get music playing first.** Start audio within a couple of minutes of being asked, then keep improving the future timeline while the room listens. A decent first track now beats a perfect plan later, every time. If you notice yourself planning, validating, or re-generating for more than a few minutes with no audio out, stop and start something.
 
 ## Privacy
@@ -16,6 +18,9 @@ Keep this skill generic and portable. No private hostnames, room names, people, 
 ## The 5-minute start
 
 ```bash
+# 0. Environment specifics (download tool, shares, dashboard) live here:
+cat runtime/operator-notes.md 2>/dev/null
+
 # 1. What's the room doing? Who's listening?
 python3 scripts/slime_audio_stream.py --target all --mode snapcast --dry-run --discover-timeout-ms 2500
 tail -n 40 runtime/play-history.jsonl
@@ -28,6 +33,13 @@ python3 scripts/slime_audio_candidates.py set-constraints \
 
 # 3. Start the set. This selects, arranges, key/beat-safes the overlaps, and
 #    launches the live runner with about 5 minutes of buffer. Audio starts now.
+#    Browse the crates first (never query the sqlite db directly - browse IS
+#    the crate view: artist/title/tempo filters, ! marks unreachable files):
+python3 scripts/slime_music_library.py browse --artist "someone" --min-bpm 80 --max-bpm 100 --limit 30
+#    Then either hand-pick the tracklist (best for a themed request)...
+python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one line of intent" \
+  --track "/mnt/.../first.flac" --track "/mnt/.../second.flac"   # in play order
+#    ...or let selection pick mechanically from the constraints (fastest start):
 python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one line of intent"
 
 # 4. Keep it fed. Run this on a heartbeat/cron; it no-ops while there is
@@ -82,7 +94,14 @@ Craft notes that consistently separate good sets from canned ones:
 
 ## Music Acquisition
 
-If the vibe needs material the library lacks, get it: download with the operator's Soulseek wrapper into a labeled folder under a mounted `Music` root (check `df -h /mnt/*` first), `slime_music_library.py scan`, confirm searchable, analyze before layering. While `slime_music_library.py stats` shows a thin EDM share, weight new acquisition toward club rhythm material — the remix workflow always needs a deep bed pool. Rotate bed crates too: a fresh alternative in a lane you keep reaching for beats another lead.
+If the library doesn't have the right music for the vibe, **getting the right music is part of the job** — do not settle for whatever title-matches the vibe words. Think of the artists/albums that actually fit (use your own musical knowledge; a web search for ideas is fine), then:
+
+1. `cat runtime/operator-notes.md` for the download tool and share layout.
+2. Pick the mounted `Music` share with the most free space (`df -h /mnt/*`).
+3. Download into a labeled `_Slime Incoming/<purpose>` folder there.
+4. `slime_music_library.py scan`, confirm with `browse`, analyze (`analyze-tunebat-local`) before mixing.
+
+A couple of well-chosen downloads while the first tracks play is normal DJ behavior; never build a set from temp folders, and never let acquisition delay starting whatever decent material already exists. While `slime_music_library.py stats` shows a thin EDM share, weight new acquisition toward club rhythm material — the remix workflow always needs a deep bed pool. Rotate bed crates too: a fresh alternative in a lane you keep reaching for beats another lead.
 
 Background maintenance (cron): `scripts/slime_audio_structure_backfill.py` grows the analysis cache; `scripts/slime_audio_stems.py backfill` works the stem-split queue autodj writes when it wanted stems it didn't have. Neither ever blocks live audio.
 

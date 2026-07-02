@@ -42,6 +42,8 @@ def autodj_args(**overrides):
     values = {
         "max_tracks": 1,
         "default_track_ms": 240_000,
+        "arrangement": "sections",
+        "max_full_lead_ms": 480_000,
         "max_lead_clip_ms": 90_000,
         "max_fast_lead_clip_ms": 64_000,
         "min_section_clip_ms": 32_000,
@@ -1020,6 +1022,27 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                 )
 
         self.assertIn("no material DJ move", str(raised.exception))
+
+    def test_full_arrangement_plays_whole_songs(self):
+        """The default set is full songs mixed together, not 90-second chunks."""
+        track = selected_track()
+        args = autodj_args(arrangement="full")
+
+        payload = session_payload([track], args, {track.path: analysis()})
+
+        self.assertEqual(payload["clips"][0]["trim_start_ms"], 0)
+        self.assertEqual(payload["clips"][0]["duration_ms"], 240_000)
+        self.assertEqual(payload["clips"][0]["source_window_reason"], "full-track")
+
+    def test_full_arrangement_skips_structure_rejection(self):
+        good = selected_track("/music/good.flac")
+        unanalyzed = selected_track("/music/bad.flac")
+        args = autodj_args(arrangement="full")
+
+        accepted, rejected = filter_defensible_source_tracks([unanalyzed, good], {good.path: analysis(good.path)}, args)
+
+        self.assertEqual(len(accepted), 2)
+        self.assertEqual(rejected, [])
 
     def test_session_payload_caps_leads_to_short_sections(self):
         track = selected_track()

@@ -555,6 +555,85 @@ def command_stats(conn: sqlite3.Connection) -> None:
     print_json(summary)
 
 
+def command_browse(
+    conn: sqlite3.Connection,
+    *,
+    artist: str | None,
+    title: str | None,
+    query: str | None,
+    min_bpm: float | None,
+    max_bpm: float | None,
+    analyzed_only: bool,
+    available_only: bool,
+    limit: int,
+    as_json: bool,
+) -> None:
+    """Crate browsing for the DJ: filter by artist/title/tempo, see what is
+    analyzed and which files are actually reachable, without writing SQL."""
+    filters = ["preferred_path IS NOT NULL"]
+    params: list[object] = []
+    if artist:
+        filters.append("normalized_artist LIKE ?")
+        params.append(f"%{normalize(artist)}%")
+    if title:
+        filters.append("normalized_title LIKE ?")
+        params.append(f"%{normalize(title)}%")
+    if query:
+        filters.append("(normalized_artist LIKE ? OR normalized_title LIKE ? OR lower(locations) LIKE lower(?))")
+        normalized = f"%{normalize(query)}%"
+        params.extend([normalized, normalized, f"%{query}%"])
+    if min_bpm is not None:
+        filters.append("tunebat_bpm >= ?")
+        params.append(min_bpm)
+    if max_bpm is not None:
+        filters.append("tunebat_bpm <= ?")
+        params.append(max_bpm)
+    if analyzed_only or min_bpm is not None or max_bpm is not None:
+        filters.append("tunebat_bpm IS NOT NULL")
+    rows = conn.execute(
+        f"""
+        SELECT artist_guess, title_guess, album_guess, tunebat_bpm, tunebat_camelot, tunebat_key, preferred_path
+        FROM tracks
+        WHERE {" AND ".join(filters)}
+        ORDER BY artist_guess COLLATE NOCASE, album_guess COLLATE NOCASE, title_guess COLLATE NOCASE
+        LIMIT ?
+        """,
+        [*params, max(1, limit)],
+    ).fetchall()
+    results = []
+    for row in rows:
+        path_text = str(row["preferred_path"] or "")
+        available = bool(path_text) and Path(path_text).exists()
+        if available_only and not available:
+            continue
+        results.append(
+            {
+                "artist": row["artist_guess"],
+                "title": row["title_guess"],
+                "album": row["album_guess"],
+                "bpm": row["tunebat_bpm"],
+                "camelot": row["tunebat_camelot"],
+                "key": row["tunebat_key"],
+                "path": path_text,
+                "available": available,
+            }
+        )
+    if as_json:
+        print_json(results)
+        return
+    if not results:
+        print("no matches")
+        return
+    for item in results:
+        bpm = f"{item['bpm']:>6.1f}" if item["bpm"] is not None else "     ?"
+        camelot = f"{item['camelot'] or '?':>3s}"
+        flag = " " if item["available"] else "!"
+        print(f"{flag} {bpm} {camelot}  {item['artist']} - {item['title']}  [{item['album']}]")
+        print(f"      {item['path']}")
+    missing = sum(1 for item in results if not item["available"])
+    print(f"-- {len(results)} tracks ({missing} on unmounted shares, marked !)  bpm ? = not yet analyzed")
+
+
 def command_search(conn: sqlite3.Connection, query: str, limit: int) -> None:
     normalized = f"%{normalize(query)}%"
     rows = conn.execute(
@@ -958,6 +1037,17 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser("stats")
 
+    browse_parser = sub.add_parser("browse", help="Crate browsing: filter by artist/title/tempo without writing SQL.")
+    browse_parser.add_argument("query", nargs="?", help="Free text over artist/title/location.")
+    browse_parser.add_argument("--artist")
+    browse_parser.add_argument("--title")
+    browse_parser.add_argument("--min-bpm", type=float)
+    browse_parser.add_argument("--max-bpm", type=float)
+    browse_parser.add_argument("--analyzed-only", action="store_true", help="Only tracks with BPM/key metadata.")
+    browse_parser.add_argument("--available-only", action="store_true", help="Only tracks whose files are reachable right now.")
+    browse_parser.add_argument("--limit", type=int, default=40)
+    browse_parser.add_argument("--json", action="store_true")
+
     search_parser = sub.add_parser("search")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=20)
@@ -1028,6 +1118,20 @@ def main() -> int:
         return 0
     if args.command == "stats":
         command_stats(conn)
+        return 0
+    if args.command == "browse":
+        command_browse(
+            conn,
+            artist=args.artist,
+            title=args.title,
+            query=args.query,
+            min_bpm=args.min_bpm,
+            max_bpm=args.max_bpm,
+            analyzed_only=args.analyzed_only,
+            available_only=args.available_only,
+            limit=args.limit,
+            as_json=args.json,
+        )
         return 0
     if args.command == "search":
         command_search(conn, args.query, args.limit)

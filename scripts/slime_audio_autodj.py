@@ -498,7 +498,13 @@ def selected_tracks_from_paths(paths: list[Path], args: argparse.Namespace) -> l
     return selected
 
 
+def apply_arrangement_default(args: argparse.Namespace) -> None:
+    if (getattr(args, "remix_focus", False) or getattr(args, "stem_aware_remix", False)) and "--arrangement" not in sys.argv:
+        args.arrangement = "sections"
+
+
 def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = None) -> list[SelectedTrack]:
+    apply_arrangement_default(args)
     picked = [Path(p) for p in (getattr(args, "track", None) or [])]
     if picked:
         return selected_tracks_from_paths(picked, args)
@@ -633,10 +639,12 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
             artist_counts[artist_key] += 1
         if title_key:
             title_counts[title_key] += 1
-        # Runway must approximate scheduled timeline time. Leads are arranged as
-        # source windows capped at max_lead_clip_ms, so counting full track
-        # durations here would overstate the buffer by 2-4x.
-        runway_ms += min(duration_ms or args.default_track_ms, args.max_lead_clip_ms)
+        # Runway must approximate scheduled timeline time: full tracks in the
+        # default arrangement, capped section windows in the remix lanes.
+        if str(getattr(args, "arrangement", "full")) == "full":
+            runway_ms += min(duration_ms or args.default_track_ms, int(getattr(args, "max_full_lead_ms", 480_000)))
+        else:
+            runway_ms += min(duration_ms or args.default_track_ms, args.max_lead_clip_ms)
         return True
 
     download_target = 0
@@ -927,7 +935,17 @@ def load_or_analyze_selected(selected: list[SelectedTrack], args: argparse.Names
     return analyses
 
 
+def full_track_window(track: SelectedTrack, analysis: TrackAnalysis | None, args: argparse.Namespace) -> SourceWindow:
+    """A set is full songs mixed into each other. Play the whole track (capped
+    only for marathon recordings); the planner shapes the transitions."""
+    source_duration_ms = track.duration_ms or args.default_track_ms
+    duration_ms = min(source_duration_ms, int(getattr(args, "max_full_lead_ms", 480_000)))
+    return SourceWindow(0, duration_ms, "full-track", None)
+
+
 def source_window_for_track(track: SelectedTrack, analysis: TrackAnalysis | None, args: argparse.Namespace, *, fast_mode: bool) -> SourceWindow:
+    if str(getattr(args, "arrangement", "full")) == "full":
+        return full_track_window(track, analysis, args)
     source_duration_ms = track.duration_ms or args.default_track_ms
     max_clip_ms = args.max_fast_lead_clip_ms if fast_mode else args.max_lead_clip_ms
     min_clip_ms = min(args.min_section_clip_ms, max_clip_ms)
@@ -999,6 +1017,8 @@ def filter_defensible_source_tracks(
     analyses: dict[str, TrackAnalysis],
     args: argparse.Namespace,
 ) -> tuple[list[SelectedTrack], list[dict[str, str]]]:
+    if str(getattr(args, "arrangement", "full")) == "full":
+        return selected, []
     fast_mode = fast_section_mode_for(selected)
     accepted: list[SelectedTrack] = []
     rejected: list[dict[str, str]] = []
@@ -3071,6 +3091,13 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--default-track-ms", type=int, default=240_000)
     parser.add_argument("--min-track-ms", type=int, default=90_000)
+    parser.add_argument(
+        "--arrangement",
+        choices=["full", "sections"],
+        default="full",
+        help="full: play whole songs mixed into each other (the normal set). sections: chop leads to anchored windows (rapid remix work; implied by --remix-focus/--stem-aware-remix).",
+    )
+    parser.add_argument("--max-full-lead-ms", type=int, default=480_000)
     parser.add_argument("--max-lead-clip-ms", type=int, default=90_000)
     parser.add_argument("--max-fast-lead-clip-ms", type=int, default=64_000)
     parser.add_argument("--min-section-clip-ms", type=int, default=32_000)
