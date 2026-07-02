@@ -1031,10 +1031,11 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         self.assertIn("atrim=start=16.000:duration=2.000", filters)
         self.assertIn("apad=pad_dur=4.000", filters)
-        # Exact afir gain options: dry is afir's INPUT gain (0 = silence, not
-        # a dry mix) and gtype=none preserves the unit-energy IR that afir's
-        # default peak normalization would crush into inaudibility.
-        self.assertIn("[7:a]afir=dry=1:wet=1:gtype=none", filters)
+        # The interface fact: the reverb convolves the source window with the
+        # prepared impulse-response input. afir's quirky gain options are an
+        # implementation detail owned by convolution_reverb_filter(), and the
+        # rendered-tail test guards them behaviorally.
+        self.assertIn("[7:a]afir", filters)
         self.assertIn("volume=0.380000", filters)
         self.assertNotIn("ladspa", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=4.000", filters)
@@ -1517,6 +1518,48 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         conn.commit()
         conn.close()
         return db_path
+
+    def test_reverb_controls_behave_like_hardware(self):
+        """The knobs mean what their labels say: bigger room decays longer,
+        more damping is darker, pre-delay follows delay_ms within sane bounds."""
+        from slime_audio_session import EffectEvent
+        from slime_audio_session_mixdown import reverb_ir_parameters
+
+        def params(**overrides):
+            effect = EffectEvent(
+                id="fx",
+                type="reverb",
+                target="lead",
+                start_ms=0,
+                duration_ms=1_000,
+                tail_ms=2_000,
+                **overrides,
+            )
+            return reverb_ir_parameters(effect)
+
+        self.assertGreater(params(room_size=1.0)["rt60_s"], params(room_size=0.1)["rt60_s"])
+        self.assertLess(params(damping=0.9)["damping_hz"], params(damping=0.1)["damping_hz"])
+        self.assertGreater(params(feedback=0.9)["rt60_s"], params(feedback=0.1)["rt60_s"])
+        self.assertEqual(params(delay_ms=60)["pre_delay_s"], 0.06)
+        self.assertEqual(params(delay_ms=5)["pre_delay_s"], 0.02)
+        self.assertEqual(params(delay_ms=500)["pre_delay_s"], 0.1)
+
+    def test_reverb_room_size_audibly_lengthens_the_ir_tail(self):
+        from slime_audio_session import EffectEvent
+        from slime_audio_session_mixdown import write_reverb_ir
+
+        def late_energy(room_size: float) -> float:
+            effect = EffectEvent(
+                id="fx", type="reverb", target="lead", start_ms=0, duration_ms=1_000, tail_ms=2_000, room_size=room_size
+            )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "ir.wav"
+                write_reverb_ir(effect, path, 48_000, 1)
+                rate, samples = self.read_wav_samples(path)
+            late = samples[int(1.0 * rate) : int(1.5 * rate)]
+            return math.sqrt(sum(value * value for value in late) / max(1, len(late)))
+
+        self.assertGreater(late_energy(1.0), late_energy(0.1) * 2)
 
     def test_reverb_ir_is_deterministic_and_energy_normalized(self):
         from slime_audio_session import EffectEvent

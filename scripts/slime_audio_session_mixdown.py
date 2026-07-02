@@ -640,6 +640,26 @@ def stem_dynamic_filters(session: MixSession, group: StemGroup, stem_name: str, 
     return filters
 
 
+def convolution_reverb_filter() -> str:
+    """afir configured as a plain unity-gain convolution.
+
+    The reverb's musical interface lives on EffectEvent (room_size, damping,
+    pre-delay via delay_ms, feedback as reverberance, wet, gain_db) and in the
+    synthesized impulse response; this helper exists to hide afir's quirks in
+    exactly one place:
+
+    - afir outputs convolved (wet) signal only. Its `dry` option is the INPUT
+      gain into the convolution, not a dry-mix control: dry=0 silences the
+      effect entirely. Unity in/out is dry=1:wet=1.
+    - gtype=none: the synthesized IR is already unit-energy normalized; afir's
+      default peak normalization (gtype=peak) crushes it ~30 dB into
+      inaudibility.
+
+    The wet/dry musical balance is applied by volume filters after this.
+    """
+    return "afir=dry=1:wet=1:gtype=none"
+
+
 def reverb_ir_parameters(effect: EffectEvent) -> dict[str, float]:
     room = max(0.1, min(1.0, effect.room_size))
     damping = max(0.0, min(1.0, effect.damping))
@@ -834,16 +854,7 @@ def effect_stream_filter(
             f"adelay={effect.start_ms}:all=1",
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
         ]
-        # afir landmines, spelled out so nobody "fixes" them back:
-        # - afir outputs convolved (wet) signal only. Its `dry` option is the
-        #   INPUT gain into the convolution, not a dry-mix control: dry=0
-        #   silences the effect entirely. Unity in/out is dry=1:wet=1.
-        # - gtype=none: the synthesized IR is already unit-energy normalized;
-        #   afir's default peak normalization (gtype=peak) crushes it ~30 dB
-        #   into inaudibility.
-        # The wet/dry musical balance is applied after this via the volume
-        # filters in `post`.
-        convolve = f"[{label}dry][{ir_index}:a]afir=dry=1:wet=1:gtype=none," + ",".join(filter(None, post))
+        convolve = f"[{label}dry][{ir_index}:a]{convolution_reverb_filter()}," + ",".join(filter(None, post))
         return ";".join([segment, convolve])
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
