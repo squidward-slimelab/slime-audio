@@ -368,5 +368,75 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertEqual(selected.at_ms, 64_000)
 
 
+class SlimeAudioDjNativeAnalyzerTests(unittest.TestCase):
+    """Parity between the compiled analyzer and the pure-Python reference."""
+
+    @staticmethod
+    def _write_synthetic_track(path: Path, *, bpm: float = 128.0, seconds: float = 12.0, tone_hz: float = 220.0) -> None:
+        import math
+        import struct
+        import wave
+
+        sample_rate = 44_100
+        beat_samples = int(sample_rate * 60.0 / bpm)
+        total = int(sample_rate * seconds)
+        frames = bytearray()
+        for index in range(total):
+            in_beat = (index % beat_samples) < int(0.06 * sample_rate)
+            value = 0.15 * math.sin(2 * math.pi * tone_hz * index / sample_rate)
+            if in_beat:
+                value += 0.6 * math.sin(2 * math.pi * 80.0 * index / sample_rate)
+            packed = struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767))
+            frames += packed + packed
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(2)
+            audio.setsampwidth(2)
+            audio.setframerate(sample_rate)
+            audio.writeframes(bytes(frames))
+
+    def test_native_analyzer_matches_python_reference(self):
+        import slime_audio_dj as dj
+
+        binary = Path(__file__).resolve().parents[1] / "native" / "slime-dj-analyzer"
+        if not binary.exists():
+            self.skipTest("native analyzer not built; run make -C native")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wav_path = Path(temp_dir) / "synthetic.wav"
+            self._write_synthetic_track(wav_path)
+
+            native = dj.analyze_track(wav_path)
+            with patch.object(dj, "DEFAULT_NATIVE_ANALYZER", Path("/nonexistent/analyzer")):
+                reference = dj.analyze_track(wav_path)
+
+        self.assertEqual(native.sample_rate, reference.sample_rate)
+        self.assertEqual(native.channels, reference.channels)
+        self.assertAlmostEqual(native.duration_s, reference.duration_s, places=3)
+        self.assertAlmostEqual(native.bpm, reference.bpm, places=2)
+        self.assertEqual(native.beat_offset_ms, reference.beat_offset_ms)
+        self.assertEqual(native.tonic, reference.tonic)
+        self.assertEqual(native.mode, reference.mode)
+        self.assertEqual(native.camelot, reference.camelot)
+        self.assertAlmostEqual(native.energy, reference.energy, places=3)
+        self.assertAlmostEqual(native.loudness_db, reference.loudness_db, places=1)
+        self.assertAlmostEqual(native.confidence["bpm"], reference.confidence["bpm"], places=2)
+        self.assertAlmostEqual(native.confidence["key"], reference.confidence["key"], places=2)
+        self.assertEqual(
+            [(window.kind, window.start_ms, window.end_ms) for window in native.structure],
+            [(window.kind, window.start_ms, window.end_ms) for window in reference.structure],
+        )
+
+    def test_native_analyzer_missing_binary_falls_back_to_python(self):
+        import slime_audio_dj as dj
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wav_path = Path(temp_dir) / "synthetic.wav"
+            self._write_synthetic_track(wav_path, seconds=6.0)
+            with patch.object(dj, "DEFAULT_NATIVE_ANALYZER", Path("/nonexistent/analyzer")):
+                analysis = dj.analyze_track(wav_path)
+
+        self.assertGreater(analysis.duration_s, 5.0)
+        self.assertIsNotNone(analysis.bpm)
+
+
 if __name__ == "__main__":
     unittest.main()

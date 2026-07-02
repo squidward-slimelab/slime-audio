@@ -39,6 +39,16 @@ python3 scripts/slime_music_library.py scan
 python3 scripts/slime_music_library.py search "new track or artist"
 ```
 
+## Native Analyzer
+
+The BPM/beat-offset/key/energy/structure DSP has a compiled C++ implementation in `native/slime_dj_analyzer.cpp`. Build it once with:
+
+```bash
+make -C native
+```
+
+`slime_audio_dj.py analyze`/`structure`/`cues` automatically use `native/slime-dj-analyzer` when the binary exists (override with `SLIME_DJ_NATIVE_ANALYZER`) and fall back to the pure-Python reference implementation when it does not. The port mirrors the Python algorithms exactly — including rounding and tie-break semantics — so cached analyses stay comparable across implementations; `tests/test_slime_audio_dj.py` includes a parity test. ffmpeg still handles decoding in both paths.
+
 ## DJ Analysis
 
 `scripts/slime_audio_dj.py` analyzes local tracks for BPM, beat offset, structure, key, Camelot code, energy, cues, and transition compatibility.

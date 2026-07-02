@@ -11,3 +11,4 @@ obj/
 *.log
 runtime/
 node_modules/
+native/slime-dj-analyzer

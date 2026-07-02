@@ -5,7 +5,9 @@ import argparse
 import audioop
 import json
 import math
+import os
 import sqlite3
+import subprocess
 import tempfile
 import time
 import wave
@@ -25,6 +27,13 @@ from slime_music_library import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
+# Compiled analyzer (native/slime_dj_analyzer.cpp, built via `make -C native`).
+# When present it replaces the pure-Python DSP below, which decodes fine but
+# spends minutes per track in interpreted loops; the Python implementation
+# remains the fallback and the reference for behavior.
+DEFAULT_NATIVE_ANALYZER = Path(
+    os.environ.get("SLIME_DJ_NATIVE_ANALYZER", str(REPO_ROOT / "native" / "slime-dj-analyzer"))
+)
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 NOTE_NAME_TO_TONIC = {
     "C": 0,
@@ -851,8 +860,44 @@ def key_name(tonic: int | None, mode: str | None) -> str | None:
     return f"{NOTE_NAMES[tonic]} {mode}"
 
 
+def native_analyze_wav(wav_path: Path) -> dict | None:
+    binary = DEFAULT_NATIVE_ANALYZER
+    if not binary.exists():
+        return None
+    result = subprocess.run([str(binary), str(wav_path)], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
 def analyze_track(path: Path, backend: str = "auto", sample_rate: int = 44_100) -> TrackAnalysis:
     with decoded_wav(path, backend, sample_rate) as wav_path:
+        native = native_analyze_wav(wav_path)
+        if native is not None:
+            tonic = native.get("tonic")
+            mode = native.get("mode")
+            bpm = native.get("bpm")
+            beat_offset_ms = native.get("beat_offset_ms")
+            return TrackAnalysis(
+                path=str(path),
+                duration_s=float(native["duration_s"]),
+                sample_rate=int(native["sample_rate"]),
+                channels=int(native["channels"]),
+                bpm=bpm,
+                beat_offset_ms=beat_offset_ms,
+                key=key_name(tonic, mode),
+                tonic=tonic,
+                mode=mode,
+                camelot=camelot(tonic, mode),
+                energy=float(native["energy"]),
+                loudness_db=float(native["loudness_db"]),
+                confidence=dict(native.get("confidence") or {}),
+                beatgrid=beat_grid(bpm, beat_offset_ms),
+                structure=[StructureWindow(**window) for window in native.get("structure") or []],
+            )
         rate, channels, frames = read_wav_mono(wav_path)
     duration_s = (len(frames) // 2) / rate if rate else 0.0
     envelope, rms = rms_envelope(frames, rate)
