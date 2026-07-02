@@ -283,7 +283,9 @@ internal sealed class TrayContext : ApplicationContext
 internal sealed class MulticastReceiver : IDisposable
 {
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxReconnectDelay = TimeSpan.FromSeconds(60);
     private const int MaxReconnectAttempts = 12;
+    private const long StableRunMs = 60_000;
     private const int NoExitCode = int.MinValue;
     private readonly MulticastOptions _options;
     private readonly object _processLock = new();
@@ -435,6 +437,13 @@ internal sealed class MulticastReceiver : IDisposable
                     Interlocked.Exchange(ref _lastExitCode, process.ExitCode);
                     var stopRequested = _stopRequested;
                     var uptimeMs = Math.Max(0, exitedAtMs - Interlocked.Read(ref _startedUnixTimeMs));
+                    if (uptimeMs >= StableRunMs)
+                    {
+                        // A stable run means the last crash episode is over; give the
+                        // next disconnect a fresh reconnect budget so occasional
+                        // snapclient WASAPI aborts keep self-healing indefinitely.
+                        Interlocked.Exchange(ref _reconnectAttempts, 0);
+                    }
                     _lastExitStatus = stopRequested ? $"Shared stream stopped: {process.ExitCode}" : $"Shared stream disconnected: {process.ExitCode}";
                     ClientTelemetry.Write("snapclient_exited", new { processId = process.Id, process.ExitCode, serverHost, stopRequested, uptimeMs, lastStderr = _lastStderrLine, command = _lastStartCommand });
                     SetStatus(_lastExitStatus);
@@ -611,9 +620,10 @@ internal sealed class MulticastReceiver : IDisposable
                         return;
                     }
 
-                    ClientTelemetry.Write("snapclient_reconnect_waiting", new { serverHost, exitCode, attempt });
+                    var delay = ReconnectDelayFor(attempt);
+                    ClientTelemetry.Write("snapclient_reconnect_waiting", new { serverHost, exitCode, attempt, delayMs = (long)delay.TotalMilliseconds });
                     SetStatus($"Shared stream reconnecting ({attempt}/{MaxReconnectAttempts})");
-                    await Task.Delay(ReconnectDelay, tokenSource.Token).ConfigureAwait(false);
+                    await Task.Delay(delay, tokenSource.Token).ConfigureAwait(false);
                     if (tokenSource.IsCancellationRequested)
                     {
                         return;
@@ -648,6 +658,12 @@ internal sealed class MulticastReceiver : IDisposable
                 }
             }
         });
+    }
+
+    private static TimeSpan ReconnectDelayFor(int attempt)
+    {
+        var seconds = ReconnectDelay.TotalSeconds * Math.Pow(2, Math.Max(0, attempt - 1));
+        return TimeSpan.FromSeconds(Math.Min(MaxReconnectDelay.TotalSeconds, seconds));
     }
 
     private void CancelReconnect()
@@ -766,12 +782,15 @@ internal static class WindowsAudioDevices
 
 internal static class ClientTelemetry
 {
+    private const long MaxFileBytes = 64 * 1024 * 1024;
     private static readonly object Lock = new();
 
     public static string Path { get; } = System.IO.Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SlimeAudio",
         "telemetry.jsonl");
+
+    private static string RotatedPath => Path + ".1";
 
     public static void Write(string eventName, object? data = null)
     {
@@ -794,6 +813,11 @@ internal static class ClientTelemetry
             });
             lock (Lock)
             {
+                var info = new FileInfo(Path);
+                if (info.Exists && info.Length >= MaxFileBytes)
+                {
+                    File.Move(Path, RotatedPath, overwrite: true);
+                }
                 File.AppendAllText(Path, payload + Environment.NewLine, Encoding.UTF8);
             }
         }
