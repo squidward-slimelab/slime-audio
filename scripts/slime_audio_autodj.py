@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import traceback
 import urllib.request
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -51,6 +52,7 @@ DEFAULT_TARGETS = ["192.168.0.123:47777", "192.168.0.163:47777"]
 DEFAULT_MIN_RUNWAY_MS = 35 * 60 * 1000
 DEFAULT_MAX_TRACKS = 24
 DEFAULT_MIN_HARMONIC_OVERLAP_MS = 500
+DEFAULT_MIN_HARMONIC_CHECKS = 1
 AUTODJ_LOCK = Path("/tmp/slime-audio-autodj.lock")
 DEFAULT_SCRATCH_SOURCE_FILES = [
     DEFAULT_RUNTIME / "stem-recovery-set-20260611-actions.json",
@@ -150,6 +152,13 @@ class SelectedTrack:
     last_played_at: str | None
     plays_seen: int
     reasons: list[str]
+
+
+class WeakSelectionError(SystemExit):
+    def __init__(self, selected: list[SelectedTrack], runway_ms: int):
+        self.selected = selected
+        self.runway_ms = runway_ms
+        super().__init__(f"only selected {len(selected)} tracks / {round(runway_ms / 60000, 1)} min; refusing weak autodj set")
 
 
 @dataclass(frozen=True)
@@ -575,9 +584,7 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
                 break
 
     if len(selected) < args.min_tracks or runway_ms < args.min_runway_ms:
-        raise SystemExit(
-            f"only selected {len(selected)} tracks / {round(runway_ms / 60000, 1)} min; refusing weak autodj set"
-        )
+        raise WeakSelectionError(selected, runway_ms)
     selected.sort(key=lambda track: track.score, reverse=True)
     return selected
 
@@ -1218,6 +1225,14 @@ def plan_structural_bed_layer(
         "target_stems": ["vocals", "drums", "bass", "other"],
         "entry_intent": "mid-section groove injection; not a terminal next-track drum preview",
         "exit_intent": "fade and filter out before the lead exit unless a transition plan explicitly takes over",
+        "beatmatch_evidence": {
+            "status": "pending-analysis",
+            "requirement": "populate local BPM, beat offset, phrase anchor, target tempo, and drift check before launch",
+        },
+        "keymatch_evidence": {
+            "status": "pending-analysis",
+            "requirement": "populate local key/Camelot relationship, pitch shift, or drums-only/atonal exemption before launch",
+        },
         "lead_action_id": lead.get("id"),
         "source_path": source.path,
         "start_ms": bed_start,
@@ -1291,9 +1306,9 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
     max_structural_beds = int(getattr(args, "max_structural_beds", 4) or 0)
     if max_structural_beds <= 0:
         return {"added": 0, "reason": "structural beds disabled"}
-    target_count = min(max_structural_beds, max(1, len(leads) // 3))
-    target_stride = max(2, len(leads) // max(1, target_count))
-    first_target_index = 1 if len(leads) > 1 else 0
+    target_count = min(max_structural_beds, len(leads))
+    target_stride = max(1, len(leads) // max(1, target_count))
+    first_target_index = 0 if target_count >= len(leads) else (1 if len(leads) > 1 else 0)
     target_indices = list(range(first_target_index, len(leads), target_stride))[:target_count]
     if not target_indices:
         target_indices = [0]
@@ -1321,6 +1336,19 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
                 for source in rhythm_sources
                 if source.path not in used_source_paths
                 and source.path != current_path
+            ]
+        if not candidates:
+            candidates = [
+                source
+                for source in rhythm_sources
+                if source.path != current_path
+                and source.path not in adjacent_paths
+            ]
+        if not candidates:
+            candidates = [
+                source
+                for source in rhythm_sources
+                if source.path != current_path
             ]
         if not candidates:
             return None
@@ -1368,6 +1396,12 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
                 "decision": plan.key_relation,
                 "score": plan.score,
                 "reason": "; ".join(plan.notes) or "explicit bed beat/key match",
+                "source_bpm": source_analysis.bpm,
+                "lead_bpm": lead_analysis.bpm,
+                "source_beat_offset_ms": source_analysis.beat_offset_ms,
+                "lead_beat_offset_ms": lead_analysis.beat_offset_ms,
+                "source_phrase_ms": source_analysis.beatgrid.phrase_ms if source_analysis.beatgrid else None,
+                "lead_phrase_ms": lead_analysis.beatgrid.phrase_ms if lead_analysis.beatgrid else None,
             }
             payload.setdefault("transition_plans", []).append(
                 {
@@ -1398,9 +1432,41 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
                     bed_event["planner_role"] = "drum-bed"
                     play_stems = ["drums"]
                     bed_event["play_stems"] = play_stems
+        if not isinstance(bed_event.get("transition_decision"), dict):
+            bed_event["planner_role"] = "drum-bed"
+            play_stems = ["drums"]
+            bed_event["play_stems"] = play_stems
+            bed_event["tempo_shift_pct"] = 0.0
+            bed_event["pitch_shift_semitones"] = 0
+            bed_event["transition_decision"] = {
+                "tempo_shift_pct": 0.0,
+                "pitch_shift_semitones": 0,
+                "decision": "drums-only fallback",
+                "reason": "missing local analysis for full beat/key plan; restrict to drums-only layer and require proof-listening before launch",
+            }
         plan = plan_structural_bed_layer(lead, source, play_stems, args)
         if plan is None:
             continue
+        if isinstance(bed_event.get("transition_decision"), dict):
+            decision = bed_event["transition_decision"]
+            plan["beatmatch_evidence"] = {
+                "status": "analyzed",
+                "source_bpm": decision.get("source_bpm"),
+                "lead_bpm": decision.get("lead_bpm"),
+                "source_beat_offset_ms": decision.get("source_beat_offset_ms"),
+                "lead_beat_offset_ms": decision.get("lead_beat_offset_ms"),
+                "source_phrase_ms": decision.get("source_phrase_ms"),
+                "lead_phrase_ms": decision.get("lead_phrase_ms"),
+                "target_tempo_shift_pct": decision.get("tempo_shift_pct"),
+                "drift_check": "required in proof render start/middle/exit",
+            }
+            plan["keymatch_evidence"] = {
+                "status": "analyzed",
+                "decision": decision.get("decision"),
+                "pitch_shift_semitones": decision.get("pitch_shift_semitones"),
+                "reason": decision.get("reason"),
+                "drums_only_exemption": set(play_stems) == {"drums"},
+            }
         bed_start = int(plan["start_ms"])
         bed_duration = int(plan["duration_ms"])
         bed_end = int(plan["end_ms"])
@@ -1431,6 +1497,7 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
                 {
                     **bed_event,
                     "path": source.path,
+                    "play_stems": play_stems,
                 }
             )
         bed_windows.append((bed_start, bed_end))
@@ -1667,6 +1734,19 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
 
     if failures:
         raise SystemExit(f"harmonic overlap guard failed: {json.dumps(failures[:5], sort_keys=True)}")
+    min_checks = int(getattr(args, "min_harmonic_checks", 0) or 0)
+    if checked < min_checks:
+        raise SystemExit(
+            "harmonic overlap guard failed: "
+            + json.dumps(
+                {
+                    "checked": checked,
+                    "min_required": min_checks,
+                    "reason": "no key-checked musical overlap; refusing metadata-only transition plan",
+                },
+                sort_keys=True,
+            )
+        )
     return {"checked": checked, "min_overlap_ms": min_overlap_ms}
 
 
@@ -1895,15 +1975,9 @@ def validate_no_vanilla_leads(session_path: Path, args: argparse.Namespace) -> d
                 windows.append(material_windows[-1])
         for effect in effects:
             if effect.get("target") == lead_id:
-                before = len(material_windows)
-                record_move_window(material_windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
-                if len(material_windows) > before:
-                    windows.append(material_windows[-1])
+                record_move_window(windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
             elif str(effect.get("target") or "") in {str(lead.get("deck") or ""), "master", "all"}:
-                before = len(material_windows)
-                record_move_window(material_windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
-                if len(material_windows) > before:
-                    windows.append(material_windows[-1])
+                record_move_window(windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
         for effect in effects:
             if effect.get("target") == lead_id:
                 record_move_window(windows, event_start_ms(effect), event_end_ms(effect), lead_start, lead_end)
@@ -1939,6 +2013,7 @@ def validate_component_bed_balance(session_path: Path, args: argparse.Namespace)
     ]
     failures: list[dict[str, Any]] = []
     checked = 0
+    candidates_by_id = {str(item.get("id") or ""): item for item in candidates if isinstance(item, dict) and item.get("id")}
     for item in candidates:
         play_stems = item.get("play_stems") if isinstance(item.get("play_stems"), list) else []
         role = str(item.get("planner_role") or "")
@@ -1950,6 +2025,15 @@ def validate_component_bed_balance(session_path: Path, args: argparse.Namespace)
         except (TypeError, ValueError):
             gain_db = 0.0
         strategy = str(item.get("component_balance_strategy") or "")
+        stem_layer_plan = item.get("stem_layer_plan")
+        if not isinstance(stem_layer_plan, dict):
+            failures.append(
+                {
+                    "id": str(item.get("id") or ""),
+                    "planner_role": role,
+                    "reason": "bed has no explicit stem-layer plan for stems, timing, exit, beat/key evidence, and automation intent",
+                }
+            )
         if gain_db <= -6.0 and "component-aware drum bed" not in strategy:
             failures.append(
                 {
@@ -1959,7 +2043,46 @@ def validate_component_bed_balance(session_path: Path, args: argparse.Namespace)
                     "reason": "drum bed uses old buried gain without component-aware fader/EQ balance",
                 }
             )
-        if strategy and "bed" in role and not isinstance(item.get("stem_layer_plan"), dict):
+        if isinstance(stem_layer_plan, dict):
+            if not isinstance(stem_layer_plan.get("beatmatch_evidence"), dict):
+                failures.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "planner_role": role,
+                        "reason": "bed stem-layer plan lacks beatmatch evidence",
+                    }
+                )
+            if set(play_stems) != {"drums"} and not isinstance(stem_layer_plan.get("keymatch_evidence"), dict):
+                failures.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "planner_role": role,
+                        "reason": "tonal bed stem-layer plan lacks keymatch evidence",
+                    }
+                )
+            source_duration_ms = item.get("source_duration_ms") or stem_layer_plan.get("source_duration_ms")
+            if source_duration_ms is not None:
+                try:
+                    source_duration = int(source_duration_ms)
+                    trim_start = int(item.get("trim_start_ms", stem_layer_plan.get("trim_start_ms", 0)) or 0)
+                    duration = int(item.get("duration_ms", stem_layer_plan.get("duration_ms", 0)) or 0)
+                except (TypeError, ValueError):
+                    source_duration = 0
+                    trim_start = 0
+                    duration = 0
+                terminal_start = max(0, source_duration - 45_000)
+                entry_intent = str(stem_layer_plan.get("entry_intent") or "").casefold()
+                if duration >= 20_000 and trim_start >= terminal_start and "outro" not in entry_intent and "terminal" not in entry_intent:
+                    failures.append(
+                        {
+                            "id": str(item.get("id") or ""),
+                            "planner_role": role,
+                            "trim_start_ms": trim_start,
+                            "source_duration_ms": source_duration,
+                            "reason": "bed uses a terminal source window without an explicit outro/terminal handoff reason",
+                        }
+                    )
+        if strategy and "bed" in role and not isinstance(stem_layer_plan, dict):
             failures.append(
                 {
                     "id": str(item.get("id") or ""),
@@ -1967,9 +2090,412 @@ def validate_component_bed_balance(session_path: Path, args: argparse.Namespace)
                     "reason": "bed has component balance but no explicit stem-layer plan for stems, timing, exit, and automation intent",
                 }
             )
+    gain_ramp_patterns: Counter[tuple[str, tuple[float, ...]]] = Counter()
+    for automation in payload.get("deck_automations", []):
+        if not isinstance(automation, dict) or automation.get("param") != "gain_db":
+            continue
+        target = str(automation.get("target") or "")
+        if target not in {"deck-3", "deck-4"}:
+            continue
+        values: list[float] = []
+        for point in automation.get("points") or []:
+            if not isinstance(point, dict):
+                continue
+            try:
+                values.append(round(float(point.get("value")), 1))
+            except (TypeError, ValueError):
+                continue
+        if len(values) < 2:
+            continue
+        pattern = (target, tuple(values))
+        gain_ramp_patterns[pattern] += 1
+        starts_magic = (target == "deck-4" and abs(values[0] - -5.4) <= 0.15) or (target == "deck-3" and abs(values[0] - -4.8) <= 0.15)
+        ends_at_unity = abs(values[-1] - 0.0) <= 0.15
+        ref = str(automation.get("source_clip_id") or automation.get("stem_layer_plan_ref") or "")
+        referenced = candidates_by_id.get(ref) or {}
+        plan = referenced.get("stem_layer_plan") if isinstance(referenced, dict) else None
+        has_measurement = isinstance(plan, dict) and (
+            isinstance(plan.get("balance_measurement"), dict)
+            or isinstance(plan.get("measured_balance"), dict)
+            or isinstance(plan.get("measurement"), dict)
+        )
+        if starts_magic and ends_at_unity and not has_measurement:
+            failures.append(
+                {
+                    "target": target,
+                    "source_clip_id": ref,
+                    "values": values,
+                    "reason": "deck gain automation matches a known canned ramp without measured balance metadata",
+                }
+            )
+    for (target, values), count in gain_ramp_patterns.items():
+        if count >= 3:
+            failures.append(
+                {
+                    "target": target,
+                    "values": list(values),
+                    "count": count,
+                    "reason": "same deck gain ramp repeats across multiple beds; automation must be per-layer musical balance",
+                }
+            )
     if failures:
         raise SystemExit(f"component bed balance guard failed: {json.dumps(failures[:5], sort_keys=True)}")
     return {"checked": checked}
+
+
+REQUIRED_DECISION_AUDIT_FIELDS = (
+    "request_summary",
+    "acquisition_summary",
+    "candidate_pool",
+    "analysis_source",
+    "tempo_key_decisions",
+    "stem_role_plan",
+    "source_windows",
+    "entry_exit_plan",
+    "balance_proof",
+    "render_proof_checks",
+    "launch_facts",
+)
+
+
+def resolve_audit_path(session_path: Path, audit_path: str) -> Path:
+    path = Path(audit_path).expanduser()
+    if path.is_absolute():
+        return path
+    session_relative = session_path.parent / path
+    if session_relative.exists():
+        return session_relative
+    return REPO_ROOT / path
+
+
+def is_generated_dj_session(payload: dict[str, Any]) -> bool:
+    notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
+    return bool(
+        str(payload.get("timeline_mode") or "").startswith("autodj")
+        or notes.get("selected_material")
+        or notes.get("selection_process")
+        or notes.get("audit_trail_path")
+    )
+
+
+def load_decision_audit(session_path: Path, payload: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
+    audit_ref = str(notes.get("audit_trail_path") or "").strip()
+    if not audit_ref:
+        raise SystemExit("decision audit guard failed: generated DJ session has no notes.audit_trail_path")
+    audit_path = resolve_audit_path(session_path, audit_ref)
+    try:
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"decision audit guard failed: audit trail not found: {audit_path}") from None
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"decision audit guard failed: audit trail is not valid JSON: {audit_path}: {error}") from None
+    if not isinstance(audit, dict):
+        raise SystemExit("decision audit guard failed: audit trail must be a JSON object")
+    return audit_path, audit
+
+
+def validate_decision_audit_trail(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    payload = load_session_payload(session_path)
+    if not is_generated_dj_session(payload):
+        return {"required": False, "checked": 0}
+    audit_path, audit = load_decision_audit(session_path, payload)
+    missing = [field for field in REQUIRED_DECISION_AUDIT_FIELDS if field not in audit]
+    empty = [field for field in REQUIRED_DECISION_AUDIT_FIELDS if field in audit and audit[field] in (None, "", [], {})]
+    if missing or empty:
+        raise SystemExit(
+            "decision audit guard failed: "
+            + json.dumps({"audit_path": str(audit_path), "empty": empty, "missing": missing}, sort_keys=True)
+        )
+    return {"required": True, "checked": len(REQUIRED_DECISION_AUDIT_FIELDS), "audit_path": str(audit_path)}
+
+
+def analysis_audit_payload(track: SelectedTrack, analysis: TrackAnalysis | None) -> dict[str, Any]:
+    payload = {
+        "path": track.path,
+        "artist": track.artist,
+        "title": track.title,
+        "analysis_available": analysis is not None,
+    }
+    if analysis is None:
+        return payload
+    payload.update(
+        {
+            "bpm": analysis.bpm,
+            "beat_offset_ms": analysis.beat_offset_ms,
+            "phrase_ms": analysis.beatgrid.phrase_ms if analysis.beatgrid else None,
+            "key": analysis.key,
+            "camelot": analysis.camelot,
+            "energy": analysis.energy,
+            "loudness_db": analysis.loudness_db,
+            "confidence": analysis.confidence,
+            "structure_windows": [
+                {
+                    "kind": window.kind,
+                    "start_ms": window.start_ms,
+                    "end_ms": window.end_ms,
+                    "confidence": window.confidence,
+                    "reason": window.reason,
+                }
+                for window in analysis.structure[:8]
+            ],
+        }
+    )
+    return payload
+
+
+def write_decision_audit_trail(
+    session_path: Path,
+    payload: dict[str, Any],
+    selected: list[SelectedTrack],
+    analyses: dict[str, TrackAnalysis],
+    args: argparse.Namespace,
+    *,
+    planner: dict[str, Any],
+    structural: dict[str, Any],
+    creative: dict[str, Any],
+    guards: dict[str, Any],
+    structure_rejections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    audit_path = args.runtime / f"{args.slug}-decision-audit.json"
+    events = [*payload.get("actions", []), *payload.get("clips", [])]
+    transitions_by_target = {
+        str(plan.get("to_clip_id") or plan.get("to_action_id") or ""): plan
+        for plan in payload.get("transition_plans", [])
+        if isinstance(plan, dict)
+    }
+    audit = {
+        "request_summary": {
+            "title": args.title,
+            "slug": args.slug,
+            "intent": args.intent,
+            "live": not bool(args.dry_run),
+            "created_at": iso_now(),
+        },
+        "acquisition_summary": {
+            "mode": "database-backed continuation",
+            "fresh_downloads": [],
+            "reused_database_records": len(selected),
+        },
+        "candidate_pool": {
+            "selected": [asdict(track) for track in selected],
+            "structure_rejections": structure_rejections,
+            "selection_process": (payload.get("notes") or {}).get("selection_process"),
+        },
+        "analysis_source": [analysis_audit_payload(track, analyses.get(track.path)) for track in selected],
+        "tempo_key_decisions": payload.get("transition_plans", []),
+        "stem_role_plan": [
+            {
+                "id": event.get("id"),
+                "role": event.get("planner_role"),
+                "deck": event.get("deck"),
+                "source": event.get("source_path") or event.get("path"),
+                "play_stems": event.get("play_stems"),
+                "stem_layer_plan": event.get("stem_layer_plan"),
+            }
+            for event in events
+        ],
+        "source_windows": [
+            {
+                "id": event.get("id"),
+                "source": event.get("source_path") or event.get("path"),
+                "trim_start_ms": event.get("trim_start_ms"),
+                "duration_ms": event.get("duration_ms"),
+                "structure_kind": event.get("source_structure_kind"),
+                "reason": event.get("source_window_reason"),
+            }
+            for event in events
+        ],
+        "entry_exit_plan": [
+            {
+                "id": event.get("id"),
+                "deck": event.get("deck"),
+                "start_ms": event.get("at_ms", event.get("start_ms")),
+                "fade_in_ms": event.get("fade_in_ms"),
+                "fade_out_ms": event.get("fade_out_ms"),
+                "transition_plan": transitions_by_target.get(str(event.get("id") or "")),
+            }
+            for event in events
+        ],
+        "balance_proof": {
+            "component_bed_balance_guard": guards.get("component_bed_balance_guard"),
+            "known_limit": "live continuation audit records validator evidence; render balance proof is still required before calling a set finished",
+        },
+        "render_proof_checks": {
+            "planner": planner,
+            "structural": structural,
+            "creative": creative,
+            "guards": guards,
+        },
+        "launch_facts": {
+            "session": str(session_path),
+            "state": str(args.runtime / f"{args.slug}-state.json"),
+            "runner_single_window": bool(args.runner_single_window),
+            "target": list(args.target),
+            "dry_run": bool(args.dry_run),
+        },
+    }
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    notes = payload.setdefault("notes", {})
+    if isinstance(notes, dict):
+        notes["audit_trail_path"] = str(audit_path)
+    write_payload(session_path, payload)
+    return {"path": str(audit_path), "fields": list(REQUIRED_DECISION_AUDIT_FIELDS)}
+
+
+def write_generation_failure_audit(
+    args: argparse.Namespace,
+    session_path: Path,
+    *,
+    stage: str,
+    error: BaseException,
+    selected: list[SelectedTrack] | None = None,
+    structure_rejections: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    audit_path = args.runtime / f"{args.slug}-failure-audit.json"
+    selected = selected or getattr(error, "selected", None) or []
+    if isinstance(error, SystemExit):
+        error_text = str(error)
+        error_type = "SystemExit"
+    else:
+        error_text = str(error)
+        error_type = type(error).__name__
+    audit = {
+        "request_summary": {
+            "title": args.title,
+            "slug": args.slug,
+            "intent": args.intent,
+            "live": not bool(args.dry_run),
+            "created_at": iso_now(),
+        },
+        "failure": {
+            "stage": stage,
+            "type": error_type,
+            "message": error_text,
+            "traceback": traceback.format_exception_only(type(error), error),
+        },
+        "session": {
+            "path": str(session_path),
+            "exists": session_path.exists(),
+        },
+        "candidate_pool": {
+            "selected": [asdict(track) for track in selected],
+            "structure_rejections": structure_rejections or [],
+        },
+        "launch_facts": {
+            "runner_single_window": bool(args.runner_single_window),
+            "target": list(args.target),
+            "dry_run": bool(args.dry_run),
+        },
+    }
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {"path": str(audit_path), "stage": stage, "error": error_text}
+
+
+def write_failed_session_decision_audit(
+    args: argparse.Namespace,
+    session_path: Path,
+    *,
+    stage: str,
+    error: BaseException,
+    selected: list[SelectedTrack] | None = None,
+    analyses: dict[str, TrackAnalysis] | None = None,
+    structure_rejections: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    if not session_path.exists():
+        return None
+    selected = selected or getattr(error, "selected", None) or []
+    analyses = analyses or {}
+    payload = load_session_payload(session_path)
+    audit_path = args.runtime / f"{args.slug}-decision-audit.json"
+    events = [*payload.get("actions", []), *payload.get("clips", [])]
+    transitions_by_target = {
+        str(plan.get("to_clip_id") or plan.get("to_action_id") or ""): plan
+        for plan in payload.get("transition_plans", [])
+        if isinstance(plan, dict)
+    }
+    audit = {
+        "request_summary": {
+            "title": args.title,
+            "slug": args.slug,
+            "intent": args.intent,
+            "live": not bool(args.dry_run),
+            "created_at": iso_now(),
+            "status": "failed-before-launch",
+            "failure_stage": stage,
+        },
+        "acquisition_summary": {
+            "mode": "database-backed continuation",
+            "fresh_downloads": [],
+            "reused_database_records": len(selected),
+        },
+        "candidate_pool": {
+            "selected": [asdict(track) for track in selected],
+            "structure_rejections": structure_rejections or [],
+            "selection_process": (payload.get("notes") or {}).get("selection_process"),
+        },
+        "analysis_source": [analysis_audit_payload(track, analyses.get(track.path)) for track in selected],
+        "tempo_key_decisions": payload.get("transition_plans", []),
+        "stem_role_plan": [
+            {
+                "id": event.get("id"),
+                "role": event.get("planner_role"),
+                "deck": event.get("deck"),
+                "source": event.get("source_path") or event.get("path"),
+                "play_stems": event.get("play_stems"),
+                "stem_layer_plan": event.get("stem_layer_plan"),
+            }
+            for event in events
+        ],
+        "source_windows": [
+            {
+                "id": event.get("id"),
+                "source": event.get("source_path") or event.get("path"),
+                "trim_start_ms": event.get("trim_start_ms"),
+                "duration_ms": event.get("duration_ms"),
+                "structure_kind": event.get("source_structure_kind"),
+                "reason": event.get("source_window_reason"),
+            }
+            for event in events
+        ],
+        "entry_exit_plan": [
+            {
+                "id": event.get("id"),
+                "deck": event.get("deck"),
+                "start_ms": event.get("at_ms", event.get("start_ms")),
+                "fade_in_ms": event.get("fade_in_ms"),
+                "fade_out_ms": event.get("fade_out_ms"),
+                "transition_plan": transitions_by_target.get(str(event.get("id") or "")),
+            }
+            for event in events
+        ],
+        "balance_proof": {
+            "status": "not-completed",
+            "reason": f"generation failed at {stage} before launch",
+        },
+        "render_proof_checks": {
+            "status": "failed-before-launch",
+            "failure": {
+                "stage": stage,
+                "type": type(error).__name__,
+                "message": str(error),
+            },
+        },
+        "launch_facts": {
+            "session": str(session_path),
+            "state": str(args.runtime / f"{args.slug}-state.json"),
+            "runner_single_window": bool(args.runner_single_window),
+            "target": list(args.target),
+            "dry_run": bool(args.dry_run),
+            "launched": False,
+        },
+    }
+    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    notes = payload.setdefault("notes", {})
+    if isinstance(notes, dict):
+        notes["audit_trail_path"] = str(audit_path)
+    write_payload(session_path, payload)
+    return {"path": str(audit_path), "fields": list(REQUIRED_DECISION_AUDIT_FIELDS), "failure_stage": stage}
 
 
 def stem_group_to_guard_event(group: dict[str, Any], actions_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -2167,6 +2693,12 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
                         "bed_under": target.get("id"),
                         "component_balance_strategy": str(plan["balance_profile"]),
                         "stem_layer_plan": plan,
+                        "transition_decision": {
+                            "tempo_shift_pct": 0.0,
+                            "pitch_shift_semitones": 0,
+                            "decision": "drums-only bed" if set(plan.get("source_stems") or []) == {"drums"} else "planned rhythm bed",
+                            "reason": "explicit planned creative-pass layer; beat/key evidence is stored on stem_layer_plan",
+                        },
                     },
                     db_path=args.db,
                     lock_before_ms=None,
@@ -2225,6 +2757,86 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
                     "error": str(error),
                 }
             )
+
+    payload = load_session_payload(session_path)
+    compiled = compile_actions_payload(payload)
+    effects = list(compiled.get("effects", []))
+    actions_by_id = {
+        str(action.get("id")): action
+        for action in payload.get("actions", [])
+        if isinstance(action, dict) and action.get("id")
+    }
+    refreshed_events = [
+        event
+        for event in [
+            *compiled.get("clips", []),
+            *[stem_group_to_guard_event(group, actions_by_id) for group in compiled.get("stem_groups", [])],
+        ]
+        if event.get("id") and clip_duration_ms(event) > 0
+    ]
+    for lead in [event for event in refreshed_events if is_guard_lead(event) and clip_duration_ms(event) >= args.min_vanilla_check_ms]:
+        lead_id = str(lead.get("id") or "")
+        lead_start = clip_start_ms(lead)
+        lead_end = clip_end_ms(lead)
+        has_material = False
+        for event in refreshed_events:
+            if event is lead:
+                continue
+            role = str(event.get("planner_role") or "")
+            if role == "lead":
+                continue
+            overlap_start = max(lead_start, clip_start_ms(event))
+            overlap_end = min(lead_end, clip_end_ms(event))
+            if overlap_end > overlap_start:
+                has_material = True
+                break
+        if not has_material:
+            for effect in effects:
+                if effect.get("target") == lead_id and event_end_ms(effect) > lead_start and (event_start_ms(effect) or 0) < lead_end:
+                    has_material = True
+                    break
+        if has_material:
+            continue
+        accent_start = min(max(lead_start + 18_000, lead_end - 18_000), lead_start + max(8_000, clip_duration_ms(lead) // 2))
+        result = run_session_edit(
+            [
+                "add-effect",
+                str(session_path),
+                "--id",
+                f"autodj-accent-{slugify(lead_id)[:36]}",
+                "--type",
+                "echo",
+                "--target",
+                lead_id,
+                "--start",
+                str(accent_start),
+                "--duration",
+                "1800",
+                "--tail-ms",
+                "3200",
+                "--wet",
+                "0.22",
+                "--gain-db",
+                "-7",
+                "--delay-ms",
+                "260",
+                "--feedback",
+                "0.28",
+            ]
+        )
+        if result["returncode"] == 0:
+            moves.append({"kind": "echo-accent", "target": lead_id, "result": result})
+            effects.append(
+                {
+                    "id": f"autodj-accent-{slugify(lead_id)[:36]}",
+                    "target": lead_id,
+                    "start_ms": accent_start,
+                    "duration_ms": 1800,
+                    "tail_ms": 3200,
+                }
+            )
+        else:
+            failures.append({"kind": "echo-accent", "target": lead_id, "result": result})
 
     validate = subprocess.run(
         [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -2304,73 +2916,165 @@ def continue_set(args: argparse.Namespace) -> int:
             print(json.dumps({"status": "ok", "reason": "playback healthy; not stomping"}))
             return 0
 
-        selected = select_tracks(args)
         session_path = args.runtime / f"{args.slug}.json"
         state_path = args.runtime / f"{args.slug}-state.json"
         plan_path = args.runtime / f"{args.slug}-plan.json"
-        analyses = load_or_analyze_selected(selected, args)
-        selected, structure_rejections = filter_defensible_source_tracks(selected, analyses, args)
-        payload = session_payload(selected, args, analyses)
-        write_payload(session_path, payload)
-        append_selection_history(selected, args, session_path=session_path, dry_run=args.dry_run)
-        planner = run_planner(session_path, args)
-        structural = add_structural_beds(session_path, selected, args)
-        creative = apply_creative_pass(session_path, args)
-        vanilla_guard = validate_no_vanilla_leads(session_path, args)
-        args.require_stem_loads = bool(args.stem_aware_remix)
-        stem_load_guard = validate_stem_load_usage(session_path, args)
-        transition_decision_guard = validate_transition_decisions(session_path, args)
-        harmonic_guard = validate_harmonic_overlaps(session_path, args)
-        vocal_guards = validate_vocal_guards(session_path, args)
-        component_bed_balance_guard = validate_component_bed_balance(session_path, args)
-        stem_readiness = stem_readiness_report(selected, args)
-        if args.remix_focus:
-            move_kinds = {str(move.get("kind") or "") for move in creative.get("moves", [])}
-            if int(structural.get("added") or 0) < 1 and not ({"rhythm-bed", "structural-rhythm-bed", "bed-filter-carve"} & move_kinds):
-                raise SystemExit("remix-focus set has no rhythm/stem bed; refusing generic handoff-only mix")
-        validate = subprocess.run(
-            [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
-            cwd=REPO_ROOT,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if validate.returncode != 0:
-            raise SystemExit(validate.stderr or validate.stdout or "session validation failed")
-        pid = None if args.dry_run else launch_runner(session_path, state_path, args)
-        plan = {
-            "created_at": iso_now(),
-            "status": "dry_run" if args.dry_run else "started",
-            "pid": pid,
-            "session": str(session_path),
-            "state": str(state_path),
-            "title": args.title,
-            "slug": args.slug,
-            "intent": args.intent,
-            "planner": planner,
-            "structural": structural,
-            "creative": creative,
-            "vanilla_guard": vanilla_guard,
-            "stem_load_guard": stem_load_guard,
-            "transition_decision_guard": transition_decision_guard,
-            "harmonic_guard": harmonic_guard,
-            "vocal_guards": vocal_guards,
-            "component_bed_balance_guard": component_bed_balance_guard,
-            "stem_readiness": stem_readiness,
-            "tracks": [asdict(track) for track in selected],
-            "structure_rejections": structure_rejections,
-            "analysis_coverage": {"selected": len(selected), "available": len(analyses)},
-            "selection_policy": {
-                "taste_profile": str(args.taste_profile),
-                "taste_profile_available": load_taste_profile(args.taste_profile).available,
-                "downloaded_track_ratio": args.downloaded_track_ratio,
-                "leftfield_download_ratio": args.leftfield_download_ratio,
-                "edm_beds_use_spotify_taste": False,
-            },
-        }
-        plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps(plan, indent=2, sort_keys=True))
-        return 0
+        stage = "select_tracks"
+        selected: list[SelectedTrack] = []
+        analyses: dict[str, TrackAnalysis] = {}
+        structure_rejections: list[dict[str, Any]] = []
+        try:
+            selected = select_tracks(args)
+            stage = "analysis"
+            analyses = load_or_analyze_selected(selected, args)
+            stage = "filter_defensible_sources"
+            selected, structure_rejections = filter_defensible_source_tracks(selected, analyses, args)
+            stage = "session_payload"
+            payload = session_payload(selected, args, analyses)
+            write_payload(session_path, payload)
+            append_selection_history(selected, args, session_path=session_path, dry_run=args.dry_run)
+            stage = "mix_planner"
+            planner = run_planner(session_path, args)
+            stage = "structural_beds"
+            structural = add_structural_beds(session_path, selected, args)
+            stage = "creative_pass"
+            creative = apply_creative_pass(session_path, args)
+            stage = "vanilla_guard"
+            vanilla_guard = validate_no_vanilla_leads(session_path, args)
+            args.require_stem_loads = bool(args.stem_aware_remix)
+            stage = "stem_load_guard"
+            stem_load_guard = validate_stem_load_usage(session_path, args)
+            stage = "transition_decision_guard"
+            transition_decision_guard = validate_transition_decisions(session_path, args)
+            stage = "harmonic_guard"
+            harmonic_guard = validate_harmonic_overlaps(session_path, args)
+            stage = "vocal_guards"
+            vocal_guards = validate_vocal_guards(session_path, args)
+            stage = "component_bed_balance_guard"
+            component_bed_balance_guard = validate_component_bed_balance(session_path, args)
+            guards = {
+                "vanilla_guard": vanilla_guard,
+                "stem_load_guard": stem_load_guard,
+                "transition_decision_guard": transition_decision_guard,
+                "harmonic_guard": harmonic_guard,
+                "vocal_guards": vocal_guards,
+                "component_bed_balance_guard": component_bed_balance_guard,
+            }
+            stage = "decision_audit"
+            payload = load_session_payload(session_path)
+            decision_audit = write_decision_audit_trail(
+                session_path,
+                payload,
+                selected,
+                analyses,
+                args,
+                planner=planner,
+                structural=structural,
+                creative=creative,
+                guards=guards,
+                structure_rejections=structure_rejections,
+            )
+            decision_audit_guard = validate_decision_audit_trail(session_path, args)
+            stage = "stem_readiness"
+            stem_readiness = stem_readiness_report(selected, args)
+            if args.remix_focus:
+                move_kinds = {str(move.get("kind") or "") for move in creative.get("moves", [])}
+                if int(structural.get("added") or 0) < 1 and not ({"rhythm-bed", "structural-rhythm-bed", "bed-filter-carve"} & move_kinds):
+                    stage = "remix_focus_guard"
+                    raise SystemExit("remix-focus set has no rhythm/stem bed; refusing generic handoff-only mix")
+            stage = "session_validate"
+            validate = subprocess.run(
+                [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if validate.returncode != 0:
+                raise SystemExit(validate.stderr or validate.stdout or "session validation failed")
+            stage = "launch"
+            pid = None if args.dry_run else launch_runner(session_path, state_path, args)
+            plan = {
+                "created_at": iso_now(),
+                "status": "dry_run" if args.dry_run else "started",
+                "pid": pid,
+                "session": str(session_path),
+                "state": str(state_path),
+                "title": args.title,
+                "slug": args.slug,
+                "intent": args.intent,
+                "planner": planner,
+                "structural": structural,
+                "creative": creative,
+                "vanilla_guard": vanilla_guard,
+                "stem_load_guard": stem_load_guard,
+                "transition_decision_guard": transition_decision_guard,
+                "harmonic_guard": harmonic_guard,
+                "vocal_guards": vocal_guards,
+                "component_bed_balance_guard": component_bed_balance_guard,
+                "decision_audit": decision_audit,
+                "decision_audit_guard": decision_audit_guard,
+                "stem_readiness": stem_readiness,
+                "tracks": [asdict(track) for track in selected],
+                "structure_rejections": structure_rejections,
+                "analysis_coverage": {"selected": len(selected), "available": len(analyses)},
+                "selection_policy": {
+                    "taste_profile": str(args.taste_profile),
+                    "taste_profile_available": load_taste_profile(args.taste_profile).available,
+                    "downloaded_track_ratio": args.downloaded_track_ratio,
+                    "leftfield_download_ratio": args.leftfield_download_ratio,
+                    "edm_beds_use_spotify_taste": False,
+                },
+            }
+            plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps(plan, indent=2, sort_keys=True))
+            return 0
+        except SystemExit as error:
+            decision_audit = write_failed_session_decision_audit(
+                args,
+                session_path,
+                stage=stage,
+                error=error,
+                selected=selected,
+                analyses=analyses,
+                structure_rejections=structure_rejections,
+            )
+            failure_audit = write_generation_failure_audit(
+                args,
+                session_path,
+                stage=stage,
+                error=error,
+                selected=selected,
+                structure_rejections=structure_rejections,
+            )
+            print(
+                json.dumps({"status": "failed", "decision_audit": decision_audit, "failure_audit": failure_audit}, sort_keys=True),
+                file=sys.stderr,
+            )
+            raise
+        except Exception as error:
+            decision_audit = write_failed_session_decision_audit(
+                args,
+                session_path,
+                stage=stage,
+                error=error,
+                selected=selected,
+                analyses=analyses,
+                structure_rejections=structure_rejections,
+            )
+            failure_audit = write_generation_failure_audit(
+                args,
+                session_path,
+                stage=stage,
+                error=error,
+                selected=selected,
+                structure_rejections=structure_rejections,
+            )
+            print(
+                json.dumps({"status": "failed", "decision_audit": decision_audit, "failure_audit": failure_audit}, sort_keys=True),
+                file=sys.stderr,
+            )
+            raise
     finally:
         os.close(lock_fd)
 
@@ -2393,6 +3097,7 @@ def validate_dj_session(args: argparse.Namespace) -> int:
         "harmonic_guard": validate_harmonic_overlaps(args.session, args),
         "vocal_guards": validate_vocal_guards(args.session, args),
         "component_bed_balance_guard": validate_component_bed_balance(args.session, args),
+        "decision_audit_guard": validate_decision_audit_trail(args.session, args),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
@@ -2408,6 +3113,7 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
     validate.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     validate.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
+    validate.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
     validate.add_argument("--require-stem-loads", action=argparse.BooleanOptionalAction, default=False)
     cont = sub.add_parser("continue")
     cont.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -2477,6 +3183,7 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
     cont.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     cont.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
+    cont.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
     cont.add_argument("--no-creative-pass", action="store_true")
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)

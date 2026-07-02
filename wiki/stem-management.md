@@ -35,7 +35,7 @@ Status for a path or duplicate key:
 python3 scripts/slime_audio_stems.py status TRACK_OR_DUPLICATE_KEY
 ```
 
-Split through Demucs. Real separation runs over SSH by default on `squidward@patrick` so this machine does not eat the CPU/GPU bill:
+Split through Demucs. Real separation runs over SSH by default on `squidward@robokrabs.tail4cb51.ts.net` so this machine does not eat the CPU/GPU bill:
 
 ```bash
 python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY --model htdemucs --profile 4stem --jobs 1
@@ -44,8 +44,8 @@ python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY --model htdemu
 Override the remote host or force local execution:
 
 ```bash
-SLIME_AUDIO_DEMUCS_HOST=squidward@robokrabs python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY
-python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY --demucs-host squidward@robokrabs
+SLIME_AUDIO_DEMUCS_HOST=squidward@robokrabs.tail4cb51.ts.net python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY
+python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY --demucs-host squidward@robokrabs.tail4cb51.ts.net
 python3 scripts/slime_audio_stems.py split TRACK_OR_DUPLICATE_KEY --local-demucs
 ```
 

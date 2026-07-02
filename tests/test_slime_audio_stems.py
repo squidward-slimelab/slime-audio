@@ -137,11 +137,11 @@ class SlimeAudioStemsTests(unittest.TestCase):
                                 demucs_bin="demucs",
                                 model="htdemucs",
                                 jobs=1,
-                                demucs_host="squidward@patrick",
+                                demucs_host="configured-demucs-host",
                             )
 
         self.assertEqual(result, output)
-        self.assertTrue(any(call[0] == "squidward@patrick" and "demucs" in call[1] for call in calls))
+        self.assertTrue(any(call[0] == "configured-demucs-host" and "demucs" in call[1] for call in calls))
 
     def test_remote_path_readable_quotes_shell_sensitive_paths(self):
         calls = []
@@ -151,13 +151,13 @@ class SlimeAudioStemsTests(unittest.TestCase):
             return type("Result", (), {"returncode": 0})()
 
         with patch.object(stems.subprocess, "run", side_effect=fake_run):
-            readable = stems.remote_path_readable("squidward@robokrabs", Path("/mnt/Music/Album (Disc 1)/Track Name.flac"))
+            readable = stems.remote_path_readable("squidward@robokrabs.tail4cb51.ts.net", Path("/mnt/Music/Album (Disc 1)/Track Name.flac"))
 
         self.assertTrue(readable)
-        self.assertEqual(calls[0][0:2], ["ssh", "squidward@robokrabs"])
+        self.assertEqual(calls[0][0:2], ["ssh", "squidward@robokrabs.tail4cb51.ts.net"])
         self.assertIn("'/mnt/Music/Album (Disc 1)/Track Name.flac'", calls[0][2])
 
-    def test_run_demucs_falls_back_to_second_remote_host(self):
+    def test_run_demucs_falls_back_to_second_configured_host(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
             output = temp / "remote-output" / "htdemucs" / "source"
@@ -169,7 +169,7 @@ class SlimeAudioStemsTests(unittest.TestCase):
 
             def fake_run_remote_demucs(source_path, temp_dir, *, host, demucs_bin, model, jobs, remote_workdir=None):
                 calls.append(host)
-                if host == "squidward@patrick":
+                if host == "first-host":
                     raise RuntimeError("ssh failed")
                 return output
 
@@ -180,11 +180,11 @@ class SlimeAudioStemsTests(unittest.TestCase):
                     demucs_bin="demucs",
                     model="htdemucs",
                     jobs=1,
-                    demucs_host="squidward@patrick,squidward@robokrabs",
+                    demucs_host="first-host,second-host",
                 )
 
         self.assertEqual(result, output)
-        self.assertEqual(calls, ["squidward@patrick", "squidward@robokrabs"])
+        self.assertEqual(calls, ["first-host", "second-host"])
 
     def test_run_demucs_reports_all_remote_failures(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -201,7 +201,7 @@ class SlimeAudioStemsTests(unittest.TestCase):
                         demucs_bin="demucs",
                         model="htdemucs",
                         jobs=1,
-                        demucs_host="squidward@patrick,squidward@robokrabs",
+                        demucs_host="first-host,second-host",
                     )
 
     def test_local_demucs_flag_disables_default_remote_host(self):
@@ -209,10 +209,10 @@ class SlimeAudioStemsTests(unittest.TestCase):
 
         self.assertIsNone(args.demucs_host)
 
-    def test_default_demucs_hosts_include_gpu_fallback(self):
+    def test_default_demucs_host_is_robokrabs(self):
         args = stems.parse_args(["split", "/tmp/source.wav"])
 
-        self.assertEqual(stems.parse_demucs_hosts(args.demucs_host), ["squidward@patrick", "squidward@robokrabs"])
+        self.assertEqual(stems.parse_demucs_hosts(args.demucs_host), ["squidward@robokrabs.tail4cb51.ts.net"])
 
     def test_measure_stem_slice_combines_selected_stems_for_exact_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:

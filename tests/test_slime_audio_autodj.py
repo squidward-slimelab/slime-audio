@@ -28,6 +28,7 @@ from slime_audio_autodj import (
     structural_bed_balance_profile,
     stem_readiness_report,
     validate_component_bed_balance,
+    validate_decision_audit_trail,
     taste_affinity,
     validate_harmonic_overlaps,
     validate_no_vanilla_leads,
@@ -376,7 +377,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             updated = json.loads(session_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result["added"], 2)
-        bed_clips = [clip for clip in updated["clips"] if str(clip.get("planner_role")) == "rhythm-bed"]
+        bed_clips = [clip for clip in updated["clips"] if "bed" in str(clip.get("planner_role"))]
         self.assertEqual(len(bed_clips), 2)
         self.assertLess(len(bed_clips), len(lead_paths))
         used_sources = [clip["path"] for clip in bed_clips]
@@ -388,7 +389,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             self.assertNotIn(clip["path"], adjacent)
             plan = clip.get("stem_layer_plan")
             self.assertIsInstance(plan, dict)
-            self.assertEqual(plan["source_stems"], ["drums", "bass", "other"])
+            self.assertEqual(plan["source_stems"], ["drums"])
             self.assertIn("not a terminal", plan["entry_intent"])
             target = next(item for item in payload["clips"] if item["id"] == target_id)
             target_end = target["start_ms"] + target["duration_ms"]
@@ -528,6 +529,8 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                                     "target_stems": ["vocals", "drums", "bass", "other"],
                                     "entry_intent": "planned",
                                     "exit_intent": "planned",
+                                    "beatmatch_evidence": {"status": "analyzed", "target_tempo_shift_pct": 0.0},
+                                    "keymatch_evidence": {"status": "drums-only", "drums_only_exemption": True},
                                     "automation_intent": {"gain_db": "planned"},
                                 },
                             },
@@ -572,6 +575,259 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                 validate_component_bed_balance(session_path, SimpleNamespace())
 
         self.assertIn("no explicit stem-layer plan", str(raised.exception))
+
+    def test_component_bed_balance_guard_rejects_drum_bed_without_beatmatch_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-4"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "unmatched-drums",
+                                "deck": "deck-4",
+                                "source_path": "/music/bed.flac",
+                                "at_ms": 16_000,
+                                "duration_ms": 32_000,
+                                "gain_db": -4.0,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                                "component_balance_strategy": "component-aware drum bed: fader first",
+                                "stem_layer_plan": {
+                                    "source_stems": ["drums"],
+                                    "target_stems": ["vocals", "drums", "bass", "other"],
+                                    "entry_intent": "planned",
+                                    "exit_intent": "planned",
+                                    "automation_intent": {"gain_db": "planned"},
+                                },
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_component_bed_balance(session_path, SimpleNamespace())
+
+        self.assertIn("lacks beatmatch evidence", str(raised.exception))
+
+    def test_component_bed_balance_guard_rejects_unjustified_terminal_drum_preview(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-4"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "terminal-drums",
+                                "deck": "deck-4",
+                                "source_path": "/music/bed.flac",
+                                "source_duration_ms": 240_000,
+                                "at_ms": 16_000,
+                                "trim_start_ms": 210_000,
+                                "duration_ms": 30_000,
+                                "gain_db": -4.0,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                                "component_balance_strategy": "component-aware drum bed: fader first",
+                                "stem_layer_plan": {
+                                    "source_stems": ["drums"],
+                                    "target_stems": ["vocals", "drums", "bass", "other"],
+                                    "entry_intent": "generic groove injection",
+                                    "exit_intent": "planned",
+                                    "beatmatch_evidence": {"status": "analyzed", "target_tempo_shift_pct": 0.0},
+                                    "keymatch_evidence": {"status": "drums-only", "drums_only_exemption": True},
+                                    "automation_intent": {"gain_db": "planned"},
+                                },
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_component_bed_balance(session_path, SimpleNamespace())
+
+        self.assertIn("terminal source window", str(raised.exception))
+
+    def test_component_bed_balance_guard_rejects_canned_deck_gain_ramps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-3", "deck-4"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "deck-four-drums",
+                                "deck": "deck-4",
+                                "source_path": "/music/bed-a.flac",
+                                "at_ms": 16_000,
+                                "duration_ms": 32_000,
+                                "gain_db": -4.0,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                                "component_balance_strategy": "component-aware drum bed: fader first",
+                                "stem_layer_plan": {
+                                    "source_stems": ["drums"],
+                                    "target_stems": ["vocals", "drums", "bass", "other"],
+                                    "entry_intent": "planned",
+                                    "exit_intent": "planned",
+                                    "beatmatch_evidence": {"status": "analyzed", "target_tempo_shift_pct": 0.0},
+                                    "keymatch_evidence": {"status": "drums-only", "drums_only_exemption": True},
+                                    "automation_intent": {"gain_db": "planned"},
+                                },
+                            },
+                            {
+                                "type": "load_track",
+                                "id": "deck-three-drums",
+                                "deck": "deck-3",
+                                "source_path": "/music/bed-b.flac",
+                                "at_ms": 64_000,
+                                "duration_ms": 32_000,
+                                "gain_db": -4.0,
+                                "planner_role": "drum-bed",
+                                "play_stems": ["drums"],
+                                "component_balance_strategy": "component-aware drum bed: fader first",
+                                "stem_layer_plan": {
+                                    "source_stems": ["drums"],
+                                    "target_stems": ["vocals", "drums", "bass", "other"],
+                                    "entry_intent": "planned",
+                                    "exit_intent": "planned",
+                                    "beatmatch_evidence": {"status": "analyzed", "target_tempo_shift_pct": 0.0},
+                                    "keymatch_evidence": {"status": "drums-only", "drums_only_exemption": True},
+                                    "automation_intent": {"gain_db": "planned"},
+                                },
+                            },
+                        ],
+                        "deck_automations": [
+                            {
+                                "target": "deck-4",
+                                "source_clip_id": "deck-four-drums",
+                                "param": "gain_db",
+                                "points": [{"at_ms": 16_000, "value": -5.4}, {"at_ms": 24_000, "value": 0.0}],
+                            },
+                            {
+                                "target": "deck-3",
+                                "source_clip_id": "deck-three-drums",
+                                "param": "gain_db",
+                                "points": [{"at_ms": 64_000, "value": -4.8}, {"at_ms": 72_000, "value": 0.0}],
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_component_bed_balance(session_path, SimpleNamespace())
+
+        self.assertIn("known canned ramp", str(raised.exception))
+
+    def test_decision_audit_guard_rejects_generated_session_without_audit_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "timeline_mode": "autodj-arrangement",
+                        "notes": {"selection_process": "database candidates"},
+                        "clips": [],
+                        "actions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_decision_audit_trail(session_path, SimpleNamespace())
+
+        self.assertIn("no notes.audit_trail_path", str(raised.exception))
+
+    def test_decision_audit_guard_rejects_receipt_style_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            audit_path = temp / "decision-audit.json"
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "request_summary": "new set",
+                        "selected_records": [{"artist": "Artist", "title": "Track"}],
+                        "stem_status": "split",
+                        "launch_plan": "runner",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "notes": {"audit_trail_path": "decision-audit.json"},
+                        "clips": [],
+                        "actions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_decision_audit_trail(session_path, SimpleNamespace())
+
+        self.assertIn("missing", str(raised.exception))
+        self.assertIn("tempo_key_decisions", str(raised.exception))
+
+    def test_decision_audit_guard_accepts_full_audit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            audit_path = temp / "decision-audit.json"
+            audit_path.write_text(
+                json.dumps(
+                    {
+                        "request_summary": {"intent": "test"},
+                        "acquisition_summary": {"mode": "database"},
+                        "candidate_pool": {"selected": ["track"]},
+                        "analysis_source": [{"bpm": 120.0}],
+                        "tempo_key_decisions": [{"decision": "cut"}],
+                        "stem_role_plan": [{"id": "lead-1", "role": "lead"}],
+                        "source_windows": [{"id": "lead-1", "trim_start_ms": 0}],
+                        "entry_exit_plan": [{"id": "lead-1", "transition_plan": {"decision": "cut"}}],
+                        "balance_proof": {"component_bed_balance_guard": {"checked": 0}},
+                        "render_proof_checks": {"guards": {"vanilla_guard": {"checked": 1}}},
+                        "launch_facts": {"session": "session.json"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "notes": {"audit_trail_path": "decision-audit.json"},
+                        "clips": [],
+                        "actions": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = validate_decision_audit_trail(session_path, SimpleNamespace())
+
+        self.assertTrue(result["required"])
+        self.assertEqual(result["checked"], 11)
 
     def test_scratch_material_policy_falls_back_when_only_scratch_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -786,6 +1042,47 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                     session_path,
                     SimpleNamespace(min_vanilla_check_ms=90_000, max_vanilla_lead_ms=90_000),
                 )
+
+    def test_echo_effect_alone_does_not_satisfy_vanilla_guard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-2"],
+                        "clips": [
+                            {
+                                "id": "lead",
+                                "deck": "deck-2",
+                                "path": "/music/lead.flac",
+                                "start_ms": 0,
+                                "duration_ms": 120_000,
+                                "planner_role": "lead",
+                            }
+                        ],
+                        "effects": [
+                            {
+                                "id": "lead-echo",
+                                "type": "echo",
+                                "target": "lead",
+                                "start_ms": 45_000,
+                                "duration_ms": 2_000,
+                                "tail_ms": 3_000,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_no_vanilla_leads(
+                    session_path,
+                    SimpleNamespace(min_vanilla_check_ms=90_000, max_vanilla_lead_ms=90_000),
+                )
+
+        self.assertIn("no material DJ move", str(raised.exception))
 
     def test_session_payload_caps_leads_to_short_sections(self):
         track = selected_track()
@@ -1230,6 +1527,53 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             )
 
         self.assertEqual(result["checked"], 1)
+
+    def test_harmonic_guard_rejects_zero_checked_overlap_when_required(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "clips": [
+                            {
+                                "id": "lead-a",
+                                "path": "/music/a.flac",
+                                "start_ms": 0,
+                                "duration_ms": 90_000,
+                                "planner_role": "lead",
+                                "key": "C minor",
+                            },
+                            {
+                                "id": "lead-b",
+                                "path": "/music/b.flac",
+                                "start_ms": 91_000,
+                                "duration_ms": 90_000,
+                                "planner_role": "lead",
+                                "key": "G minor",
+                            },
+                        ],
+                        "transition_plans": [
+                            {
+                                "from_clip_id": "lead-a",
+                                "to_clip_id": "lead-b",
+                                "decision": "hard cut",
+                                "tempo_shift_pct": 0.0,
+                                "pitch_shift_semitones": 0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_harmonic_overlaps(
+                    session_path,
+                    SimpleNamespace(min_harmonic_overlap_ms=500, min_harmonic_checks=1),
+                )
+
+        self.assertIn("no key-checked musical overlap", str(raised.exception))
 
     def test_transition_decision_guard_rejects_zero_shift_handoff_without_plan(self):
         stems = {

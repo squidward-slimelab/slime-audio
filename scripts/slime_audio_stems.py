@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STEM_ROOT = REPO_ROOT / "runtime" / "stems"
 DEFAULT_DEMUCS_HOSTS = os.environ.get(
     "SLIME_AUDIO_DEMUCS_HOSTS",
-    os.environ.get("SLIME_AUDIO_DEMUCS_HOST", "squidward@patrick,squidward@robokrabs"),
+    os.environ.get("SLIME_AUDIO_DEMUCS_HOST", "squidward@robokrabs.tail4cb51.ts.net"),
 )
 CANONICAL_STEMS = ("vocals", "drums", "bass", "other")
 WINDOW_MS = 1000
