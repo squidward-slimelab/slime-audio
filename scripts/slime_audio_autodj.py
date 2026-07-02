@@ -40,7 +40,17 @@ from slime_audio_dj import (
     major_equivalent_tonic,
     transition_plan,
 )
-from slime_audio_session import VOCAL_DECK, add_action, compile_actions_payload, parse_session, prepare_load_track_action_stems, probe_duration_ms, write_payload
+from slime_audio_session import (
+    VOCAL_DECK,
+    add_action,
+    compile_actions_payload,
+    parse_ms,
+    parse_session,
+    playhead_ms_from_state,
+    prepare_load_track_action_stems,
+    probe_duration_ms,
+    write_payload,
+)
 from slime_audio_vocal_cues import audit_vocal_alignment_payload, audit_vocal_overlap_payload
 from slime_music_library import DEFAULT_DB, connect, normalize
 
@@ -49,7 +59,13 @@ DEFAULT_RUNTIME = REPO_ROOT / "runtime"
 DEFAULT_TASTE_PROFILE = DEFAULT_RUNTIME / "spotify-taste-profile.json"
 DEFAULT_AUTODJ_PAUSE_FILE = DEFAULT_RUNTIME / "dj-watchdog.paused"
 DEFAULT_TARGETS = ["192.168.0.123:47777", "192.168.0.163:47777"]
-DEFAULT_MIN_RUNWAY_MS = 35 * 60 * 1000
+# First playable buffer target. Live sets should start fast and be extended
+# behind the playhead (autodj extend / cron), not planned in full up front.
+DEFAULT_MIN_RUNWAY_MS = 5 * 60 * 1000
+DEFAULT_EXTEND_BLOCK_MS = 5 * 60 * 1000
+DEFAULT_EXTEND_AHEAD_MS = 5 * 60 * 1000
+DEFAULT_TARGET_LENGTH_MS = 30 * 60 * 1000
+DEFAULT_ACTIVE_SET = DEFAULT_RUNTIME / "active-set.json"
 DEFAULT_MAX_TRACKS = 24
 DEFAULT_MIN_HARMONIC_OVERLAP_MS = 500
 DEFAULT_MIN_HARMONIC_CHECKS = 1
@@ -453,8 +469,10 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
     return pool
 
 
-def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
+def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = None) -> list[SelectedTrack]:
     pool = candidate_pool(args)
+    if exclude_paths:
+        pool = [row for row in pool if str(row.get("preferred_path") or "") not in exclude_paths]
     if not pool:
         raise SystemExit("no candidates available")
     if bool(getattr(args, "stem_aware_remix", False)):
@@ -556,7 +574,10 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
             artist_counts[artist_key] += 1
         if title_key:
             title_counts[title_key] += 1
-        runway_ms += duration_ms or args.default_track_ms
+        # Runway must approximate scheduled timeline time. Leads are arranged as
+        # source windows capped at max_lead_clip_ms, so counting full track
+        # durations here would overstate the buffer by 2-4x.
+        runway_ms += min(duration_ms or args.default_track_ms, args.max_lead_clip_ms)
         return True
 
     download_target = 0
@@ -576,11 +597,15 @@ def select_tracks(args: argparse.Namespace) -> list[SelectedTrack]:
             break
         if row.get("downloaded_material"):
             try_select(row)
+    # Structured-source mode rejects tracks without cached structure later, so
+    # select a bounded surplus instead of exhausting the pool: analyzing the
+    # whole pool up front is what used to keep the room silent for 20+ minutes.
+    runway_stop_ms = args.min_runway_ms * (2 if args.structured_source_only else 1)
     for row in ranked:
         if try_select(row):
             if len(selected) >= args.max_tracks:
                 break
-            if not args.structured_source_only and len(selected) >= target_tracks_before_runway_stop and runway_ms >= args.min_runway_ms:
+            if len(selected) >= target_tracks_before_runway_stop and runway_ms >= runway_stop_ms:
                 break
 
     if len(selected) < args.min_tracks or runway_ms < args.min_runway_ms:
@@ -1117,7 +1142,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
     return payload
 
 
-def run_planner(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+def run_planner(session_path: Path, args: argparse.Namespace, *, lock_before_ms: int | None = None) -> dict[str, Any]:
     command = [
         sys.executable,
         "scripts/slime_audio_mix_planner.py",
@@ -1129,6 +1154,8 @@ def run_planner(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
         "--no-routines",
         "--apply",
     ]
+    if lock_before_ms is not None:
+        command.extend(["--lock-before-ms", str(lock_before_ms)])
     result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
     return {"command": command, "returncode": result.returncode, "stdout": result.stdout[-4000:], "stderr": result.stderr[-4000:]}
 
@@ -1267,7 +1294,13 @@ def plan_structural_bed_layer(
     }
 
 
-def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args: argparse.Namespace) -> dict[str, Any]:
+def add_structural_beds(
+    session_path: Path,
+    selected: list[SelectedTrack],
+    args: argparse.Namespace,
+    *,
+    min_start_ms: int = 0,
+) -> dict[str, Any]:
     payload = load_session_payload(session_path)
     compiled = compile_actions_payload(payload)
     actions_by_id = {
@@ -1287,7 +1320,12 @@ def add_structural_beds(session_path: Path, selected: list[SelectedTrack], args:
     if not rhythm_sources and bool(getattr(args, "remix_focus", False)):
         rhythm_sources = sorted(selected, key=lead_score, reverse=True)
     leads = sorted(
-        [event for event in compiled_events if event.get("planner_role") == "lead"],
+        [
+            event
+            for event in compiled_events
+            if event.get("planner_role") == "lead"
+            and int(event.get("start_ms", event.get("start", 0)) or 0) >= min_start_ms
+        ],
         key=lambda event: int(event.get("start_ms", event.get("start", 0)) or 0),
     )
     if not rhythm_sources or not leads:
@@ -2330,8 +2368,8 @@ def write_decision_audit_trail(
         "launch_facts": {
             "session": str(session_path),
             "state": str(args.runtime / f"{args.slug}-state.json"),
-            "runner_single_window": bool(args.runner_single_window),
-            "target": list(args.target),
+            "runner_single_window": bool(getattr(args, "runner_single_window", False)),
+            "target": list(getattr(args, "target", []) or []),
             "dry_run": bool(args.dry_run),
         },
     }
@@ -2383,8 +2421,8 @@ def write_generation_failure_audit(
             "structure_rejections": structure_rejections or [],
         },
         "launch_facts": {
-            "runner_single_window": bool(args.runner_single_window),
-            "target": list(args.target),
+            "runner_single_window": bool(getattr(args, "runner_single_window", False)),
+            "target": list(getattr(args, "target", []) or []),
             "dry_run": bool(args.dry_run),
         },
     }
@@ -2484,8 +2522,8 @@ def write_failed_session_decision_audit(
         "launch_facts": {
             "session": str(session_path),
             "state": str(args.runtime / f"{args.slug}-state.json"),
-            "runner_single_window": bool(args.runner_single_window),
-            "target": list(args.target),
+            "runner_single_window": bool(getattr(args, "runner_single_window", False)),
+            "target": list(getattr(args, "target", []) or []),
             "dry_run": bool(args.dry_run),
             "launched": False,
         },
@@ -2582,7 +2620,7 @@ def vocal_target_score(clip: dict[str, Any]) -> int:
     return score
 
 
-def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
+def apply_creative_pass(session_path: Path, args: argparse.Namespace, *, min_start_ms: int = 0) -> dict[str, Any]:
     if args.no_creative_pass:
         return {"required": False, "moves": [], "skipped": "disabled"}
 
@@ -2600,14 +2638,18 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
                 *compiled.get("clips", []),
                 *[stem_group_to_guard_event(group, actions_by_id) for group in compiled.get("stem_groups", [])],
             ]
-            if event.get("id") and event_source(event) and clip_duration_ms(event) > 0
+            if event.get("id")
+            and event_source(event)
+            and clip_duration_ms(event) > 0
+            and clip_start_ms(event) >= min_start_ms
         ],
         key=clip_start_ms,
     )
     moves: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    if len(clips) < 3:
-        raise SystemExit("creative pass needs at least 3 clips")
+    min_clip_count = 3 if min_start_ms == 0 else 2
+    if len(clips) < min_clip_count:
+        raise SystemExit(f"creative pass needs at least {min_clip_count} clips")
     for clip in clips:
         if "bed" in str(clip.get("planner_role") or ""):
             moves.append({"kind": "structural-rhythm-bed", "source": clip.get("id"), "target": clip.get("bed_under")})
@@ -2774,7 +2816,13 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace) -> dict[st
         ]
         if event.get("id") and clip_duration_ms(event) > 0
     ]
-    for lead in [event for event in refreshed_events if is_guard_lead(event) and clip_duration_ms(event) >= args.min_vanilla_check_ms]:
+    for lead in [
+        event
+        for event in refreshed_events
+        if is_guard_lead(event)
+        and clip_duration_ms(event) >= args.min_vanilla_check_ms
+        and clip_start_ms(event) >= min_start_ms
+    ]:
         lead_id = str(lead.get("id") or "")
         lead_start = clip_start_ms(lead)
         lead_end = clip_end_ms(lead)
@@ -2894,6 +2942,302 @@ def launch_runner(session_path: Path, state_path: Path, args: argparse.Namespace
     process = subprocess.Popen(command, cwd=REPO_ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     pid_path.write_text(f"{process.pid}\n", encoding="utf-8")
     return process.pid
+
+
+def prefix_block_ids(block: dict[str, Any], prefix: str) -> None:
+    def rewrite(value: Any) -> str:
+        return f"{prefix}-{value}"
+
+    for collection in ("clips", "actions", "mic_lean_ins"):
+        for item in block.get(collection, []) or []:
+            if isinstance(item, dict) and item.get("id"):
+                item["id"] = rewrite(item["id"])
+    for plan in block.get("transition_plans", []) or []:
+        if not isinstance(plan, dict):
+            continue
+        for key in ("id", "from_clip_id", "to_clip_id", "to_action_id"):
+            if plan.get(key):
+                plan[key] = rewrite(plan[key])
+    for automation in block.get("deck_automations", []) or []:
+        if not isinstance(automation, dict):
+            continue
+        for key in ("source_clip_id", "stem_layer_plan_ref"):
+            if automation.get(key):
+                automation[key] = rewrite(automation[key])
+
+
+def shift_block_times(block: dict[str, Any], offset_ms: int) -> None:
+    for clip in block.get("clips", []) or []:
+        clip["start_ms"] = int(clip.get("start_ms") or 0) + offset_ms
+    for action in block.get("actions", []) or []:
+        if "at_ms" in action:
+            action["at_ms"] = int(action.get("at_ms") or 0) + offset_ms
+        if "start_ms" in action:
+            action["start_ms"] = int(action.get("start_ms") or 0) + offset_ms
+    for lean in block.get("mic_lean_ins", []) or []:
+        lean["start"] = format_ms(parse_ms(lean.get("start"), "extension lean-in start") + offset_ms)
+        for key in ("ducking", "lowpass"):
+            envelope = lean.get(key)
+            if not isinstance(envelope, dict):
+                continue
+            for point in envelope.get("points", []) or []:
+                if isinstance(point, dict) and "at" in point:
+                    point["at"] = int(point["at"]) + offset_ms
+    for automation in block.get("deck_automations", []) or []:
+        for point in automation.get("points", []) or []:
+            for key in ("at", "at_ms"):
+                if isinstance(point, dict) and key in point:
+                    point[key] = int(point[key]) + offset_ms
+
+
+def merge_block_into_payload(payload: dict[str, Any], block: dict[str, Any], offset_ms: int) -> dict[str, Any]:
+    merged = json.loads(json.dumps(payload))
+    addition = json.loads(json.dumps(block))
+    shift_block_times(addition, offset_ms)
+    merged.setdefault("clips", []).extend(addition.get("clips", []) or [])
+    merged.setdefault("actions", []).extend(addition.get("actions", []) or [])
+    merged.setdefault("transition_plans", []).extend(addition.get("transition_plans", []) or [])
+    merged.setdefault("mic_lean_ins", []).extend(addition.get("mic_lean_ins", []) or [])
+    merged.setdefault("deck_automations", []).extend(addition.get("deck_automations", []) or [])
+    decks = [str(deck) for deck in merged.get("decks", []) if str(deck)]
+    for deck in addition.get("decks", []) or []:
+        if str(deck) and str(deck) not in decks:
+            decks.append(str(deck))
+    merged["decks"] = decks
+    routing = merged.setdefault("fader_routing", {}).setdefault("deck_assignments", {})
+    for deck, side in ((addition.get("fader_routing") or {}).get("deck_assignments") or {}).items():
+        routing.setdefault(deck, side)
+    merged["clips"] = sorted(
+        merged.get("clips", []),
+        key=lambda clip: (int(clip.get("start_ms", clip.get("start", 0)) or 0), str(clip.get("deck") or ""), str(clip.get("id") or "")),
+    )
+    merged["actions"] = sorted(
+        merged.get("actions", []),
+        key=lambda action: (int(action.get("at_ms", action.get("start_ms", 0)) or 0), str(action.get("id") or "")),
+    )
+    return merged
+
+
+def resolve_live_session_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    if args.session is not None:
+        if args.state is not None:
+            return args.session, args.state
+        return args.session, args.session.with_name(args.session.stem + "-state.json")
+    pointer_path = args.active_pointer
+    if not pointer_path.exists():
+        raise SystemExit(f"no active set pointer at {pointer_path}; pass --session or start a set first")
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    session_value = str(pointer.get("active_session_path") or "")
+    if not session_value:
+        raise SystemExit(f"active set pointer {pointer_path} has no active_session_path")
+    session_path = Path(session_value)
+    state_value = str(pointer.get("active_state_path") or "")
+    state_path = Path(state_value) if state_value else session_path.with_name(session_path.stem + "-state.json")
+    if args.state is not None:
+        state_path = args.state
+    return session_path, state_path
+
+
+def extend_set(args: argparse.Namespace) -> int:
+    from slime_audio_session_mixdown import session_duration_ms
+
+    args.runtime.mkdir(parents=True, exist_ok=True)
+    if args.pause_file.exists() and not args.ignore_pause:
+        print(
+            json.dumps(
+                {
+                    "status": "paused",
+                    "pause_file": str(args.pause_file),
+                    "reason": args.pause_file.read_text(encoding="utf-8", errors="replace").strip(),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    lock_fd = acquire_lock()
+    try:
+        session_path, state_path = resolve_live_session_paths(args)
+        if not session_path.exists():
+            raise SystemExit(f"live session not found: {session_path}; run autodj continue first")
+        source_text = session_path.read_text(encoding="utf-8")
+        payload = json.loads(source_text)
+        total_ms = session_duration_ms(parse_session(payload))
+        playhead_ms = playhead_ms_from_state(state_path) if state_path.exists() else 0
+        remaining_ms = max(0, total_ms - playhead_ms)
+        base_status = {
+            "session": str(session_path),
+            "state": str(state_path),
+            "total_ms": total_ms,
+            "playhead_ms": playhead_ms,
+            "remaining_ms": remaining_ms,
+        }
+        if not args.force:
+            if args.target_length_ms > 0 and total_ms >= args.target_length_ms:
+                print(json.dumps({"status": "ok", "reason": "target length reached", **base_status}, sort_keys=True))
+                return 0
+            if remaining_ms >= args.ahead_ms:
+                print(json.dumps({"status": "ok", "reason": "enough runway ahead", **base_status}, sort_keys=True))
+                return 0
+
+        args.min_runway_ms = args.block_ms
+        work_path = args.runtime / f"{args.slug}.json"
+        plan_path = args.runtime / f"{args.slug}-plan.json"
+        stage = "select_tracks"
+        selected: list[SelectedTrack] = []
+        analyses: dict[str, TrackAnalysis] = {}
+        structure_rejections: list[dict[str, Any]] = []
+        try:
+            existing_paths = {str(clip.get("path") or "") for clip in payload.get("clips", []) if isinstance(clip, dict)}
+            existing_paths |= {
+                str(action.get("source_path") or action.get("path") or "")
+                for action in payload.get("actions", [])
+                if isinstance(action, dict)
+            }
+            existing_paths.discard("")
+            selected = select_tracks(args, exclude_paths=existing_paths)
+            stage = "analysis"
+            analyses = load_or_analyze_selected(selected, args)
+            stage = "filter_defensible_sources"
+            selected, structure_rejections = filter_defensible_source_tracks(selected, analyses, args)
+            stage = "session_payload"
+            block = session_payload(selected, args, analyses)
+            prefix_block_ids(block, f"ext-{time.strftime('%m%d%H%M%S')}")
+            stage = "merge"
+            merged = merge_block_into_payload(payload, block, offset_ms=total_ms)
+            notes = merged.setdefault("notes", {})
+            extensions = notes.setdefault("extensions", [])
+            extensions.append(
+                {
+                    "at_ms": total_ms,
+                    "block_ms": args.block_ms,
+                    "created_at": iso_now(),
+                    "intent": args.intent,
+                    "slug": args.slug,
+                    "tracks": [track.path for track in selected],
+                }
+            )
+            write_payload(work_path, merged)
+            append_selection_history(selected, args, session_path=session_path, dry_run=args.dry_run)
+            # Lock everything at or before the window the runner may already be
+            # prerendering; the planner may restitch anything after that,
+            # including the junction between old tail and new block.
+            state_payload = load_json_file(state_path) if state_path.exists() else {}
+            window_end_ms = int(state_payload.get("window_end_ms") or 0)
+            lock_before_ms = max(playhead_ms, window_end_ms) + args.prerender_lead_ms + 5_000
+            stage = "mix_planner"
+            planner = run_planner(work_path, args, lock_before_ms=min(lock_before_ms, total_ms))
+            if planner["returncode"] != 0:
+                raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
+            stage = "structural_beds"
+            structural = add_structural_beds(work_path, selected, args, min_start_ms=total_ms)
+            stage = "creative_pass"
+            creative = apply_creative_pass(work_path, args, min_start_ms=total_ms)
+            stage = "vanilla_guard"
+            vanilla_guard = validate_no_vanilla_leads(work_path, args)
+            args.require_stem_loads = bool(args.stem_aware_remix)
+            stage = "stem_load_guard"
+            stem_load_guard = validate_stem_load_usage(work_path, args)
+            stage = "transition_decision_guard"
+            transition_decision_guard = validate_transition_decisions(work_path, args)
+            stage = "harmonic_guard"
+            harmonic_guard = validate_harmonic_overlaps(work_path, args)
+            stage = "vocal_guards"
+            vocal_guards = validate_vocal_guards(work_path, args)
+            stage = "component_bed_balance_guard"
+            component_bed_balance_guard = validate_component_bed_balance(work_path, args)
+            stage = "session_validate"
+            validate = subprocess.run(
+                [sys.executable, "scripts/slime_audio_session.py", "validate", str(work_path)],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if validate.returncode != 0:
+                raise SystemExit(validate.stderr or validate.stdout or "session validation failed")
+            plan = {
+                "created_at": iso_now(),
+                "status": "dry_run" if args.dry_run else "extended",
+                "session": str(session_path),
+                "state": str(state_path),
+                "work_session": str(work_path),
+                "title": args.title,
+                "slug": args.slug,
+                "intent": args.intent,
+                "extension_at_ms": total_ms,
+                "playhead_ms": playhead_ms,
+                "lock_before_ms": lock_before_ms,
+                "planner": planner,
+                "structural": structural,
+                "creative": creative,
+                "vanilla_guard": vanilla_guard,
+                "stem_load_guard": stem_load_guard,
+                "transition_decision_guard": transition_decision_guard,
+                "harmonic_guard": harmonic_guard,
+                "vocal_guards": vocal_guards,
+                "component_bed_balance_guard": component_bed_balance_guard,
+                "tracks": [asdict(track) for track in selected],
+                "structure_rejections": structure_rejections,
+            }
+            if not args.dry_run:
+                stage = "publish"
+                if session_path.read_text(encoding="utf-8") != source_text:
+                    raise SystemExit(
+                        "live session changed while the extension was being built; rerun autodj extend"
+                    )
+                write_payload(session_path, load_session_payload(work_path))
+                if args.history is not None:
+                    args.history.parent.mkdir(parents=True, exist_ok=True)
+                    with args.history.open("a", encoding="utf-8") as handle:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "event": "autodj_set_extended",
+                                    "session": str(session_path),
+                                    "extension_at_ms": total_ms,
+                                    "slug": args.slug,
+                                    "timestamp": iso_now(),
+                                    "tracks": [track.path for track in selected],
+                                },
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        )
+            plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps(plan, indent=2, sort_keys=True))
+            return 0
+        except (SystemExit, Exception) as error:
+            decision_audit = write_failed_session_decision_audit(
+                args,
+                work_path,
+                stage=stage,
+                error=error,
+                selected=selected,
+                analyses=analyses,
+                structure_rejections=structure_rejections,
+            )
+            failure_audit = write_generation_failure_audit(
+                args,
+                work_path,
+                stage=stage,
+                error=error,
+                selected=selected,
+                structure_rejections=structure_rejections,
+            )
+            print(
+                json.dumps({"status": "failed", "decision_audit": decision_audit, "failure_audit": failure_audit}, sort_keys=True),
+                file=sys.stderr,
+            )
+            raise
+    finally:
+        os.close(lock_fd)
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def continue_set(args: argparse.Namespace) -> int:
@@ -3115,21 +3459,8 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
     validate.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
     validate.add_argument("--require-stem-loads", action=argparse.BooleanOptionalAction, default=False)
-    cont = sub.add_parser("continue")
-    cont.add_argument("--db", type=Path, default=DEFAULT_DB)
-    cont.add_argument("--constraints", type=Path, default=DEFAULT_CONSTRAINTS)
-    cont.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
-    cont.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
-    cont.add_argument("--taste-profile", type=Path, default=DEFAULT_TASTE_PROFILE)
-    cont.add_argument("--pause-file", type=Path, default=DEFAULT_AUTODJ_PAUSE_FILE)
-    cont.add_argument("--ignore-pause", action="store_true")
-    cont.add_argument("--analysis-cache", type=Path, default=DEFAULT_ANALYSIS_CACHE)
-    cont.add_argument("--analysis-backend", choices=["auto", "ffmpeg"], default="ffmpeg")
-    cont.add_argument("--analysis-sample-rate", type=int, default=44_100)
-    cont.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
-    cont.add_argument("--analyze-missing-sections", action=argparse.BooleanOptionalAction, default=True)
-    cont.add_argument("--require-section-analysis", action=argparse.BooleanOptionalAction, default=True)
-    cont.add_argument("--structured-source-only", action=argparse.BooleanOptionalAction, default=False)
+    cont = sub.add_parser("continue", help="Start a fresh database-backed set when nothing is playing.")
+    add_generation_arguments(cont)
     cont.add_argument("--title", default=f"Autodj Continuation {time.strftime('%Y-%m-%d %H%M')}")
     cont.add_argument("--slug", default=f"autodj-continuation-{time.strftime('%Y%m%d-%H%M%S')}")
     cont.add_argument("--intent", default="continue the room from fresh database-backed candidates without hardcoded tracks")
@@ -3137,61 +3468,108 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--min-runway-ms", type=int, default=DEFAULT_MIN_RUNWAY_MS)
     cont.add_argument("--min-tracks", type=int, default=5)
     cont.add_argument("--max-tracks", type=int, default=DEFAULT_MAX_TRACKS)
-    cont.add_argument("--max-per-artist", type=int, default=1)
-    cont.add_argument("--recent-limit", type=int, default=120)
-    cont.add_argument("--recent-material-policy", choices=["penalty", "ban", "off"], default="penalty")
-    cont.add_argument("--pool-per-query", type=int, default=60)
-    cont.add_argument("--sql-pool-limit", type=int, default=600)
-    cont.add_argument("--query-count", type=int, default=0)
-    cont.add_argument("--include-broad-pool", action="store_true")
-    cont.add_argument("--remix-focus", action=argparse.BooleanOptionalAction, default=False)
-    cont.add_argument("--stem-aware-remix", action=argparse.BooleanOptionalAction, default=False)
-    cont.add_argument("--downloaded-track-ratio", type=float, default=0.10)
-    cont.add_argument("--leftfield-download-ratio", type=float, default=0.10)
-    cont.add_argument("--selection-jitter", type=float, default=0.12)
-    cont.add_argument("--scratch-source-file", type=Path, action="append")
-    cont.add_argument("--scratch-material-policy", choices=["ban", "penalty", "off"], default="ban")
-    cont.add_argument("--scratch-material-penalty", type=float, default=0.8)
-    cont.add_argument("--skip-term", action="append", default=list(DEFAULT_SKIP_TERMS))
-    cont.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
-    cont.add_argument("--min-score", type=float, default=None)
-    cont.add_argument("--default-track-ms", type=int, default=240_000)
-    cont.add_argument("--min-track-ms", type=int, default=90_000)
-    cont.add_argument("--max-lead-clip-ms", type=int, default=90_000)
-    cont.add_argument("--max-fast-lead-clip-ms", type=int, default=64_000)
-    cont.add_argument("--min-section-clip-ms", type=int, default=32_000)
-    cont.add_argument("--min-anchor-section-ms", type=int, default=8_000)
-    cont.add_argument("--min-section-confidence", type=float, default=0.45)
-    cont.add_argument("--base-overlap-ms", type=int, default=0)
-    cont.add_argument("--fade-in-ms", type=int, default=0)
-    cont.add_argument("--fade-out-ms", type=int, default=0)
-    cont.add_argument("--bed-duration-ms", type=int, default=96_000)
-    cont.add_argument("--bed-trim-start-ms", type=int, default=60_000)
-    cont.add_argument("--bed-gain-db", type=float, default=-3.0)
-    cont.add_argument("--bed-fade-in-ms", type=int, default=3_000)
-    cont.add_argument("--bed-fade-out-ms", type=int, default=1_500)
-    cont.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
-    cont.add_argument("--bed-highpass-hz", type=float, default=90.0)
-    cont.add_argument("--max-structural-beds", type=int, default=4)
-    cont.add_argument("--vocal-drop-count", type=int)
-    cont.add_argument("--vocal-drop-volume", type=float, default=1.65)
-    cont.add_argument("--vocal-drop-duck-volume", type=float, default=0.42)
-    cont.add_argument("--vocal-drop-lowpass-hz", type=float, default=1400.0)
-    cont.add_argument("--vocal-drop-duck-ms", type=int, default=3200)
-    cont.add_argument("--routine-every", type=int, default=3)
-    cont.add_argument("--min-creative-moves", type=int, default=2)
-    cont.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
-    cont.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
-    cont.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
-    cont.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
-    cont.add_argument("--no-creative-pass", action="store_true")
     cont.add_argument("--window-ms", type=int, default=180_000)
     cont.add_argument("--prerender-lead-ms", type=int, default=60_000)
     cont.add_argument("--runner-single-window", action=argparse.BooleanOptionalAction, default=False)
     cont.add_argument("--discover-timeout-ms", type=int, default=4000)
-    cont.add_argument("--force", action="store_true")
-    cont.add_argument("--dry-run", action="store_true")
+    cont.add_argument("--force", action="store_true", help="Generate and launch even when playback looks healthy.")
+    extend = sub.add_parser("extend", help="Append a planned, guarded block to the live session behind the playhead.")
+    add_generation_arguments(extend)
+    extend.add_argument("--session", type=Path, help="Live session to extend. Defaults to the active-set pointer.")
+    extend.add_argument("--state", type=Path, help="Runner state for the live session. Defaults next to --session or from the pointer.")
+    extend.add_argument("--active-pointer", type=Path, default=DEFAULT_ACTIVE_SET)
+    extend.add_argument("--title", default=f"Autodj Extension {time.strftime('%Y-%m-%d %H%M')}")
+    extend.add_argument("--slug", default=f"autodj-extension-{time.strftime('%Y%m%d-%H%M%S')}")
+    extend.add_argument("--intent", default="extend the live set with fresh database-backed material behind the playhead")
+    extend.add_argument(
+        "--ahead-ms",
+        type=int,
+        default=DEFAULT_EXTEND_AHEAD_MS,
+        help="No-op when at least this much scheduled music remains ahead of the playhead.",
+    )
+    extend.add_argument(
+        "--block-ms",
+        type=int,
+        default=DEFAULT_EXTEND_BLOCK_MS,
+        help="Target amount of new timeline to append per invocation.",
+    )
+    extend.add_argument(
+        "--target-length-ms",
+        type=int,
+        default=DEFAULT_TARGET_LENGTH_MS,
+        help="Stop extending once the session reaches this total length. 0 keeps extending forever (cron mode).",
+    )
+    extend.add_argument("--min-tracks", type=int, default=2)
+    extend.add_argument("--max-tracks", type=int, default=8)
+    extend.add_argument("--prerender-lead-ms", type=int, default=60_000)
+    extend.add_argument("--force", action="store_true", help="Append a block even when runway/target checks would skip.")
     return parser.parse_args()
+
+
+def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--constraints", type=Path, default=DEFAULT_CONSTRAINTS)
+    parser.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
+    parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    parser.add_argument("--taste-profile", type=Path, default=DEFAULT_TASTE_PROFILE)
+    parser.add_argument("--pause-file", type=Path, default=DEFAULT_AUTODJ_PAUSE_FILE)
+    parser.add_argument("--ignore-pause", action="store_true")
+    parser.add_argument("--analysis-cache", type=Path, default=DEFAULT_ANALYSIS_CACHE)
+    parser.add_argument("--analysis-backend", choices=["auto", "ffmpeg"], default="ffmpeg")
+    parser.add_argument("--analysis-sample-rate", type=int, default=44_100)
+    parser.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
+    parser.add_argument("--analyze-missing-sections", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--require-section-analysis", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--structured-source-only", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--max-per-artist", type=int, default=1)
+    parser.add_argument("--recent-limit", type=int, default=120)
+    parser.add_argument("--recent-material-policy", choices=["penalty", "ban", "off"], default="penalty")
+    parser.add_argument("--pool-per-query", type=int, default=60)
+    parser.add_argument("--sql-pool-limit", type=int, default=600)
+    parser.add_argument("--query-count", type=int, default=0)
+    parser.add_argument("--include-broad-pool", action="store_true")
+    parser.add_argument("--remix-focus", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--stem-aware-remix", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--downloaded-track-ratio", type=float, default=0.10)
+    parser.add_argument("--leftfield-download-ratio", type=float, default=0.10)
+    parser.add_argument("--selection-jitter", type=float, default=0.12)
+    parser.add_argument("--scratch-source-file", type=Path, action="append")
+    parser.add_argument("--scratch-material-policy", choices=["ban", "penalty", "off"], default="ban")
+    parser.add_argument("--scratch-material-penalty", type=float, default=0.8)
+    parser.add_argument("--skip-term", action="append", default=list(DEFAULT_SKIP_TERMS))
+    parser.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--min-score", type=float, default=None)
+    parser.add_argument("--default-track-ms", type=int, default=240_000)
+    parser.add_argument("--min-track-ms", type=int, default=90_000)
+    parser.add_argument("--max-lead-clip-ms", type=int, default=90_000)
+    parser.add_argument("--max-fast-lead-clip-ms", type=int, default=64_000)
+    parser.add_argument("--min-section-clip-ms", type=int, default=32_000)
+    parser.add_argument("--min-anchor-section-ms", type=int, default=8_000)
+    parser.add_argument("--min-section-confidence", type=float, default=0.45)
+    parser.add_argument("--base-overlap-ms", type=int, default=0)
+    parser.add_argument("--fade-in-ms", type=int, default=0)
+    parser.add_argument("--fade-out-ms", type=int, default=0)
+    parser.add_argument("--bed-duration-ms", type=int, default=96_000)
+    parser.add_argument("--bed-trim-start-ms", type=int, default=60_000)
+    parser.add_argument("--bed-gain-db", type=float, default=-3.0)
+    parser.add_argument("--bed-fade-in-ms", type=int, default=3_000)
+    parser.add_argument("--bed-fade-out-ms", type=int, default=1_500)
+    parser.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
+    parser.add_argument("--bed-highpass-hz", type=float, default=90.0)
+    parser.add_argument("--max-structural-beds", type=int, default=4)
+    parser.add_argument("--vocal-drop-count", type=int)
+    parser.add_argument("--vocal-drop-volume", type=float, default=1.65)
+    parser.add_argument("--vocal-drop-duck-volume", type=float, default=0.42)
+    parser.add_argument("--vocal-drop-lowpass-hz", type=float, default=1400.0)
+    parser.add_argument("--vocal-drop-duck-ms", type=int, default=3200)
+    parser.add_argument("--routine-every", type=int, default=3)
+    parser.add_argument("--min-creative-moves", type=int, default=2)
+    parser.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
+    parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
+    parser.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
+    parser.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
+    parser.add_argument("--no-creative-pass", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
 
 
 def main() -> int:
@@ -3200,6 +3578,8 @@ def main() -> int:
         return validate_dj_session(args)
     if args.command == "continue":
         return continue_set(args)
+    if args.command == "extend":
+        return extend_set(args)
     raise AssertionError(args.command)
 
 

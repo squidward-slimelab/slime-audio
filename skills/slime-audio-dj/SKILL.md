@@ -348,15 +348,24 @@ Planning rules:
 - A valid remix block should contain at least one audible rhythm bed or stem group, one phrase-resolved drop/fakeout/handoff, and one additional intentional move such as a hook tease, echo throw, double, chop, brake, or filter/EQ performance.
 - If stem coverage is missing for future loads, queue or run stem splitting before the load action reaches playback. Do not block live audio on Demucs.
 
-For autodj/heartbeat continuations, prefer:
+For autodj/heartbeat work, `continue` starts a fresh set when nothing is playing and `extend` appends a planned, guarded block behind the playhead of the live set. Prefer:
 
 ```bash
+# dead air: start a fresh set (about 5 minutes of buffer, then extend)
 python3 scripts/slime_audio_autodj.py continue \
   --remix-focus \
   --stem-aware-remix \
   --structured-source-only \
   --no-analyze-missing-sections
+
+# live set: top up the future queue; no-ops when enough runway remains
+python3 scripts/slime_audio_autodj.py extend \
+  --remix-focus \
+  --structured-source-only \
+  --no-analyze-missing-sections
 ```
+
+`extend` is safe to run on a short cron/heartbeat cadence: it exits immediately when at least `--ahead-ms` of music is still scheduled ahead of the playhead, and stops adding at `--target-length-ms` (pass `0` for an endless set).
 
 Keep `scripts/slime_audio_structure_backfill.py` running as a background/cron job so the cached cue pool grows without decoding audio on the live recovery path.
 
@@ -526,7 +535,7 @@ Do not use legacy slot queues for DJ sets. Do not stream a review render directl
 ## Live Set Rules
 
 - Treat the mix session, playback history, and commentary plan as live state.
-- Extend the future queue while playback continues whenever possible.
+- Extend the future queue while playback continues whenever possible. `slime_audio_autodj.py extend` is the default way to top up the buffer; use `slime_audio_live_edit.py` for targeted creative edits on top of it.
 - Keep roughly 5 minutes of future scheduled music ahead of the playhead. If the buffer is low, add/plan music before doing polish work.
 - Add, remove, trim, move, or automate future timestamped actions/render events; do not disturb audio already under the playhead unless explicitly asked.
 - Keep named set artifacts separate from the active live pointers. The active files are for the runner and dashboard; archived set files are for replay, review, and later editing.

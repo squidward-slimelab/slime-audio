@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import slime_audio_autodj as autodj
 from slime_audio_autodj import (
     SelectedTrack,
     add_structural_beds,
@@ -1871,6 +1872,240 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                 validate_vocal_guards(session_path, SimpleNamespace(db=Path("/missing/db.sqlite3"), analysis_cache=Path("/missing/cache.json")))
 
         self.assertIn("vocal overlap guard failed", str(raised.exception))
+
+
+class SlimeAudioAutodjExtendTests(unittest.TestCase):
+    @staticmethod
+    def _live_session_payload() -> dict:
+        return {
+            "version": 1,
+            "decks": ["deck-1", "deck-2"],
+            "clips": [
+                {"id": "lead-a", "deck": "deck-1", "path": "/music/a.flac", "start_ms": 0, "duration_ms": 60_000},
+                {"id": "lead-b", "deck": "deck-2", "path": "/music/b.flac", "start_ms": 60_000, "duration_ms": 60_000},
+            ],
+        }
+
+    def _extend_args(self, temp: Path, session_path: Path, state_path: Path, *extra: str):
+        argv = [
+            "slime_audio_autodj.py",
+            "extend",
+            "--session",
+            str(session_path),
+            "--state",
+            str(state_path),
+            "--runtime",
+            str(temp / "runtime"),
+            "--history",
+            str(temp / "history.jsonl"),
+            "--pause-file",
+            str(temp / "pause"),
+            "--constraints",
+            str(temp / "constraints.json"),
+            "--db",
+            str(temp / "library.sqlite3"),
+            "--no-require-section-analysis",
+            "--no-analyze-missing-sections",
+            "--min-tracks",
+            "1",
+            "--max-tracks",
+            "2",
+            *extra,
+        ]
+        with patch.object(sys, "argv", argv):
+            return autodj.parse_args()
+
+    def test_extend_noops_when_enough_runway_remains(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "live.json"
+            state_path = temp / "live-state.json"
+            session_path.write_text(json.dumps(self._live_session_payload()), encoding="utf-8")
+            state_path.write_text(json.dumps({"playhead_ms": 10_000}), encoding="utf-8")
+            args = self._extend_args(temp, session_path, state_path, "--ahead-ms", "60000", "--target-length-ms", "0")
+
+            from io import StringIO
+            from contextlib import redirect_stdout
+
+            output = StringIO()
+            with patch.object(autodj, "select_tracks", side_effect=AssertionError("selection should not run")):
+                with redirect_stdout(output):
+                    self.assertEqual(autodj.extend_set(args), 0)
+
+            self.assertIn("enough runway ahead", output.getvalue())
+
+    def test_extend_noops_at_target_length(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "live.json"
+            state_path = temp / "live-state.json"
+            session_path.write_text(json.dumps(self._live_session_payload()), encoding="utf-8")
+            state_path.write_text(json.dumps({"playhead_ms": 115_000}), encoding="utf-8")
+            args = self._extend_args(temp, session_path, state_path, "--target-length-ms", "100000")
+
+            from io import StringIO
+            from contextlib import redirect_stdout
+
+            output = StringIO()
+            with patch.object(autodj, "select_tracks", side_effect=AssertionError("selection should not run")):
+                with redirect_stdout(output):
+                    self.assertEqual(autodj.extend_set(args), 0)
+
+            self.assertIn("target length reached", output.getvalue())
+
+    def _pipeline_patches(self, selected):
+        captured: dict = {}
+
+        def fake_select(args, *, exclude_paths=None):
+            captured["exclude_paths"] = set(exclude_paths or set())
+            return selected
+
+        return captured, [
+            patch.object(autodj, "select_tracks", side_effect=fake_select),
+            patch.object(autodj, "load_or_analyze_selected", return_value={}),
+            patch.object(autodj, "run_planner", return_value={"returncode": 0, "stdout": "", "stderr": "", "command": []}),
+            patch.object(autodj, "add_structural_beds", return_value={"added": 0}),
+            patch.object(autodj, "apply_creative_pass", return_value={"required": True, "moves": [], "failures": []}),
+            patch.object(autodj, "validate_no_vanilla_leads", return_value={}),
+            patch.object(autodj, "validate_stem_load_usage", return_value={}),
+            patch.object(autodj, "validate_transition_decisions", return_value={}),
+            patch.object(autodj, "validate_harmonic_overlaps", return_value={}),
+            patch.object(autodj, "validate_vocal_guards", return_value={}),
+            patch.object(autodj, "validate_component_bed_balance", return_value={}),
+        ]
+
+    def test_extend_appends_prefixed_block_after_session_end(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "live.json"
+            state_path = temp / "live-state.json"
+            session_path.write_text(json.dumps(self._live_session_payload()), encoding="utf-8")
+            state_path.write_text(json.dumps({"playhead_ms": 30_000, "window_end_ms": 60_000}), encoding="utf-8")
+            args = self._extend_args(temp, session_path, state_path, "--ahead-ms", "600000", "--target-length-ms", "0")
+            selected = [
+                SelectedTrack(
+                    path="/music/c.flac",
+                    artist="artist-c",
+                    title="track-c",
+                    album="",
+                    score=1.0,
+                    duration_ms=240_000,
+                    last_played_at=None,
+                    plays_seen=0,
+                    reasons=[],
+                )
+            ]
+
+            from io import StringIO
+            from contextlib import redirect_stdout
+
+            captured, patches = self._pipeline_patches(selected)
+            from contextlib import ExitStack
+
+            with ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with redirect_stdout(StringIO()):
+                    self.assertEqual(autodj.extend_set(args), 0)
+
+            self.assertEqual(captured["exclude_paths"], {"/music/a.flac", "/music/b.flac"})
+            published = json.loads(session_path.read_text(encoding="utf-8"))
+            new_clips = [clip for clip in published["clips"] if clip["path"] == "/music/c.flac"]
+            self.assertEqual(len(new_clips), 1)
+            self.assertEqual(new_clips[0]["start_ms"], 120_000)
+            self.assertTrue(str(new_clips[0]["id"]).startswith("ext-"))
+            self.assertEqual(len(published["notes"]["extensions"]), 1)
+            history_lines = [json.loads(line) for line in (temp / "history.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertIn("autodj_set_extended", {line.get("event") for line in history_lines})
+
+    def test_extend_refuses_to_publish_over_concurrent_live_edit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "live.json"
+            state_path = temp / "live-state.json"
+            session_path.write_text(json.dumps(self._live_session_payload()), encoding="utf-8")
+            state_path.write_text(json.dumps({"playhead_ms": 30_000}), encoding="utf-8")
+            args = self._extend_args(temp, session_path, state_path, "--ahead-ms", "600000", "--target-length-ms", "0")
+            selected = [
+                SelectedTrack(
+                    path="/music/c.flac",
+                    artist="artist-c",
+                    title="track-c",
+                    album="",
+                    score=1.0,
+                    duration_ms=240_000,
+                    last_played_at=None,
+                    plays_seen=0,
+                    reasons=[],
+                )
+            ]
+            concurrent = self._live_session_payload()
+            concurrent["clips"].append(
+                {"id": "live-edit", "deck": "deck-1", "path": "/music/d.flac", "start_ms": 120_000, "duration_ms": 30_000}
+            )
+
+            def planner_with_live_edit(*_args, **_kwargs):
+                session_path.write_text(json.dumps(concurrent), encoding="utf-8")
+                return {"returncode": 0, "stdout": "", "stderr": "", "command": []}
+
+            from io import StringIO
+            from contextlib import ExitStack, redirect_stdout
+
+            captured, patches = self._pipeline_patches(selected)
+            patches[2] = patch.object(autodj, "run_planner", side_effect=planner_with_live_edit)
+            with ExitStack() as stack:
+                for item in patches:
+                    stack.enter_context(item)
+                with redirect_stdout(StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        autodj.extend_set(args)
+
+            self.assertIn("changed while the extension was being built", str(raised.exception))
+            preserved = json.loads(session_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(preserved["clips"]), 3)
+
+    def test_merge_block_shifts_lean_ins_and_merges_decks(self):
+        payload = self._live_session_payload()
+        block = {
+            "decks": ["deck-2", "deck-4"],
+            "clips": [{"id": "x", "deck": "deck-2", "path": "/music/x.flac", "start_ms": 0, "duration_ms": 30_000}],
+            "actions": [],
+            "transition_plans": [],
+            "deck_automations": [],
+            "mic_lean_ins": [
+                {
+                    "id": "drop-1",
+                    "deck": "deck-5",
+                    "start": "00:12.000",
+                    "text": "hello",
+                    "ducking": {"points": [{"at": 11_750, "value": 0.4}, {"at": 15_000, "value": 1.0}]},
+                }
+            ],
+            "fader_routing": {"deck_assignments": {"deck-4": "THRU"}},
+        }
+        merged = autodj.merge_block_into_payload(payload, block, offset_ms=120_000)
+
+        self.assertEqual(merged["decks"], ["deck-1", "deck-2", "deck-4"])
+        self.assertEqual(merged["fader_routing"]["deck_assignments"]["deck-4"], "THRU")
+        self.assertEqual(merged["clips"][-1]["start_ms"], 120_000)
+        lean = merged["mic_lean_ins"][-1]
+        self.assertEqual(lean["start"], "02:12.000")
+        self.assertEqual(lean["ducking"]["points"][0]["at"], 131_750)
+
+    def test_prefix_block_ids_rewrites_transition_plan_refs(self):
+        block = {
+            "clips": [{"id": "lead-001", "deck": "deck-2", "path": "/music/x.flac", "start_ms": 0}],
+            "actions": [{"id": "lead-002", "type": "load_track"}],
+            "mic_lean_ins": [{"id": "autodj-vocal-drop-001"}],
+            "transition_plans": [{"id": "transition-lead-002", "from_clip_id": "lead-001", "to_clip_id": "lead-002", "to_action_id": "lead-002"}],
+        }
+        autodj.prefix_block_ids(block, "ext-42")
+
+        self.assertEqual(block["clips"][0]["id"], "ext-42-lead-001")
+        self.assertEqual(block["mic_lean_ins"][0]["id"], "ext-42-autodj-vocal-drop-001")
+        plan = block["transition_plans"][0]
+        self.assertEqual(plan["from_clip_id"], "ext-42-lead-001")
+        self.assertEqual(plan["to_action_id"], "ext-42-lead-002")
 
 
 if __name__ == "__main__":

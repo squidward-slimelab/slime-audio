@@ -124,6 +124,21 @@ For live DJ requests, prioritize immediacy: get one suitable starter track playi
 
 After the starter is moving, add a brief smooth voiceover intro on `deck-5` when appropriate, then extend the active session with follow-up tracks, transitions, and flavor before the starter runs out. Downloads, elaborate commentary, full proof renders, and deeper crate work can happen while playback continues. If the remaining timeline is near the end of the current starter or buffer, extending continuity is higher priority than polishing already-safe future material.
 
+## Autodj Continue And Extend
+
+`scripts/slime_audio_autodj.py` has two generation commands built around the fast-start/extend-behind-the-playhead model:
+
+- `continue` builds a first playable buffer (about 5 minutes of actual scheduled timeline by default, `--min-runway-ms`) from database candidates, runs the planner, structural beds, the creative pass, and all DJ guards, then launches the native runner in windowed mode. It refuses to stomp healthy playback unless `--force`.
+- `extend` appends a fresh planned block (default `--block-ms` 5 minutes) to the live session behind the playhead. It resolves the live session from `runtime/active-set.json` (or `--session`/`--state`), no-ops when at least `--ahead-ms` of music remains ahead of the playhead or when `--target-length-ms` is reached (default 30 minutes; `0` extends forever), excludes tracks already in the session, plans and guards the new block on a working copy, and only publishes atomically if the live file did not change in the meantime. New event ids are namespaced with an `ext-` prefix so repeated extensions never collide.
+
+Run `extend` on a heartbeat or cron for continuous sets:
+
+```bash
+python3 scripts/slime_audio_autodj.py extend --target-length-ms 0
+```
+
+Each invocation is cheap when the buffer is full (it exits after the runway check), so a 1-2 minute cadence is fine. The runner picks up appended material automatically at the next render-window reload; `extend` never touches audio at or before the currently prerendered window.
+
 ## Mixing Pass
 
 After the first live buffer is playing, keep running dedicated mixing passes on future material. The pass should classify each clip by role, set `trim_db` for source loudness, then use `gain_db`, EQ, filters, and fader automation to make the intended relationship audible.
