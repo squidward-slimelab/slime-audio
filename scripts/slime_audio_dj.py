@@ -28,9 +28,8 @@ from slime_music_library import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE = REPO_ROOT / "runtime" / "dj-analysis-cache.json"
 # Compiled analyzer (native/slime_dj_analyzer.cpp, built via `make -C native`).
-# When present it replaces the pure-Python DSP below, which decodes fine but
-# spends minutes per track in interpreted loops; the Python implementation
-# remains the fallback and the reference for behavior.
+# This is the only implementation of the analysis DSP; analyze_track refuses
+# to run without it so there is exactly one behavior to reason about.
 DEFAULT_NATIVE_ANALYZER = Path(
     os.environ.get("SLIME_DJ_NATIVE_ANALYZER", str(REPO_ROOT / "native" / "slime-dj-analyzer"))
 )
@@ -58,9 +57,6 @@ NOTE_NAME_TO_TONIC = {
     "B": 11,
     "CB": 11,
 }
-MAJOR_PROFILE = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
-MINOR_PROFILE = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
-
 # Camelot numbers for pitch class 0..11. 8B is C major, 8A is A minor.
 MAJOR_CAMELOT = (8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1)
 MINOR_CAMELOT = (5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10)
@@ -197,89 +193,11 @@ def decoded_wav(path: Path, backend: str, sample_rate: int):
         yield wav_path
 
 
-def rms_envelope(frames: bytes, rate: int, frame_ms: int = 46) -> tuple[list[float], float]:
-    width = 2
-    frame_bytes = max(1, rate * frame_ms // 1000) * width
-    values: list[float] = []
-    total_square = 0.0
-    total_samples = 0
-    for offset in range(0, len(frames), frame_bytes):
-        chunk = frames[offset : offset + frame_bytes]
-        if not chunk:
-            continue
-        rms = float(audioop.rms(chunk, width))
-        values.append(rms)
-        samples = len(chunk) // width
-        total_square += (rms * rms) * samples
-        total_samples += samples
-    whole_rms = math.sqrt(total_square / total_samples) if total_samples else 0.0
-    return values, whole_rms
-
-
-def estimate_bpm(envelope: list[float], frame_ms: int = 46) -> tuple[float | None, int | None, float]:
-    if len(envelope) < 80:
-        return None, None, 0.0
-    mean = sum(envelope) / len(envelope)
-    centered = [max(0.0, value - mean) for value in envelope]
-    onsets = [0.0]
-    for previous, current in zip(centered, centered[1:]):
-        onsets.append(max(0.0, current - previous))
-    if max(onsets, default=0.0) <= 0:
-        return None, None, 0.0
-
-    min_lag = max(1, round(60_000 / 200 / frame_ms))
-    max_lag = max(min_lag + 1, round(60_000 / 60 / frame_ms))
-    scores: list[tuple[float, int]] = []
-    for lag in range(min_lag, max_lag + 1):
-        score = sum(onsets[index] * onsets[index - lag] for index in range(lag, len(onsets)))
-        scores.append((score, lag))
-    best_score, best_lag = max(scores)
-    if best_score <= 0:
-        return None, None, 0.0
-    bpm = 60_000 / (best_lag * frame_ms)
-    while bpm < 80:
-        bpm *= 2
-    while bpm > 160:
-        bpm /= 2
-    sorted_scores = sorted((score for score, _lag in scores), reverse=True)
-    runner_up = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
-    confidence = min(1.0, max(0.0, (best_score - runner_up) / best_score))
-
-    threshold = (sum(onsets) / len(onsets)) * 1.5
-    first_peak = next((index for index, value in enumerate(onsets) if value >= threshold), 0)
-    beat_offset_ms = int(first_peak * frame_ms)
-    return round(bpm, 2), beat_offset_ms, round(confidence, 3)
-
-
 def beat_grid(bpm: float | None, beat_offset_ms: int | None, phrase_beats: int = 32) -> BeatGrid:
     phrase_ms = None
     if bpm:
         phrase_ms = int(round((60_000 / bpm) * phrase_beats))
     return BeatGrid(bpm=bpm, beat_offset_ms=beat_offset_ms, phrase_beats=phrase_beats, phrase_ms=phrase_ms)
-
-
-def smooth(values: list[float], window: int) -> list[float]:
-    if not values or window <= 1:
-        return values[:]
-    half = window // 2
-    smoothed = []
-    for index in range(len(values)):
-        start = max(0, index - half)
-        end = min(len(values), index + half + 1)
-        smoothed.append(sum(values[start:end]) / (end - start))
-    return smoothed
-
-
-def percentile(values: list[float], fraction: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = min(len(ordered) - 1, max(0, round((len(ordered) - 1) * fraction)))
-    return ordered[index]
-
-
-def frame_to_ms(index: int, frame_ms: int) -> int:
-    return int(index * frame_ms)
 
 
 def align_to_phrase(ms: int, grid: BeatGrid) -> int:
@@ -297,81 +215,6 @@ def align_to_beat(ms: int, grid: BeatGrid) -> int:
     beat_ms = 60_000 / grid.bpm
     beats = round((ms - grid.beat_offset_ms) / beat_ms)
     return max(0, int(round(grid.beat_offset_ms + (beats * beat_ms))))
-
-
-def detect_structure_windows(
-    envelope: list[float],
-    bpm: float | None,
-    beat_offset_ms: int | None,
-    duration_s: float,
-    frame_ms: int = 46,
-) -> list[StructureWindow]:
-    if not envelope or duration_s <= 0:
-        return []
-    grid = beat_grid(bpm, beat_offset_ms)
-    phrase_ms = grid.phrase_ms or 16_000
-    min_window_ms = max(4_000, phrase_ms // 2)
-    max_ms = int(duration_s * 1000)
-    normalized = []
-    high = max(percentile(envelope, 0.95), 1.0)
-    for value in envelope:
-        normalized.append(min(1.0, value / high))
-    window_frames = max(3, round(min_window_ms / frame_ms))
-    energy = smooth(normalized, window_frames)
-    low_threshold = max(0.10, percentile(energy, 0.25))
-    high_threshold = max(low_threshold + 0.10, percentile(energy, 0.72))
-    windows: list[StructureWindow] = []
-
-    def add(kind: str, start_ms: int, end_ms: int, confidence: float, reason: str) -> None:
-        start_ms = max(0, min(max_ms, align_to_phrase(start_ms, grid)))
-        aligned_end = align_to_phrase(end_ms, grid) or end_ms
-        end_ms = max(start_ms + min_window_ms, min(max_ms, aligned_end))
-        end_ms = min(max_ms, end_ms)
-        if end_ms - start_ms >= 1000:
-            windows.append(StructureWindow(kind, start_ms, end_ms, round(max(0.0, min(1.0, confidence)), 3), reason))
-
-    intro_end = min(max_ms, phrase_ms if max_ms < phrase_ms * 4 else phrase_ms * 2)
-    if intro_end > 0:
-        add("intro", 0, intro_end, 0.55, "opening phrase region")
-
-    outro_start = max(0, max_ms - intro_end)
-    if outro_start > 0:
-        add("outro", outro_start, max_ms, 0.5, "ending phrase region")
-
-    for index in range(1, len(energy) - 1):
-        previous = energy[index - 1]
-        current = energy[index]
-        nxt = energy[index + 1]
-        if previous < low_threshold and current < low_threshold and nxt > current:
-            start_ms = frame_to_ms(index, frame_ms)
-            add("breakdown", start_ms, start_ms + min_window_ms, 0.6 + (low_threshold - current), "sustained lower-energy section")
-        rise = nxt - previous
-        if current < high_threshold and rise > 0.08:
-            start_ms = frame_to_ms(index, frame_ms)
-            add("build", start_ms, start_ms + min_window_ms, 0.55 + rise, "energy rising into a likely transition")
-        if current >= high_threshold and previous < high_threshold:
-            start_ms = frame_to_ms(index, frame_ms)
-            add("drop", start_ms, start_ms + min_window_ms, 0.65 + (current - high_threshold), "energy crosses high threshold")
-
-    if not any(window.kind == "build" for window in windows) and len(energy) > window_frames + 1:
-        rises = [
-            (energy[index + window_frames] - energy[index], index)
-            for index in range(0, len(energy) - window_frames)
-        ]
-        strongest_rise, rise_index = max(rises, default=(0.0, 0))
-        if strongest_rise > 0.04:
-            start_ms = frame_to_ms(rise_index, frame_ms)
-            add("build", start_ms, start_ms + min_window_ms, 0.55 + strongest_rise, "strongest sustained energy rise")
-
-    deduped: list[StructureWindow] = []
-    seen: set[tuple[str, int]] = set()
-    for window in sorted(windows, key=lambda item: (item.start_ms, item.kind, -item.confidence)):
-        bucket = (window.kind, window.start_ms // max(1, phrase_ms))
-        if bucket in seen:
-            continue
-        seen.add(bucket)
-        deduped.append(window)
-    return deduped[:24]
 
 
 def suggested_lean_in_windows(structure: list[StructureWindow]) -> list[dict[str, object]]:
@@ -756,67 +599,6 @@ def store_analysis_in_db(db_path: Path, path: Path, analysis: TrackAnalysis) -> 
     conn.close()
 
 
-def goertzel_power(samples: list[float], rate: int, frequency: float) -> float:
-    if not samples:
-        return 0.0
-    omega = 2.0 * math.pi * frequency / rate
-    coeff = 2.0 * math.cos(omega)
-    q0 = q1 = q2 = 0.0
-    for sample in samples:
-        q0 = coeff * q1 - q2 + sample
-        q2 = q1
-        q1 = q0
-    return q1 * q1 + q2 * q2 - coeff * q1 * q2
-
-
-def estimate_chroma(frames: bytes, rate: int, max_seconds: int = 90) -> list[float]:
-    width = 2
-    max_bytes = min(len(frames), rate * max_seconds * width)
-    stride = max(1, rate // 4000)
-    raw = frames[:max_bytes]
-    samples = [
-        audioop.getsample(raw, width, index) / 32768.0
-        for index in range(0, len(raw) // width, stride)
-    ]
-    effective_rate = rate / stride
-    chroma = [0.0] * 12
-    for midi in range(36, 85):
-        frequency = 440.0 * (2 ** ((midi - 69) / 12))
-        if frequency >= effective_rate / 2:
-            continue
-        chroma[midi % 12] += goertzel_power(samples, int(effective_rate), frequency)
-    total = sum(chroma)
-    return [value / total for value in chroma] if total else chroma
-
-
-def rotate(values: tuple[float, ...], amount: int) -> list[float]:
-    return [values[(index - amount) % 12] for index in range(12)]
-
-
-def correlation(a: list[float], b: list[float]) -> float:
-    a_mean = sum(a) / len(a)
-    b_mean = sum(b) / len(b)
-    numerator = sum((left - a_mean) * (right - b_mean) for left, right in zip(a, b))
-    a_den = math.sqrt(sum((value - a_mean) ** 2 for value in a))
-    b_den = math.sqrt(sum((value - b_mean) ** 2 for value in b))
-    return numerator / (a_den * b_den) if a_den and b_den else 0.0
-
-
-def estimate_key(frames: bytes, rate: int) -> tuple[int | None, str | None, float]:
-    chroma = estimate_chroma(frames, rate)
-    if not any(chroma):
-        return None, None, 0.0
-    candidates: list[tuple[float, int, str]] = []
-    for tonic in range(12):
-        candidates.append((correlation(chroma, rotate(MAJOR_PROFILE, tonic)), tonic, "major"))
-        candidates.append((correlation(chroma, rotate(MINOR_PROFILE, tonic)), tonic, "minor"))
-    candidates.sort(reverse=True)
-    best_score, tonic, mode = candidates[0]
-    runner_up = candidates[1][0] if len(candidates) > 1 else 0.0
-    confidence = min(1.0, max(0.0, best_score - runner_up))
-    return tonic, mode, round(confidence, 3)
-
-
 def camelot(tonic: int | None, mode: str | None) -> str | None:
     if tonic is None or mode is None:
         return None
@@ -860,68 +642,47 @@ def key_name(tonic: int | None, mode: str | None) -> str | None:
     return f"{NOTE_NAMES[tonic]} {mode}"
 
 
-def native_analyze_wav(wav_path: Path) -> dict | None:
+def native_analyze_wav(wav_path: Path) -> dict:
     binary = DEFAULT_NATIVE_ANALYZER
     if not binary.exists():
-        return None
+        raise SystemExit(f"native DJ analyzer missing at {binary}; build it with `make -C native`")
     result = subprocess.run([str(binary), str(wav_path)], capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        return None
+        raise SystemExit(
+            f"native DJ analyzer failed for {wav_path}: {(result.stderr or result.stdout).strip()[-500:]}"
+        )
     try:
         return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"native DJ analyzer produced invalid JSON for {wav_path}: {error}") from error
 
 
 def analyze_track(path: Path, backend: str = "auto", sample_rate: int = 44_100) -> TrackAnalysis:
+    # The compiled analyzer (native/slime_dj_analyzer.cpp) is the only
+    # implementation of the analysis DSP. There is intentionally no Python
+    # fallback: a fallback is a second behavior for agents to land in.
     with decoded_wav(path, backend, sample_rate) as wav_path:
         native = native_analyze_wav(wav_path)
-        if native is not None:
-            tonic = native.get("tonic")
-            mode = native.get("mode")
-            bpm = native.get("bpm")
-            beat_offset_ms = native.get("beat_offset_ms")
-            return TrackAnalysis(
-                path=str(path),
-                duration_s=float(native["duration_s"]),
-                sample_rate=int(native["sample_rate"]),
-                channels=int(native["channels"]),
-                bpm=bpm,
-                beat_offset_ms=beat_offset_ms,
-                key=key_name(tonic, mode),
-                tonic=tonic,
-                mode=mode,
-                camelot=camelot(tonic, mode),
-                energy=float(native["energy"]),
-                loudness_db=float(native["loudness_db"]),
-                confidence=dict(native.get("confidence") or {}),
-                beatgrid=beat_grid(bpm, beat_offset_ms),
-                structure=[StructureWindow(**window) for window in native.get("structure") or []],
-            )
-        rate, channels, frames = read_wav_mono(wav_path)
-    duration_s = (len(frames) // 2) / rate if rate else 0.0
-    envelope, rms = rms_envelope(frames, rate)
-    bpm, beat_offset_ms, bpm_confidence = estimate_bpm(envelope)
-    tonic, mode, key_confidence = estimate_key(frames, rate)
-    loudness_db = 20 * math.log10(max(rms, 1.0) / 32768.0)
-    grid = beat_grid(bpm, beat_offset_ms)
-    structure = detect_structure_windows(envelope, bpm, beat_offset_ms, duration_s)
+    tonic = native.get("tonic")
+    mode = native.get("mode")
+    bpm = native.get("bpm")
+    beat_offset_ms = native.get("beat_offset_ms")
     return TrackAnalysis(
         path=str(path),
-        duration_s=round(duration_s, 3),
-        sample_rate=rate,
-        channels=channels,
+        duration_s=float(native["duration_s"]),
+        sample_rate=int(native["sample_rate"]),
+        channels=int(native["channels"]),
         bpm=bpm,
         beat_offset_ms=beat_offset_ms,
         key=key_name(tonic, mode),
         tonic=tonic,
         mode=mode,
         camelot=camelot(tonic, mode),
-        energy=round(min(1.0, rms / 32768.0), 4),
-        loudness_db=round(loudness_db, 2),
-        confidence={"bpm": bpm_confidence, "key": key_confidence},
-        beatgrid=grid,
-        structure=structure,
+        energy=float(native["energy"]),
+        loudness_db=float(native["loudness_db"]),
+        confidence=dict(native.get("confidence") or {}),
+        beatgrid=beat_grid(bpm, beat_offset_ms),
+        structure=[StructureWindow(**window) for window in native.get("structure") or []],
     )
 
 

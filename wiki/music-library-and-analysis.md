@@ -47,7 +47,7 @@ The BPM/beat-offset/key/energy/structure DSP has a compiled C++ implementation i
 make -C native
 ```
 
-`slime_audio_dj.py analyze`/`structure`/`cues` automatically use `native/slime-dj-analyzer` when the binary exists (override with `SLIME_DJ_NATIVE_ANALYZER`) and fall back to the pure-Python reference implementation when it does not. The port mirrors the Python algorithms exactly — including rounding and tie-break semantics — so cached analyses stay comparable across implementations; `tests/test_slime_audio_dj.py` includes a parity test. ffmpeg still handles decoding in both paths.
+`slime_audio_dj.py analyze`/`structure`/`cues` require `native/slime-dj-analyzer` (override the location with `SLIME_DJ_NATIVE_ANALYZER`) and fail with a clear build instruction when it is missing. There is deliberately no Python fallback implementation — one DSP, one behavior, nothing else for an agent to land in. The port preserved the original Python algorithms exactly (including rounding and tie-break semantics) when it replaced them, so previously cached analyses remain comparable. ffmpeg still handles decoding; the deploy script builds the binary, and the test suite builds it on demand.
 
 ## DJ Analysis
 

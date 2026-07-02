@@ -24,6 +24,8 @@ Compile-check Python scripts when changing broad script behavior:
 python3 -m py_compile scripts/*.py src/spotify_brain/*.py
 ```
 
+Analysis commands require the native analyzer (`make -C native`); the DJ test suite builds it automatically when missing, but a g++ toolchain must be present.
+
 ## .NET Tests
 
 ```bash

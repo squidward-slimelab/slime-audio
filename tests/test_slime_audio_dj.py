@@ -19,9 +19,7 @@ from slime_audio_dj import (
     cache_key,
     camelot,
     cue_points_for_analysis,
-    detect_structure_windows,
     drop_candidates_for_analysis,
-    estimate_bpm,
     key_match,
     major_equivalent_tonic,
     relative_tonic,
@@ -119,36 +117,12 @@ class SlimeAudioDjTests(unittest.TestCase):
         self.assertEqual(semitone_distance(11, 1), 2)
         self.assertEqual(semitone_distance(1, 11), -2)
 
-    def test_estimate_bpm_locks_simple_pulse_train(self):
-        envelope = [0.0] * 240
-        # 120 BPM at 46 ms frames is roughly every 11 frames.
-        for index in range(0, len(envelope), 11):
-            envelope[index] = 1000.0
-
-        bpm, _offset_ms, confidence = estimate_bpm(envelope)
-
-        self.assertIsNotNone(bpm)
-        self.assertAlmostEqual(bpm, 118.58, places=1)
-        self.assertGreaterEqual(confidence, 0.0)
-
     def test_beat_grid_calculates_phrase_length(self):
         grid = beat_grid(120.0, 250)
 
         self.assertEqual(grid.beat_offset_ms, 250)
         self.assertEqual(grid.phrase_beats, 32)
         self.assertEqual(grid.phrase_ms, 16000)
-
-    def test_detect_structure_finds_drop_after_energy_rise(self):
-        # 46 ms frames, roughly 60 seconds. Start low, rise, then hit a high-energy section.
-        envelope = ([100.0] * 300) + ([250.0 + index * 6 for index in range(120)]) + ([1200.0] * 900)
-
-        windows = detect_structure_windows(envelope, 120.0, 0, duration_s=len(envelope) * 0.046)
-        kinds = [window.kind for window in windows]
-        suggestions = suggested_lean_in_windows(windows)
-
-        self.assertIn("build", kinds)
-        self.assertIn("drop", kinds)
-        self.assertTrue(any(item["kind"] == "pre-drop" for item in suggestions))
 
     def test_session_tension_windows_maps_track_structure_to_mix_time(self):
         session = parse_session(
@@ -369,10 +343,26 @@ class SlimeAudioDjTests(unittest.TestCase):
 
 
 class SlimeAudioDjNativeAnalyzerTests(unittest.TestCase):
-    """Parity between the compiled analyzer and the pure-Python reference."""
+    """Behavior of the compiled analyzer, the only analysis DSP implementation."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import subprocess
+
+        repo_root = Path(__file__).resolve().parents[1]
+        binary = repo_root / "native" / "slime-dj-analyzer"
+        if not binary.exists():
+            subprocess.run(["make", "-C", str(repo_root / "native")], check=True, capture_output=True)
 
     @staticmethod
-    def _write_synthetic_track(path: Path, *, bpm: float = 128.0, seconds: float = 12.0, tone_hz: float = 220.0) -> None:
+    def _write_synthetic_track(
+        path: Path,
+        *,
+        bpm: float = 128.0,
+        seconds: float = 12.0,
+        tone_hz: float = 220.0,
+        quiet_intro_s: float = 0.0,
+    ) -> None:
         import math
         import struct
         import wave
@@ -380,12 +370,15 @@ class SlimeAudioDjNativeAnalyzerTests(unittest.TestCase):
         sample_rate = 44_100
         beat_samples = int(sample_rate * 60.0 / bpm)
         total = int(sample_rate * seconds)
+        intro_samples = int(sample_rate * quiet_intro_s)
         frames = bytearray()
         for index in range(total):
             in_beat = (index % beat_samples) < int(0.06 * sample_rate)
             value = 0.15 * math.sin(2 * math.pi * tone_hz * index / sample_rate)
             if in_beat:
                 value += 0.6 * math.sin(2 * math.pi * 80.0 * index / sample_rate)
+            if index < intro_samples:
+                value *= 0.05
             packed = struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767))
             frames += packed + packed
         with wave.open(str(path), "wb") as audio:
@@ -394,48 +387,50 @@ class SlimeAudioDjNativeAnalyzerTests(unittest.TestCase):
             audio.setframerate(sample_rate)
             audio.writeframes(bytes(frames))
 
-    def test_native_analyzer_matches_python_reference(self):
+    def test_native_analyzer_locks_bpm_and_key_on_synthetic_beat(self):
         import slime_audio_dj as dj
 
-        binary = Path(__file__).resolve().parents[1] / "native" / "slime-dj-analyzer"
-        if not binary.exists():
-            self.skipTest("native analyzer not built; run make -C native")
         with tempfile.TemporaryDirectory() as temp_dir:
             wav_path = Path(temp_dir) / "synthetic.wav"
             self._write_synthetic_track(wav_path)
 
-            native = dj.analyze_track(wav_path)
-            with patch.object(dj, "DEFAULT_NATIVE_ANALYZER", Path("/nonexistent/analyzer")):
-                reference = dj.analyze_track(wav_path)
+            analysis = dj.analyze_track(wav_path)
 
-        self.assertEqual(native.sample_rate, reference.sample_rate)
-        self.assertEqual(native.channels, reference.channels)
-        self.assertAlmostEqual(native.duration_s, reference.duration_s, places=3)
-        self.assertAlmostEqual(native.bpm, reference.bpm, places=2)
-        self.assertEqual(native.beat_offset_ms, reference.beat_offset_ms)
-        self.assertEqual(native.tonic, reference.tonic)
-        self.assertEqual(native.mode, reference.mode)
-        self.assertEqual(native.camelot, reference.camelot)
-        self.assertAlmostEqual(native.energy, reference.energy, places=3)
-        self.assertAlmostEqual(native.loudness_db, reference.loudness_db, places=1)
-        self.assertAlmostEqual(native.confidence["bpm"], reference.confidence["bpm"], places=2)
-        self.assertAlmostEqual(native.confidence["key"], reference.confidence["key"], places=2)
-        self.assertEqual(
-            [(window.kind, window.start_ms, window.end_ms) for window in native.structure],
-            [(window.kind, window.start_ms, window.end_ms) for window in reference.structure],
-        )
+        self.assertEqual(analysis.sample_rate, 44_100)
+        self.assertEqual(analysis.channels, 2)
+        self.assertAlmostEqual(analysis.duration_s, 12.0, places=1)
+        self.assertIsNotNone(analysis.bpm)
+        self.assertLess(abs(analysis.bpm - 128.0), 8.0)
+        self.assertIsNotNone(analysis.tonic)
+        self.assertIn(analysis.mode, {"major", "minor"})
+        self.assertIsNotNone(analysis.camelot)
+        self.assertGreater(analysis.energy, 0.0)
+        self.assertIsNotNone(analysis.beatgrid)
 
-    def test_native_analyzer_missing_binary_falls_back_to_python(self):
+    def test_native_analyzer_finds_drop_after_quiet_intro(self):
         import slime_audio_dj as dj
 
         with tempfile.TemporaryDirectory() as temp_dir:
             wav_path = Path(temp_dir) / "synthetic.wav"
-            self._write_synthetic_track(wav_path, seconds=6.0)
-            with patch.object(dj, "DEFAULT_NATIVE_ANALYZER", Path("/nonexistent/analyzer")):
-                analysis = dj.analyze_track(wav_path)
+            self._write_synthetic_track(wav_path, seconds=60.0, quiet_intro_s=25.0)
 
-        self.assertGreater(analysis.duration_s, 5.0)
-        self.assertIsNotNone(analysis.bpm)
+            analysis = dj.analyze_track(wav_path)
+
+        kinds = {window.kind for window in analysis.structure or []}
+        self.assertIn("intro", kinds)
+        self.assertTrue({"drop", "build"} & kinds, f"expected drop/build in {sorted(kinds)}")
+
+    def test_missing_native_analyzer_fails_loudly_without_fallback(self):
+        import slime_audio_dj as dj
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wav_path = Path(temp_dir) / "synthetic.wav"
+            self._write_synthetic_track(wav_path, seconds=2.0)
+            with patch.object(dj, "DEFAULT_NATIVE_ANALYZER", Path("/nonexistent/analyzer")):
+                with self.assertRaises(SystemExit) as raised:
+                    dj.analyze_track(wav_path)
+
+        self.assertIn("make -C native", str(raised.exception))
 
 
 if __name__ == "__main__":
