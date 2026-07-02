@@ -120,6 +120,10 @@ class Clip:
     kind: str = "song"
     attached_deck: str | None = None
     effect_parent_clip_id: str | None = None
+    # Stem selection for clip playback. The renderer honors this by premixing
+    # ready stem artifacts for the source; rendering fails loudly when the
+    # requested stems are not ready instead of silently playing the full track.
+    play_stems: tuple[str, ...] | None = None
     automations: list[Automation] = field(default_factory=list)
 
     @property
@@ -391,6 +395,13 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         raise ValueError(f"clip {clip_id} deck is required")
     if not path:
         raise ValueError(f"clip {clip_id} path is required")
+    play_stems_value = payload.get("play_stems", payload.get("enabled_stems"))
+    play_stems: tuple[str, ...] | None = None
+    if isinstance(play_stems_value, list):
+        play_stems = tuple(str(stem) for stem in play_stems_value)
+        unsupported = sorted(set(play_stems) - STEM_NAMES)
+        if unsupported:
+            raise ValueError(f"clip {clip_id} has unsupported play_stems: {', '.join(unsupported)}")
     duration = payload.get("duration_ms", payload.get("duration"))
     clip = Clip(
         id=clip_id,
@@ -410,6 +421,7 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         kind=str(payload.get("kind") or "song"),
         attached_deck=str(payload["attached_deck"]) if payload.get("attached_deck") else None,
         effect_parent_clip_id=str(payload["effect_parent_clip_id"]) if payload.get("effect_parent_clip_id") else None,
+        play_stems=play_stems,
         automations=[
             parse_automation(item, default_target=clip_id)
             for item in payload.get("automations", [])

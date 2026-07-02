@@ -26,6 +26,8 @@ Do not rely on implicit auto-crossfades. The renderer never invents fades; cross
 
 Sessions still support render-output clips and stem groups. Clips can overlap across up to four decks, and each clip can have trim, gain, EQ, filters, tempo/pitch changes, reverse/playback-rate flags, fades, and routine metadata.
 
+Clip-level `play_stems` is honored by the renderer: mixdown premixes the ready stem artifacts for that source and renders only the requested stems, and it fails loudly when the artifacts are not ready instead of silently playing the full track. New planning code should still prefer `load_track` actions for stem work; autodj beds are always stem-resolved `load_track` actions and are skipped (with a recorded reason) when the bed source has no ready stems, rather than lying about being drums-only.
+
 Common clip controls:
 
 - `start_ms` places the clip on the mix timeline.

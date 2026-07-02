@@ -95,6 +95,36 @@ def autodj_args(**overrides):
     return SimpleNamespace(**values)
 
 
+def create_ready_stem_db(temp: Path, sources: list[str]) -> Path:
+    from slime_music_library import connect
+
+    db_path = temp / "library.sqlite3"
+    conn = connect(db_path)
+    for index, source in enumerate(sources):
+        set_id = f"set-{index:03d}"
+        artifact_root = temp / "stems" / set_id
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        (artifact_root / "manifest.json").write_text("{}", encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO track_stem_sets(
+                id, duplicate_key, source_path, source_size, source_mtime, model, profile, artifact_root,
+                sample_rate, channels, duration_ms, status, error, created_at, updated_at
+            )
+            VALUES (?, NULL, ?, 1, 1, 'htdemucs', '4stem', ?, 44100, 2, 1000, 'ready', NULL, 'now', 'now')
+            """,
+            (set_id, source, str(artifact_root)),
+        )
+        for stem in ("vocals", "drums", "bass", "other"):
+            conn.execute(
+                "INSERT INTO track_stems(stem_set_id, stem_name, path) VALUES (?, ?, ?)",
+                (set_id, stem, str(artifact_root / f"{stem}.wav")),
+            )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
 def selected_track(path="/music/lead.flac"):
     return SelectedTrack(
         path=path,
@@ -372,29 +402,32 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                 )
                 for index, path in enumerate(lead_paths)
             ]
-            args = autodj_args(max_structural_beds=2)
+            db_path = create_ready_stem_db(temp, lead_paths)
+            args = autodj_args(max_structural_beds=2, db=db_path)
 
             result = add_structural_beds(session_path, selected, args)
             updated = json.loads(session_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result["added"], 2)
-        bed_clips = [clip for clip in updated["clips"] if "bed" in str(clip.get("planner_role"))]
-        self.assertEqual(len(bed_clips), 2)
-        self.assertLess(len(bed_clips), len(lead_paths))
-        used_sources = [clip["path"] for clip in bed_clips]
+        bed_actions = [action for action in updated["actions"] if "bed" in str(action.get("planner_role"))]
+        self.assertEqual(len(bed_actions), 2)
+        self.assertLess(len(bed_actions), len(lead_paths))
+        used_sources = [action["source_path"] for action in bed_actions]
         self.assertEqual(len(used_sources), len(set(used_sources)))
-        for clip in bed_clips:
-            target_id = str(clip["bed_under"])
+        for action in bed_actions:
+            self.assertEqual(action["type"], "load_track")
+            self.assertEqual(set(action["stems"]), {"vocals", "drums", "bass", "other"})
+            target_id = str(action["bed_under"])
             target_index = int(target_id.rsplit("-", 1)[1])
             adjacent = set(lead_paths[max(0, target_index - 1) : min(len(lead_paths), target_index + 2)])
-            self.assertNotIn(clip["path"], adjacent)
-            plan = clip.get("stem_layer_plan")
+            self.assertNotIn(action["source_path"], adjacent)
+            plan = action.get("stem_layer_plan")
             self.assertIsInstance(plan, dict)
             self.assertEqual(plan["source_stems"], ["drums"])
             self.assertIn("not a terminal", plan["entry_intent"])
             target = next(item for item in payload["clips"] if item["id"] == target_id)
             target_end = target["start_ms"] + target["duration_ms"]
-            self.assertLessEqual(clip["start_ms"] + clip["duration_ms"], target_end - 24_000)
+            self.assertLessEqual(action["start_ms"] + action["duration_ms"], target_end - 24_000)
         automation_roles = {automation.get("planner_role") for automation in updated["deck_automations"]}
         self.assertIn("planned-stem-layer-automation", automation_roles)
 
@@ -443,11 +476,14 @@ class SlimeAudioAutodjTests(unittest.TestCase):
                     reasons=[],
                 )
             ]
-            result = add_structural_beds(session_path, selected, autodj_args(remix_focus=True, max_structural_beds=1, bed_gain_db=-6.0))
+            db_path = create_ready_stem_db(temp, [str(temp / "plain-song.flac")])
+            result = add_structural_beds(
+                session_path, selected, autodj_args(remix_focus=True, max_structural_beds=1, bed_gain_db=-6.0, db=db_path)
+            )
             updated = json.loads(session_path.read_text(encoding="utf-8"))
 
         self.assertEqual(result["added"], 1)
-        drum_bed = next(clip for clip in updated["clips"] if clip.get("planner_role") == "drum-bed")
+        drum_bed = next(action for action in updated["actions"] if action.get("planner_role") == "drum-bed")
         self.assertEqual(drum_bed["play_stems"], ["drums"])
         self.assertGreaterEqual(drum_bed["gain_db"], -4.0)
         self.assertIn("component-aware drum bed", drum_bed["component_balance_strategy"])

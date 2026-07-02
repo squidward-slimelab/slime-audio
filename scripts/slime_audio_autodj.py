@@ -1357,6 +1357,11 @@ def add_structural_beds(
 
     lead_paths = [event_source(lead) for lead in leads]
     used_source_paths: set[str] = set()
+    # Bed stems are rendered from real stem artifacts; a bed source without
+    # ready stems would either block generation on Demucs or silently play the
+    # full track (vocals included) under the lead. Prefer ready material and
+    # skip the bed when none exists.
+    ready_paths = ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
 
     def choose_bed_source(target_index: int, lead: dict[str, Any]) -> SelectedTrack | None:
         current_path = event_source(lead)
@@ -1394,15 +1399,32 @@ def add_structural_beds(
             ]
         if not candidates:
             return None
-        return max(candidates, key=lambda source: (rhythm_bed_score(source), float(source.score or 0.0), source.duration_ms or 0))
+        return max(
+            candidates,
+            key=lambda source: (
+                source.path in ready_paths,
+                rhythm_bed_score(source),
+                float(source.score or 0.0),
+                source.duration_ms or 0,
+            ),
+        )
 
     added: list[dict[str, Any]] = []
-    deck_automations = payload.setdefault("deck_automations", [])
+    skipped: list[dict[str, Any]] = []
     bed_windows: list[tuple[int, int]] = []
     bed_targets = [(target_index, leads[target_index]) for target_index in target_indices]
     for bed_number, (target_index, lead) in enumerate(bed_targets, start=1):
         source = choose_bed_source(target_index, lead)
         if source is None:
+            continue
+        if source.path not in ready_paths:
+            skipped.append(
+                {
+                    "source": source.path,
+                    "under": lead.get("id"),
+                    "reason": "no ready stem artifacts; run scripts/slime_audio_stems.py split on the bed source first",
+                }
+            )
             continue
         used_source_paths.add(source.path)
         bed_id = f"bed-{bed_number:03d}-{slugify(source.title)[:40]}"
@@ -1520,31 +1542,27 @@ def add_structural_beds(
         bed_event["gain_db"] = float(plan["gain_db"])
         bed_event["component_balance_strategy"] = str(plan["balance_profile"])
         bed_event["stem_layer_plan"] = plan
-        if bool(getattr(args, "stem_aware_remix", False)):
-            payload = add_action(
-                payload,
-                action={
-                    "type": "load_track",
-                    **bed_event,
-                    "source_path": source.path,
-                    "at_ms": bed_start,
-                    "play_stems": play_stems,
-                },
-                db_path=args.db,
-                lock_before_ms=None,
-                force=True,
-            )
-        else:
-            payload.setdefault("clips", []).append(
-                {
-                    **bed_event,
-                    "path": source.path,
-                    "play_stems": play_stems,
-                }
-            )
+        # Beds always load as stem-resolved load_track actions. Clip-level
+        # play_stems used to be dashboard-only decoration that the renderer
+        # ignored, which is how "drums-only" beds ended up playing full songs.
+        payload = add_action(
+            payload,
+            action={
+                "type": "load_track",
+                **bed_event,
+                "source_path": source.path,
+                "at_ms": bed_start,
+                "play_stems": play_stems,
+            },
+            db_path=args.db,
+            lock_before_ms=None,
+            force=True,
+        )
         bed_windows.append((bed_start, bed_end))
         automation_points = plan["automation_points"]
-        deck_automations.extend(
+        # add_action returns a fresh payload, so resolve the automation list
+        # each time instead of holding a reference from before the copy.
+        payload.setdefault("deck_automations", []).extend(
             [
                 {
                     "target": "deck-4",
@@ -1587,7 +1605,7 @@ def add_structural_beds(
     notes["structural_bed_strategy"] = "sparse non-adjacent planned stem layers with component-aware fader/EQ balance"
     notes["structural_bed_target_count"] = target_count
     write_payload(session_path, payload)
-    return {"added": len(added), "beds": added}
+    return {"added": len(added), "beds": added, "skipped": skipped}
 
 
 def clip_start_ms(clip: dict[str, Any]) -> int:
@@ -2698,7 +2716,17 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace, *, min_sta
     target = max(targets, key=vocal_target_score) if targets else clips[-1]
     bed_start = clip_start_ms(target) + min(30_000, max(0, clip_duration_ms(target) // 4))
     bed_duration = min(96_000, max(32_000, clip_end_ms(target) - bed_start - 2_000))
-    if bed_duration >= 32_000 and not has_structural_beds:
+    creative_bed_ready = event_source(bed_source) in ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
+    if bed_duration >= 32_000 and not has_structural_beds and not creative_bed_ready:
+        failures.append(
+            {
+                "kind": "rhythm-bed",
+                "source": bed_source.get("id"),
+                "target": target.get("id"),
+                "error": "no ready stem artifacts for creative bed source; split stems first",
+            }
+        )
+    if bed_duration >= 32_000 and not has_structural_beds and creative_bed_ready:
         ensure_utility_deck(session_path, "deck-4")
         bed_id = f"autodj-bed-{slugify(str(bed_source['id']))[:32]}"
         bed_source_track = SelectedTrack(

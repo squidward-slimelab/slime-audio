@@ -1469,6 +1469,139 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertFalse(report["accepted"])
         self.assertIn("unrelated routine clips overlap the audition window", report["errors"])
 
+    def _ready_stem_db(self, temp: Path, source: Path, *, stem_frequencies: dict[str, float]) -> Path:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from slime_music_library import connect
+
+        artifact_root = temp / "stems" / "set-a"
+        artifact_root.mkdir(parents=True)
+        (artifact_root / "manifest.json").write_text("{}", encoding="utf-8")
+        for stem, frequency in stem_frequencies.items():
+            self.write_beep_track(artifact_root / f"{stem}.wav", frequency_hz=frequency, duration_s=2.0)
+        db_path = temp / "library.sqlite3"
+        conn = connect(db_path)
+        conn.execute(
+            """
+            INSERT INTO track_stem_sets(
+                id, duplicate_key, source_path, source_size, source_mtime, model, profile, artifact_root,
+                sample_rate, channels, duration_ms, status, error, created_at, updated_at
+            )
+            VALUES ('set-a', NULL, ?, 1, 1, 'htdemucs', '4stem', ?, 48000, 1, 2000, 'ready', NULL, 'now', 'now')
+            """,
+            (str(source), str(artifact_root)),
+        )
+        for stem in ("vocals", "drums", "bass", "other"):
+            conn.execute(
+                "INSERT INTO track_stems(stem_set_id, stem_name, path) VALUES ('set-a', ?, ?)",
+                (stem, str(artifact_root / f"{stem}.wav")),
+            )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_materialize_clip_stem_mixes_substitutes_ready_stem_premix(self):
+        from slime_audio_session_mixdown import materialize_clip_stem_mixes
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "song.flac"
+            source.write_bytes(b"fake")
+            db_path = self._ready_stem_db(
+                temp,
+                source,
+                stem_frequencies={"vocals": 440.0, "drums": 220.0, "bass": 110.0, "other": 660.0},
+            )
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-1",
+                                "path": str(source),
+                                "start_ms": 0,
+                                "duration_ms": 1_000,
+                                "play_stems": ["drums", "bass"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+            work = temp / "work"
+            work.mkdir()
+
+            materialized = materialize_clip_stem_mixes(session, db_path, work, 48_000, 1)
+
+            clip = materialized.clips[0]
+            self.assertNotEqual(clip.path, str(source))
+            self.assertIsNone(clip.play_stems)
+            premix = Path(clip.path)
+            self.assertTrue(premix.exists())
+            sample_rate, samples = self.read_wav_samples(premix)
+            self.assertEqual(sample_rate, 48_000)
+            self.assertGreater(max(abs(sample) for sample in samples), 0.05)
+
+    def test_materialize_clip_stem_mixes_fails_without_ready_stems(self):
+        from slime_audio_session_mixdown import materialize_clip_stem_mixes
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {
+                                "id": "bed",
+                                "deck": "deck-1",
+                                "path": str(temp / "song.flac"),
+                                "start_ms": 0,
+                                "duration_ms": 1_000,
+                                "play_stems": ["drums"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+            with self.assertRaises(ValueError) as raised:
+                materialize_clip_stem_mixes(session, temp / "missing.sqlite3", temp, 48_000, 1)
+
+        self.assertIn("no ready stem artifacts", str(raised.exception))
+
+    def test_materialize_clip_stem_mixes_ignores_plain_clips(self):
+        from slime_audio_session_mixdown import materialize_clip_stem_mixes
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [
+                            {"id": "song", "deck": "deck-1", "path": str(temp / "song.flac"), "start_ms": 0, "duration_ms": 1_000}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            session = load_session(session_path)
+
+            materialized = materialize_clip_stem_mixes(session, temp / "missing.sqlite3", temp, 48_000, 1)
+
+        self.assertIs(materialized, session)
+
 
 if __name__ == "__main__":
     unittest.main()

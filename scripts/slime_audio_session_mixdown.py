@@ -13,7 +13,22 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from slime_audio_session import Automation, AutomationPoint, Clip, EffectEvent, MicLeanIn, MixSession, SlipEvent, StemGroup, StemState, load_payload, load_session, parse_ms
+from slime_audio_session import (
+    DEFAULT_LIBRARY_DB,
+    Automation,
+    AutomationPoint,
+    Clip,
+    EffectEvent,
+    MicLeanIn,
+    MixSession,
+    SlipEvent,
+    StemGroup,
+    StemState,
+    load_payload,
+    load_session,
+    parse_ms,
+    ready_stem_artifacts,
+)
 
 
 BED_ROLE_NAMES = {"rhythm-bed", "bed", "mashup-bed"}
@@ -954,6 +969,62 @@ def build_filter_complex(
     return ";".join(filters)
 
 
+def materialize_clip_stem_mixes(
+    session: MixSession,
+    db_path: Path,
+    temp_dir: Path,
+    sample_rate: int,
+    channels: int,
+) -> MixSession:
+    """Replace clips that request play_stems with a premix of their ready stems.
+
+    Clips are rendered from one source input, so stem selection has to be
+    resolved before the filter graph is built. A clip that asks for stems that
+    are not ready is a hard error: silently rendering the full track would put
+    unplanned vocals/bass under the mix and make the stem metadata a lie.
+    """
+    clips = list(session.clips)
+    changed = False
+    premix_cache: dict[tuple[str, tuple[str, ...]], str] = {}
+    for index, clip in enumerate(clips):
+        stems = tuple(sorted(set(clip.play_stems or ())))
+        if not stems:
+            continue
+        cache_key = (clip.path, stems)
+        premixed = premix_cache.get(cache_key)
+        if premixed is None:
+            artifacts = ready_stem_artifacts(db_path, clip.path)
+            if artifacts is None:
+                raise ValueError(
+                    f"clip {clip.id} requests stems {list(stems)} but no ready stem artifacts exist for "
+                    f"{clip.path}; run scripts/slime_audio_stems.py split first or load it as a load_track action"
+                )
+            stem_paths = [artifacts["stems"][name] for name in stems]
+            premix_path = temp_dir / f"clip-stem-premix-{index:03d}.wav"
+            command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+            for path in stem_paths:
+                command.extend(["-i", path])
+            command.extend(
+                [
+                    "-filter_complex",
+                    f"amix=inputs={len(stem_paths)}:duration=longest:normalize=0",
+                    "-ac",
+                    str(channels),
+                    "-ar",
+                    str(sample_rate),
+                    str(premix_path),
+                ]
+            )
+            subprocess.run(command, check=True)
+            premixed = str(premix_path)
+            premix_cache[cache_key] = premixed
+        clips[index] = replace(clip, path=premixed, play_stems=None)
+        changed = True
+    if not changed:
+        return session
+    return replace(session, clips=clips)
+
+
 def ffmpeg_command(
     session: MixSession,
     lean_in_audio: dict[str, Path],
@@ -1456,6 +1527,7 @@ def main() -> int:
     parser.add_argument("--fail-balance-audit", action="store_true", help="Exit non-zero when --audit-balance finds buried beds or token filters.")
     parser.add_argument("--min-bed-vs-full-db", type=float, default=-16.0, help="Minimum acceptable rendered bed mean loudness relative to the full overlap.")
     parser.add_argument("--min-filter-sweep-hz", type=float, default=300.0, help="Minimum low/high-pass movement before a bed filter is treated as token/static.")
+    parser.add_argument("--db", type=Path, default=DEFAULT_LIBRARY_DB, help="Music library DB used to resolve ready stem artifacts for clip play_stems.")
     parser.add_argument("--skip-tts", action="store_true", help="Use tiny silent lean-in placeholders; useful for command validation.")
     parser.add_argument("--verify", action=argparse.BooleanOptionalAction, default=True, help="Probe rendered duration and reject silent output.")
     parser.add_argument("--dry-run", action="store_true")
@@ -1477,6 +1549,8 @@ def main() -> int:
     render_start_ms = parse_ms(args.from_time, "render start")
     session = shift_session_window(load_session(args.session), render_start_ms, duration_ms)
     with tempfile.TemporaryDirectory(prefix="slime-session-mixdown-") as temp:
+        if not args.dry_run:
+            session = materialize_clip_stem_mixes(session, args.db, Path(temp), args.sample_rate, args.channels)
         lean_audio = prepare_lean_in_audio(
             session,
             Path(temp),
@@ -1517,9 +1591,12 @@ def main() -> int:
             verify_rendered_audio(args.output)
             audio_report = rendered_audio_report(args.output)
         if args.audit_balance:
+            audit_session = materialize_clip_stem_mixes(
+                load_session(args.session), args.db, Path(temp), args.sample_rate, args.channels
+            )
             balance_report = rendered_balance_audit(
                 payload,
-                load_session(args.session),
+                audit_session,
                 Path(temp),
                 from_ms=render_start_ms,
                 duration_ms=duration_ms,
