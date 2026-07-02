@@ -477,7 +477,10 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
     stem_remix_mode = bool(getattr(args, "stem_aware_remix", False) and getattr(args, "remix_focus", False))
     if stem_remix_mode:
         max_per_artist = max(max_per_artist, 3)
-    target_tracks_before_runway_stop = min(args.max_tracks, args.min_tracks + (2 if stem_remix_mode else 0))
+    # Per-track structure rejection is the norm now (no fallback windows), so
+    # always carry a small surplus past min_tracks or a single rejected track
+    # fails the whole selection.
+    target_tracks_before_runway_stop = min(args.max_tracks, args.min_tracks + 2 + (2 if stem_remix_mode else 0))
     for row in pool:
         edm_bed = is_edm_bed_candidate(row)
         row["edm_bed_discretion"] = edm_bed
