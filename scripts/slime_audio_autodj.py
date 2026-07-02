@@ -75,14 +75,9 @@ DEFAULT_SCRATCH_SOURCE_FILES = [
     DEFAULT_RUNTIME / "stem-recovery-set-20260611-keyfixed-actions.json",
     DEFAULT_RUNTIME / "phrase-anchor-selected-paths.txt",
 ]
-DEFAULT_VOCAL_DROP_TEXTS = [
-    "quick squid note. this one is actually moving now.",
-    "tiny drop. the training wheels are off and frankly it is about time.",
-    "control room bulletin. fresh stems are online, try not to look surprised.",
-    "small interruption. this is what happens when the selector stops eating old homework.",
-    "deck five check. bass is present, dignity is still pending.",
-    "brief announcement. the mix has entered its legally interesting section.",
-]
+# Mic lines are authored live by the DJ agent driving the skill, never by this
+# script. Autodj only publishes commentary_slots (timing plus track context) in
+# its plan output so the agent can write and place its own lean-ins.
 DEFAULT_SKIP_TERMS = [
     "christmas",
     "copy",
@@ -1059,48 +1054,34 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
     else:
         timeline_events = lead_clips
         actions = []
-    drop_count_arg = getattr(args, "vocal_drop_count", None)
-    vocal_drop_count = int(drop_count_arg) if drop_count_arg is not None else (3 if bool(args.remix_focus) else 1)
     lead_starts = [
         int(event.get("at_ms", event.get("start_ms", 0)) or 0)
         for event in (lead_actions or lead_clips)
     ]
+    # No canned mic text. Publish hosting slots with track context so the DJ
+    # agent can author its own lean-ins over the handoffs it cares about.
     mic_lean_ins: list[dict[str, Any]] = []
-    last_drop_ms = -10**9
+    commentary_slots: list[dict[str, Any]] = []
+    arranged = leads[: args.max_tracks]
     for index, start_ms in enumerate(lead_starts[1:], start=1):
-        if len(mic_lean_ins) >= max(0, vocal_drop_count):
-            break
-        drop_start_ms = start_ms + 12_000
-        if drop_start_ms - last_drop_ms < 75_000:
+        incoming = arranged[index] if index < len(arranged) else None
+        if incoming is None:
             continue
-        text = DEFAULT_VOCAL_DROP_TEXTS[(index - 1) % len(DEFAULT_VOCAL_DROP_TEXTS)]
-        duck_ms = int(getattr(args, "vocal_drop_duck_ms", 3200) or 3200)
-        mic_lean_ins.append(
+        incoming_analysis = analyses.get(incoming.path)
+        commentary_slots.append(
             {
-                "id": f"autodj-vocal-drop-{index:03d}",
-                "deck": VOCAL_DECK,
-                "start": format_ms(drop_start_ms),
-                "text": text,
-                "volume": float(getattr(args, "vocal_drop_volume", 1.65) or 1.65),
-                "ducking": {
-                    "target": "master",
-                    "param": "duck_volume",
-                    "points": [
-                        {"at": max(0, drop_start_ms - 250), "value": float(getattr(args, "vocal_drop_duck_volume", 0.42) or 0.42)},
-                        {"at": drop_start_ms + duck_ms, "value": 1.0},
-                    ],
-                },
-                "lowpass": {
-                    "target": "master",
-                    "param": "lowpass_hz",
-                    "points": [
-                        {"at": max(0, drop_start_ms - 250), "value": float(getattr(args, "vocal_drop_lowpass_hz", 1400.0) or 1400.0)},
-                        {"at": drop_start_ms + duck_ms, "value": 22050},
-                    ],
+                "at_ms": start_ms + 12_000,
+                "reason": "incoming lead handoff",
+                "incoming": {
+                    "artist": incoming.artist,
+                    "title": incoming.title,
+                    "path": incoming.path,
+                    "bpm": incoming_analysis.bpm if incoming_analysis else None,
+                    "camelot": incoming_analysis.camelot if incoming_analysis else None,
+                    "energy": incoming_analysis.energy if incoming_analysis else None,
                 },
             }
         )
-        last_drop_ms = drop_start_ms
 
     payload = {
         "version": 1,
@@ -1133,7 +1114,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         "selected_material": [asdict(track) for track in selected],
         "lead_count": len(lead_actions or lead_clips),
         "bed_count": 0,
-        "vocal_drop_count": len(mic_lean_ins),
+        "commentary_slots": commentary_slots,
         "max_lead_clip_ms": args.max_lead_clip_ms,
         "fast_section_mode": fast_mode,
         "stem_aware_load_tracks": bool(getattr(args, "stem_aware_remix", False)),
@@ -3239,6 +3220,11 @@ def extend_set(args: argparse.Namespace) -> int:
             stage = "merge"
             merged = merge_block_into_payload(payload, block, offset_ms=total_ms)
             notes = merged.setdefault("notes", {})
+            block_commentary_slots = [
+                {**slot, "at_ms": int(slot.get("at_ms") or 0) + total_ms}
+                for slot in (block.get("notes") or {}).get("commentary_slots", [])
+            ]
+            notes.setdefault("commentary_slots", []).extend(block_commentary_slots)
             extensions = notes.setdefault("extensions", [])
             extensions.append(
                 {
@@ -3301,6 +3287,7 @@ def extend_set(args: argparse.Namespace) -> int:
                 "extension_at_ms": total_ms,
                 "playhead_ms": playhead_ms,
                 "lock_before_ms": lock_before_ms,
+                "commentary_slots": block_commentary_slots,
                 "planner": planner,
                 "structural": structural,
                 "creative": creative,
@@ -3495,6 +3482,7 @@ def continue_set(args: argparse.Namespace) -> int:
                 "decision_audit": decision_audit,
                 "decision_audit_guard": decision_audit_guard,
                 "stem_readiness": stem_readiness,
+                "commentary_slots": (payload.get("notes") or {}).get("commentary_slots", []),
                 "tracks": [asdict(track) for track in selected],
                 "structure_rejections": structure_rejections,
                 "analysis_coverage": {"selected": len(selected), "available": len(analyses)},
@@ -3693,11 +3681,6 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
     parser.add_argument("--bed-highpass-hz", type=float, default=90.0)
     parser.add_argument("--max-structural-beds", type=int, default=4)
-    parser.add_argument("--vocal-drop-count", type=int)
-    parser.add_argument("--vocal-drop-volume", type=float, default=1.65)
-    parser.add_argument("--vocal-drop-duck-volume", type=float, default=0.42)
-    parser.add_argument("--vocal-drop-lowpass-hz", type=float, default=1400.0)
-    parser.add_argument("--vocal-drop-duck-ms", type=int, default=3200)
     parser.add_argument("--routine-every", type=int, default=3)
     parser.add_argument("--min-creative-moves", type=int, default=2)
     parser.add_argument("--min-vanilla-check-ms", type=int, default=90_000)

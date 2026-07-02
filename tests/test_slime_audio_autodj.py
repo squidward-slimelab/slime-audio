@@ -76,11 +76,6 @@ def autodj_args(**overrides):
         "scratch_material_penalty": 0.8,
         "recent_material_policy": "penalty",
         "db": Path("/missing/library.sqlite3"),
-        "vocal_drop_count": None,
-        "vocal_drop_volume": 1.65,
-        "vocal_drop_duck_volume": 0.42,
-        "vocal_drop_lowpass_hz": 1400.0,
-        "vocal_drop_duck_ms": 3200,
         "runner_single_window": True,
         "bed_duration_ms": 72_000,
         "bed_trim_start_ms": 30_000,
@@ -1030,7 +1025,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         self.assertEqual([track.title for track in selected], ["Track 0", "Track 1", "Track 2", "Track 3"])
 
-    def test_remix_session_payload_adds_multiple_vocal_drops_on_vocal_deck(self):
+    def test_session_payload_publishes_commentary_slots_instead_of_canned_drops(self):
         tracks = [
             selected_track("/music/one.flac"),
             selected_track("/music/two.flac"),
@@ -1041,15 +1036,20 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             replace(track, title=f"Lead {index}", artist=f"Artist {index}", path=f"/music/lead-{index}.flac")
             for index, track in enumerate(tracks, start=1)
         ]
-        args = autodj_args(remix_focus=True, vocal_drop_count=3, min_tracks=4, max_tracks=4, base_overlap_ms=0)
+        args = autodj_args(remix_focus=True, min_tracks=4, max_tracks=4, base_overlap_ms=0)
 
         payload = session_payload(tracks, args, analyses={track.path: analysis(track.path) for track in tracks})
 
-        self.assertEqual(len(payload["mic_lean_ins"]), 3)
-        self.assertTrue(all(drop["deck"] == "deck-5" for drop in payload["mic_lean_ins"]))
+        # Mic text is authored live by the DJ agent; the script only publishes
+        # hosting slots with track context.
+        self.assertEqual(payload["mic_lean_ins"], [])
+        slots = payload["notes"]["commentary_slots"]
+        self.assertEqual(len(slots), 3)
         self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-5"], "THRU")
-        self.assertEqual(payload["notes"]["vocal_drop_count"], 3)
-        self.assertTrue(all("ducking" in drop and "lowpass" in drop for drop in payload["mic_lean_ins"]))
+        for slot in slots:
+            self.assertGreater(slot["at_ms"], 0)
+            self.assertTrue(slot["incoming"]["artist"].startswith("Artist"))
+            self.assertEqual(slot["incoming"]["bpm"], 120.0)
 
     def test_vanilla_lead_guard_rejects_untouched_long_lead(self):
         with tempfile.TemporaryDirectory() as temp_dir:

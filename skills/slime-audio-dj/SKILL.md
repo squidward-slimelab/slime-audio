@@ -591,11 +591,15 @@ When playback skips, a tray update fails, or a receiver seems wedged, verify rec
 
 ## Commentary
 
-The DJ should host the set, not just play files.
+The DJ should host the set, not just play files. Hosting is on by default; do not wait for the operator to ask for mic work.
+
+Every mic line is authored by you, live, for this set. No tool in this repo writes mic text, and none should: autodj publishes `commentary_slots` in its plan output (handoff timing plus incoming artist/title/BPM/Camelot/energy) as raw material, and you turn the moments you care about into lean-ins with your own words via `slime_audio_lean_ins.py` or the commentary planner. Templated or reused lines read as canned within two drops; write fresh ones each time.
 
 - Prepare a short intro drop near the start of most sets.
-- Add tasteful lean-ins every few minutes, with silence between them.
+- Add tasteful lean-ins every few minutes, with silence between them. After `autodj continue` or `extend`, read `commentary_slots` from the plan and author drops for the best handoffs; skip slots that don't need a voice.
 - Keep commentary short and focused on the music: mood, texture, rhythm, genre lineage, energy, transition intent, or why the next track fits.
+- Never talk about talking. No mic checks, no "quick note", no jokes about being a DJ or about the mix existing, no status updates about stems or decks. If a line would still make sense with no music playing, it is the wrong line.
+- Hype the actual records: name the incoming artist or track when it earns it, call the tempo or energy move, tease the drop, or point at the bass/filter trade that is about to happen. Ground every claim in known facts — artist, title, BPM, key, energy, and what the arrangement is doing; never invent artist trivia.
 - Use artist, lyrics, and release context when available, but verify uncertain facts before saying them.
 - Look ahead for likely tension points using energy, BPM, key relation, beat offset, track position, and transition notes.
 - Prefer `scripts/slime_audio_commentary_planner.py --session runtime/mix-session.json --state runtime/mix-session-state.json --tension-plan runtime/tension-windows.json` for live sets. It writes future mic lean-ins and `runtime/commentary-plan.jsonl` without restarting playback.
