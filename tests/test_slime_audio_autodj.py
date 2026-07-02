@@ -2114,6 +2114,36 @@ class MasterTempoPayloadTests(unittest.TestCase):
         self.assertEqual(lead["tempo_shift_pct"], 0.0)
         self.assertEqual(lead["source_bpm"], 120.0)
 
+    def test_slow_start_advisory_fires_for_big_unanalyzed_handpick(self):
+        with tempfile.TemporaryDirectory() as temp:
+            from slime_music_library import connect as library_connect
+
+            db_path = Path(temp) / "library.sqlite3"
+            conn = library_connect(db_path)
+            conn.execute("INSERT INTO sources (id, server, share, root, last_seen) VALUES (1, 'test', 'music', '/music', 1)")
+            conn.execute(
+                """
+                INSERT INTO files (source_id, path, rel_path, directory, filename, ext, size, mtime,
+                                   title_guess, artist_guess, album_guess, normalized_title, normalized_artist,
+                                   duplicate_key, quality_score, scanned_at)
+                VALUES (1, '/music/lead-0.flac', 'lead-0.flac', '/music', 'lead-0.flac', 'flac', 1, 1,
+                        'Lead 0', 'Artist', 'Album', 'lead 0', 'artist', 'lead-0', 1, 1)
+                """
+            )
+            conn.execute("INSERT INTO track_tunebat (duplicate_key, bpm, updated_at) VALUES ('lead-0', 120.0, 1)")
+            conn.commit()
+            conn.close()
+            tracks = [selected_track(f"/music/lead-{index}.flac") for index in range(10)]
+            args = autodj_args(db=db_path, track=[track.path for track in tracks])
+            advisory = autodj.slow_start_advisory_for(tracks, args)
+            self.assertIsNotNone(advisory)
+            self.assertEqual(advisory["guard"], "time-to-audio")
+            self.assertIn("9 hand-picked tracks", advisory["warning"])
+            # Mechanical selection never trips it, nor do small analyzed lists.
+            args_mechanical = autodj_args(db=db_path)
+            self.assertIsNone(autodj.slow_start_advisory_for(tracks, args_mechanical))
+            self.assertIsNone(autodj.slow_start_advisory_for(tracks[:3], args))
+
     def test_master_tempo_bands_include_octaves(self):
         bands = autodj.master_tempo_bands(90.0, 16.0)
         self.assertEqual(len(bands), 3)

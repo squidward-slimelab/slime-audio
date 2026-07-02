@@ -2873,6 +2873,9 @@ def continue_set(args: argparse.Namespace) -> int:
         try:
             selected = select_tracks(args)
             stage = "analysis"
+            slow_start_advisory = slow_start_advisory_for(selected, args)
+            if slow_start_advisory is not None:
+                print(slow_start_advisory["warning"], file=sys.stderr, flush=True)
             analyses = load_or_analyze_selected(selected, args)
             stage = "filter_defensible_sources"
             selected, structure_rejections = filter_defensible_source_tracks(selected, analyses, args)
@@ -2886,12 +2889,30 @@ def continue_set(args: argparse.Namespace) -> int:
                 raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
             stage = "structural_beds"
             structural = add_structural_beds(session_path, selected, args)
+            if not structural.get("added"):
+                # Bed material selection is genre-keyword gated, so quiet crates
+                # produce none mechanically. Surface it for the DJ to decide on
+                # purpose instead of shipping an unlayered set by accident.
+                advisory_note = {
+                    "guard": "beds",
+                    "warning": (
+                        "no stem/bed layers in this set (mechanical bed selection found no rhythm material). "
+                        "If the vibe allows, layer a key/tempo-matched bed under a long lead or two with "
+                        "live_edit add-action play_stems; if restraint fits the vibe, keep it sparse on purpose."
+                    ),
+                }
+            else:
+                advisory_note = None
             # Two things gate playback: the session must render (below) and
             # overlapping music must not audibly clash (here). Everything else
             # is advice for the DJ agent, reported in the plan and dashboard.
             stage = "harmonic_guard"
             harmonic_guard = validate_harmonic_overlaps(session_path, args)
             advisories: list[dict[str, Any]] = []
+            if slow_start_advisory is not None:
+                advisories.append(slow_start_advisory)
+            if advisory_note is not None:
+                advisories.append(advisory_note)
             args.require_stem_loads = bool(args.stem_aware_remix) and not payload.get("notes", {}).get("stem_split_queued")
             guards = {
                 "harmonic_guard": harmonic_guard,
@@ -2964,6 +2985,30 @@ def continue_set(args: argparse.Namespace) -> int:
             raise
     finally:
         os.close(lock_fd)
+
+
+def slow_start_advisory_for(selected: list[SelectedTrack], args: argparse.Namespace, *, threshold: int = 8) -> dict[str, Any] | None:
+    """A big hand-picked list of unanalyzed tracks means minutes of silence
+    before first audio. Advise the two-phase start before the wait begins."""
+    if not getattr(args, "track", None):
+        return None
+    conn = connect(args.db)
+    missing = [
+        track.path
+        for track in selected
+        if (row := conn.execute("SELECT tunebat_bpm FROM tracks WHERE preferred_path = ?", (track.path,)).fetchone()) is None
+        or row[0] is None
+    ]
+    if len(missing) < threshold:
+        return None
+    return {
+        "guard": "time-to-audio",
+        "warning": (
+            f"{len(missing)} hand-picked tracks need fresh BPM/key analysis before any audio starts. "
+            "Two-phase start beats a silent room: launch a short opener from analyzed material now, "
+            "then append this list behind the playhead with extend --track."
+        ),
+    }
 
 
 def run_advisory_guard(name: str, guard, session_path: Path, args: argparse.Namespace, advisories: list[dict[str, Any]]) -> dict[str, Any]:

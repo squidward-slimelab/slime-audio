@@ -77,24 +77,35 @@ the most interesting mixes.
   (and when warranted, downloaded, scanned, analyzed) material the library lacked.
   Grade the consideration, not the download count.
 
-### 5. Motion — 15
+### 5. Motion & hosting — 15
 
 - Automation audibly moves: filter rides into transitions, EQ trades when voices
-  collide, bass swapped on phrase boundaries. A static carve is not a ride.
+  collide, bass swapped on phrase boundaries. A static carve is not a ride. The
+  master tempo knob counts here when ridden with intent (an energy descent eased
+  across a set is an arc move; an arbitrary wobble is noise).
 - Effects are punctuation — beat-synced throws on phrase exits, a wash into a
   breakdown — one gesture per phrase, each with a job.
+- **Mic drops are hosting, and hosting is craft.** When the vibe calls for a
+  voice, good drops score: authored in the DJ's own words for *this* moment,
+  short, spaced well apart, timed into gaps (never over a vocal), and about the
+  music — naming an incoming record when it earns it, calling the energy move,
+  teasing a drop. A great set with a dead mic in a room that wanted hosting
+  leaves these points on the table.
 - Restraint is graded as motion when the vibe demands it: for a sleep set, the
-  discipline *not* to decorate scores here. More moves ≠ more points, ever.
-- Objective signals: `deck_automations` shape (multi-point ramps vs flat), effect
-  actions, their placement relative to transitions.
+  discipline *not* to decorate — and total mic silence — scores here. More
+  moves ≠ more points, ever.
+- Objective signals: `deck_automations` shape (multi-point ramps vs flat),
+  `master_bpm_automation`, effect actions and their placement relative to
+  transitions, `mic_lean_ins` timing against vocal windows.
 
 ### 6. Clean execution — 10
 
 - Renders valid; no key clashes on real overlaps; boundaries gapless; no dead air or
   unexplained gain sag — if the record dips, the listener hears why.
-- Mic discipline: every line agent-authored, short, spaced, about the music — or total
-  silence where the vibe demands it (sleep/background sets). One canned-sounding line
-  zeroes this category's mic component.
+- Mic hygiene (the craft is graded under *Motion & hosting*; this is the floor):
+  every line agent-authored — one canned or templated-sounding line zeroes this
+  category's mic component and caps hosting at 0. Never talking about talking,
+  never invented artist facts, ducking always applied.
 - Objective signals: `validate` result, runner log boundary events, failure audits,
   `mic_lean_ins` content.
 
