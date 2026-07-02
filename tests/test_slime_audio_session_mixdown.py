@@ -967,7 +967,14 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("volume=0.141925", filters)
         self.assertNotIn("aecho=", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=3.000", filters)
-        self.assertIn("atrim=duration=14.000", filters)
+        # Tap tails are bounded BEFORE adelay: atrim after adelay discards the
+        # inserted delay silence and lands every tap at t=0.
+        self.assertIn("atrim=duration=4.625,adelay=9375:all=1", filters)
+        self.assertIn("atrim=duration=1.250,adelay=12750:all=1", filters)
+        for segment in filters.split(";"):
+            if "adelay=" in segment and "echoeffect" in segment:
+                delay_pos = segment.index("adelay=")
+                self.assertNotIn("atrim=", segment[delay_pos:])
         self.assertIn("lowpass=f=4200.000", filters)
         self.assertEqual(session_duration_ms(session), 25_000)
 
@@ -1011,13 +1018,13 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
                 encoding="utf-8",
             )
             session = load_session(session_path)
-            filters = build_filter_complex(session, {}, 48_000, 2)
+            filters = build_filter_complex(session, {}, 48_000, 2, reverb_ir_indices={"lead-reverb": 7})
 
         self.assertIn("atrim=start=16.000:duration=2.000", filters)
         self.assertIn("apad=pad_dur=4.000", filters)
-        self.assertIn("ladspa=file=/usr/lib/ladspa/zita-reverbs.so:plugin=zita-reverb", filters)
-        self.assertIn("controls='0.080|220|3.351|2.949|5223.303|160|0|2500|0|1'", filters)
+        self.assertIn("[7:a]afir=gtype=none", filters)
         self.assertIn("volume=0.380000", filters)
+        self.assertNotIn("ladspa", filters)
         self.assertNotIn("afade=t=out:st=2.000:d=4.000", filters)
         self.assertIn("atrim=duration=6.000", filters)
         self.assertIn("lowpass=f=5200.000", filters)
@@ -1498,6 +1505,136 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         conn.commit()
         conn.close()
         return db_path
+
+    def test_reverb_ir_is_deterministic_and_energy_normalized(self):
+        from slime_audio_session import EffectEvent
+        from slime_audio_session_mixdown import write_reverb_ir
+
+        effect = EffectEvent(
+            id="fx", type="reverb", target="lead", start_ms=0, duration_ms=1_000, tail_ms=2_000, room_size=0.6, damping=0.4
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            write_reverb_ir(effect, temp / "a.wav", 48_000, 2)
+            write_reverb_ir(effect, temp / "b.wav", 48_000, 2)
+            self.assertEqual((temp / "a.wav").read_bytes(), (temp / "b.wav").read_bytes())
+            sample_rate, samples = self.read_wav_samples(temp / "a.wav")
+            energy = math.sqrt(sum(value * value for value in samples))
+            self.assertGreater(energy, 0.3)
+            self.assertLess(energy, 3.0)
+
+    def _write_event_track(self, path: Path, *, events: list[tuple[float, float, float]], duration_s: float = 8.0) -> int:
+        """Stereo track that is silent except for (start_s, end_s, frequency_hz) events."""
+        sample_rate = 48_000
+        frames = bytearray()
+        for index in range(int(sample_rate * duration_s)):
+            t = index / sample_rate
+            value = 0.0
+            for start_s, end_s, frequency_hz in events:
+                if start_s <= t < end_s:
+                    value = 0.6 * math.sin(2 * math.pi * frequency_hz * (t - start_s))
+            packed = struct.pack("<h", int(max(-1.0, min(1.0, value)) * 32767))
+            frames += packed + packed
+        with wave.open(str(path), "wb") as audio:
+            audio.setnchannels(2)
+            audio.setsampwidth(2)
+            audio.setframerate(sample_rate)
+            audio.writeframes(bytes(frames))
+        return sample_rate
+
+    def _render_effect_session(self, temp: Path, source: Path, effect: dict, sample_rate: int) -> list[float]:
+        from slime_audio_session import load_session
+        from slime_audio_session_mixdown import prepare_reverb_irs
+
+        session_path = temp / "session.json"
+        session_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "decks": ["deck-1"],
+                    "clips": [{"id": "lead", "deck": "deck-1", "path": str(source), "start_ms": 0, "duration_ms": 8_000}],
+                    "effects": [effect],
+                }
+            ),
+            encoding="utf-8",
+        )
+        session = load_session(session_path)
+        output = temp / "out.wav"
+        command = ffmpeg_command(
+            session, {}, output, sample_rate, 2, reverb_irs=prepare_reverb_irs(session, temp, sample_rate, 2)
+        )
+        subprocess.run(spill_filter_complex_to_script(command, temp / "fc.txt"), check=True)
+        _rate, samples = self.read_wav_samples(output)
+        return samples
+
+    @staticmethod
+    def _segment_rms(samples: list[float], rate: int, t0: float, t1: float) -> float:
+        segment = samples[int(t0 * rate) : int(t1 * rate)]
+        return math.sqrt(sum(value * value for value in segment) / max(1, len(segment)))
+
+    def test_rendered_echo_taps_land_at_delay_times(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "beep.wav"
+            rate = self._write_event_track(source, events=[(2.0, 2.12, 880.0)])
+            samples = self._render_effect_session(
+                temp,
+                source,
+                {
+                    "id": "fx",
+                    "type": "echo",
+                    "target": "lead",
+                    "start_ms": 2_000,
+                    "duration_ms": 300,
+                    "tail_ms": 2_000,
+                    "delay_ms": 400,
+                    "feedback": 0.5,
+                    "wet": 0.8,
+                    "gain_db": 0,
+                },
+                rate,
+            )
+            dry = self._segment_rms(samples, rate, 2.0, 2.12)
+            tap1 = self._segment_rms(samples, rate, 2.4, 2.52)
+            tap2 = self._segment_rms(samples, rate, 2.8, 2.92)
+            silence = self._segment_rms(samples, rate, 0.5, 1.5)
+
+        self.assertGreater(dry, 0.25)
+        self.assertGreater(tap1, 0.1, "first echo tap must be audible at start+delay")
+        self.assertGreater(tap2, 0.04, "second echo tap must be audible at start+2*delay")
+        self.assertAlmostEqual(tap2 / tap1, 0.5, delta=0.15)
+        self.assertLess(silence, 0.01)
+
+    def test_rendered_reverb_adds_decaying_tail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "tone.wav"
+            # Tone from 1.0-2.0s only: everything after 2.0s is pure effect tail.
+            rate = self._write_event_track(source, events=[(1.0, 2.0, 440.0)])
+            samples = self._render_effect_session(
+                temp,
+                source,
+                {
+                    "id": "fx",
+                    "type": "reverb",
+                    "target": "lead",
+                    "start_ms": 1_000,
+                    "duration_ms": 1_000,
+                    "tail_ms": 3_000,
+                    "wet": 0.8,
+                    "gain_db": 0,
+                    "room_size": 0.6,
+                    "damping": 0.4,
+                },
+                rate,
+            )
+            early_tail = self._segment_rms(samples, rate, 2.1, 2.9)
+            late_tail = self._segment_rms(samples, rate, 3.4, 4.2)
+            after_tail = self._segment_rms(samples, rate, 6.0, 7.0)
+
+        self.assertGreater(early_tail, 0.02, "reverb tail must be audible after the dry tone stops")
+        self.assertGreater(early_tail, late_tail, "reverb tail must decay")
+        self.assertLess(after_tail, 0.005)
 
     def test_materialize_clip_stem_mixes_substitutes_ready_stem_premix(self):
         from slime_audio_session_mixdown import materialize_clip_stem_mixes

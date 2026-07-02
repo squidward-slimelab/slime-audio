@@ -104,7 +104,7 @@ Scratch clips should be sparse and continuous, roughly 140-260 ms. Micro-slicing
 Effects live in the session top-level `effects` collection and can target a clip, `deck:<name>`, `master`, or `all`.
 
 - `echo`: clean delayed wet taps, decayed by `feedback`, optionally low-passed. It should sound like repeats, not comb-filter wobble.
-- `reverb`: wet spatial copy using Audacity-style defaults/presets and the local `zita-reverb` LADSPA plugin when available.
+- `reverb`: wet spatial copy via built-in convolution with a parameter-derived impulse response; presets map to room/damping starting points.
 - `vinyl_brake`: replacement effect. The dry target must mute during the brake window while the slowed copy plays.
 
 Routine-generated scratch/brake artifacts are `effect-track` clips attached with `attached_deck` and `effect_parent_clip_id`.

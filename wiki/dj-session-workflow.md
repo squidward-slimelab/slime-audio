@@ -156,7 +156,7 @@ Use EQ/filter carving before hiding a bed with fader level. If a proof still sou
 Use the session tools for effects and proofs. Important primitives:
 
 - `echo` renders clean delayed wet taps.
-- `reverb` renders a wet effect copy, typically through LADSPA `zita-reverb`.
+- `reverb` renders a wet effect copy by convolving the source window with an impulse response synthesized from the effect's room/damping/feedback parameters (deterministic, no external plugins).
 - `vinyl_brake` renders deterministic speed/pitch slowdown.
 - `scratch-cuts` uses attached effect-track clips on the scratched deck and locally ducks the parent.
 - `loop-roll` repeats a one-beat source slice as attached effect-track clips and records a slip event so the source resumes in time.

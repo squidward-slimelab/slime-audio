@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import subprocess
@@ -639,32 +640,71 @@ def stem_dynamic_filters(session: MixSession, group: StemGroup, stem_name: str, 
     return filters
 
 
-ZITA_REVERB_LADSPA = "/usr/lib/ladspa/zita-reverbs.so"
-
-
-def zita_reverb_filter(effect: EffectEvent) -> str:
+def reverb_ir_parameters(effect: EffectEvent) -> dict[str, float]:
     room = max(0.1, min(1.0, effect.room_size))
     damping = max(0.0, min(1.0, effect.damping))
-    pre_delay = max(0.02, min(0.1, effect.delay_ms / 1000.0))
+    pre_delay_s = max(0.02, min(0.1, effect.delay_ms / 1000.0))
     reverberance = max(0.0, min(1.0, effect.feedback))
-    rt_mid = max(1.0, min(8.0, 1.35 + room * 1.55 + reverberance * 1.05))
-    rt_low = max(1.0, min(8.0, rt_mid * (1.05 + room * 0.12)))
+    rt60_s = max(1.0, min(8.0, 1.35 + room * 1.55 + reverberance * 1.05))
     damping_hz = max(1500.0, min(24000.0, 24000.0 * ((1500.0 / 24000.0) ** damping)))
-    controls = "|".join(
-        [
-            f"{pre_delay:.3f}",
-            "220",
-            f"{rt_low:.3f}",
-            f"{rt_mid:.3f}",
-            f"{damping_hz:.3f}",
-            "160",
-            "0",
-            "2500",
-            "0",
-            "1",
-        ]
-    )
-    return f"ladspa=file={ZITA_REVERB_LADSPA}:plugin=zita-reverb:controls='{controls}'"
+    return {"pre_delay_s": pre_delay_s, "rt60_s": rt60_s, "damping_hz": damping_hz}
+
+
+def write_reverb_ir(effect: EffectEvent, path: Path, sample_rate: int, channels: int) -> None:
+    """Synthesize a convolution impulse response from the effect parameters.
+
+    Exponentially decaying decorrelated noise with a one-pole lowpass whose
+    cutoff follows the damping control. Deterministically seeded so identical
+    effect settings always render identical reverb; no external plugins.
+    """
+    import random
+    import struct
+    import wave
+
+    params = reverb_ir_parameters(effect)
+    pre_delay_samples = int(params["pre_delay_s"] * sample_rate)
+    # Render the IR long enough for a -60 dB tail but keep convolution bounded.
+    ir_seconds = min(4.0, params["rt60_s"])
+    body_samples = int(ir_seconds * sample_rate)
+    decay_per_sample = 10 ** (-3.0 / (params["rt60_s"] * sample_rate))
+    alpha = 1.0 - math.exp(-2.0 * math.pi * params["damping_hz"] / sample_rate)
+    rng = random.Random(f"{params['pre_delay_s']}:{params['rt60_s']}:{params['damping_hz']}:{channels}")
+    channel_samples: list[list[float]] = []
+    for _channel in range(channels):
+        state = 0.0
+        envelope = 1.0
+        samples = [0.0] * pre_delay_samples
+        for _ in range(body_samples):
+            state += alpha * (rng.uniform(-1.0, 1.0) - state)
+            samples.append(state * envelope)
+            envelope *= decay_per_sample
+        channel_samples.append(samples)
+    # Normalize to unit energy so convolution is roughly level-preserving and
+    # the effect's wet control keeps its meaning.
+    energy = math.sqrt(sum(value * value for samples in channel_samples for value in samples) / channels)
+    scale = (1.0 / energy) if energy > 0 else 1.0
+    frame_count = pre_delay_samples + body_samples
+    frames = bytearray()
+    for index in range(frame_count):
+        for samples in channel_samples:
+            value = max(-1.0, min(1.0, samples[index] * scale))
+            frames += struct.pack("<h", int(value * 32767))
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(channels)
+        audio.setsampwidth(2)
+        audio.setframerate(sample_rate)
+        audio.writeframes(bytes(frames))
+
+
+def prepare_reverb_irs(session: MixSession, ir_dir: Path, sample_rate: int, channels: int) -> dict[str, Path]:
+    irs: dict[str, Path] = {}
+    for effect in session.effects:
+        if effect.type != "reverb":
+            continue
+        path = ir_dir / f"reverb-ir-{effect.id}.wav"
+        write_reverb_ir(effect, path, sample_rate, channels)
+        irs[effect.id] = path
+    return irs
 
 
 def vinyl_brake_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
@@ -734,24 +774,35 @@ def echo_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label:
     for index, (source, output) in enumerate(zip(tap_sources, tap_outputs), start=1):
         tap_delay_ms = delay_ms * index
         tap_gain = effect.wet * (effect.feedback ** (index - 1)) * gain_multiplier(effect.gain_db)
+        # Bound each tap BEFORE adelay: atrim placed after adelay discards the
+        # inserted delay silence, which used to land every echo tap at t=0
+        # under the dry signal instead of at its delay time.
+        tap_budget_ms = max(1, total_duration_ms - tap_delay_ms)
         parts.append(
             f"[{source}]volume={tap_gain:.6f},"
+            f"atrim=duration={seconds(tap_budget_ms)},"
             f"adelay={effect.start_ms + tap_delay_ms}:all=1,"
-            f"atrim=duration={seconds(effect.start_ms + total_duration_ms)},"
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{output}]"
         )
     post_filters = []
     if effect.lowpass_hz is not None:
         post_filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
-    post_filters.append(f"atrim=duration={seconds(effect.start_ms + total_duration_ms)}")
     parts.append(
         f"{''.join(f'[{output}]' for output in tap_outputs)}"
-        f"amix=inputs={tap_count}:duration=longest:normalize=0,{','.join(post_filters)}[{label}]"
+        f"amix=inputs={tap_count}:duration=longest:normalize=0{',' + ','.join(post_filters) if post_filters else ''}[{label}]"
     )
     return ";".join(parts)
 
 
-def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, label: str, sample_rate: int, channels: int) -> str:
+def effect_stream_filter(
+    effect: EffectEvent,
+    clip: Clip,
+    input_index: int,
+    label: str,
+    sample_rate: int,
+    channels: int,
+    reverb_ir_indices: dict[str, int] | None = None,
+) -> str:
     if effect.type == "vinyl_brake":
         return vinyl_brake_stream_filter(effect, clip, input_index, label, sample_rate, channels)
     if effect.type == "echo":
@@ -769,13 +820,30 @@ def effect_stream_filter(effect: EffectEvent, clip: Clip, input_index: int, labe
     if effect.tail_ms:
         filters.append(f"apad=pad_dur={seconds(effect.tail_ms)}")
     if effect.type == "reverb":
-        filters.append(zita_reverb_filter(effect))
+        ir_index = (reverb_ir_indices or {}).get(effect.id)
+        if ir_index is None:
+            raise ValueError(f"reverb effect {effect.id} has no prepared impulse response input")
+        filters.append(f"atrim=duration={seconds(total_duration_ms)}")
+        filters.append(f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}dry]")
+        segment = ",".join(filter(None, filters))
+        post = [
+            f"atrim=duration={seconds(total_duration_ms)}",
+            f"lowpass=f={effect.lowpass_hz:.3f}" if effect.lowpass_hz is not None else "",
+            f"volume={effect.wet:.6f}",
+            f"volume={gain_multiplier(effect.gain_db):.6f}",
+            f"adelay={effect.start_ms}:all=1",
+            f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
+        ]
+        # gtype=none: the synthesized IR is already unit-energy normalized, and
+        # afir's default peak normalization would crush it ~30 dB. afir outputs
+        # convolved (wet) signal only; dry/wet here are input/output gains.
+        convolve = f"[{label}dry][{ir_index}:a]afir=gtype=none," + ",".join(filter(None, post))
+        return ";".join([segment, convolve])
     filters.append(f"atrim=duration={seconds(total_duration_ms)}")
     if effect.lowpass_hz is not None:
         filters.append(f"lowpass=f={effect.lowpass_hz:.3f}")
     filters.extend(
         [
-            f"volume={effect.wet:.6f}" if effect.type == "reverb" else "",
             f"volume={gain_multiplier(effect.gain_db):.6f}",
             f"adelay={effect.start_ms}:all=1",
             f"aformat=sample_rates={sample_rate}:channel_layouts={'stereo' if channels == 2 else 'mono'}[{label}]",
@@ -793,6 +861,7 @@ def build_filter_complex(
     clip_input_indices: dict[int, int] | None = None,
     stem_group_input_indices: dict[tuple[int, str], int] | None = None,
     first_lean_input_index: int | None = None,
+    reverb_ir_indices: dict[str, int] | None = None,
 ) -> str:
     active_lean_in_ids = set(lean_in_audio)
     session = replace(session, mic_lean_ins=[lean_in for lean_in in session.mic_lean_ins if lean_in.id in active_lean_in_ids])
@@ -916,7 +985,9 @@ def build_filter_complex(
             input_index = clip_input_indices[clip_index] if clip_input_indices is not None else clip_index
             label = f"effect{effect_index}"
             effect_index += 1
-            filters.append(effect_stream_filter(effect, clip, input_index, label, sample_rate, channels))
+            filters.append(
+                effect_stream_filter(effect, clip, input_index, label, sample_rate, channels, reverb_ir_indices=reverb_ir_indices)
+            )
             music_labels.append(f"[{label}]")
 
     next_input = first_lean_input_index if first_lean_input_index is not None else len(session.clips)
@@ -1034,11 +1105,13 @@ def ffmpeg_command(
     output_duration_ms: int | None = None,
     output_format: str = "auto",
     mp3_bitrate: str = "192k",
+    reverb_irs: dict[str, Path] | None = None,
 ) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     input_paths: list[str] = []
     clip_input_indices: dict[int, int] = {}
     stem_group_input_indices: dict[tuple[int, str], int] = {}
+    reverb_ir_indices: dict[str, int] = {}
     for clip_index, clip in enumerate(session.clips):
         try:
             input_index = input_paths.index(clip.path)
@@ -1057,6 +1130,10 @@ def ffmpeg_command(
             input_paths.append(path)
             command.extend(["-i", path])
             stem_group_input_indices[(group_index, stem_name)] = input_index
+    for effect_id, ir_path in (reverb_irs or {}).items():
+        reverb_ir_indices[effect_id] = len(input_paths)
+        input_paths.append(str(ir_path))
+        command.extend(["-i", str(ir_path)])
     for lean_in in session.mic_lean_ins:
         audio_path = lean_in_audio.get(lean_in.id)
         if audio_path is not None:
@@ -1064,7 +1141,17 @@ def ffmpeg_command(
     command.extend(
         [
             "-filter_complex",
-            build_filter_complex(session, lean_in_audio, sample_rate, channels, output_duration_ms, clip_input_indices, stem_group_input_indices, len(input_paths)),
+            build_filter_complex(
+                session,
+                lean_in_audio,
+                sample_rate,
+                channels,
+                output_duration_ms,
+                clip_input_indices,
+                stem_group_input_indices,
+                len(input_paths),
+                reverb_ir_indices=reverb_ir_indices,
+            ),
             "-map",
             "[out]",
             *output_codec_args(output, output_format, sample_rate, channels, mp3_bitrate),
@@ -1270,7 +1357,8 @@ def render_report_for_session(
     output_format: str,
     mp3_bitrate: str,
 ) -> dict[str, float | int | bool | None]:
-    command = ffmpeg_command(session, {}, output, sample_rate, channels, output_duration_ms, output_format, mp3_bitrate)
+    reverb_irs = prepare_reverb_irs(session, temp_dir, sample_rate, channels)
+    command = ffmpeg_command(session, {}, output, sample_rate, channels, output_duration_ms, output_format, mp3_bitrate, reverb_irs=reverb_irs)
     command = spill_filter_complex_to_script(command, temp_dir / f"{output.stem}-filter-complex.ffmpeg")
     subprocess.run(command, check=True)
     verify_rendered_audio(output)
@@ -1570,6 +1658,7 @@ def main() -> int:
             duration_ms,
             args.format,
             args.mp3_bitrate,
+            reverb_irs=prepare_reverb_irs(session, Path(temp), args.sample_rate, args.channels),
         )
         if args.dry_run:
             report = {
