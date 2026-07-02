@@ -349,7 +349,6 @@ def plan_future_mix(
     max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
     max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
     plan_until_ms: int | None = None,
-    allow_blends: bool = False,
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
     next_payload = copy.deepcopy(payload)
     normalize_clip_times(next_payload)
@@ -405,16 +404,15 @@ def plan_future_mix(
         if sync_placeholder_duration_to_analysis(clip, analysis):
             duration_ms = int(clip.get("duration_ms") or 0)
         shorter = min(duration_ms, int(previous.get("duration_ms") or duration_ms) if previous else duration_ms)
-        overlap = (
-            transition_overlap_ms(
-                previous_analysis,
-                analysis,
-                shorter,
-                max_tempo_shift_pct=max_tempo_shift_pct,
-                max_pitch_shift_semitones=max_pitch_shift_semitones,
-            )
-            if allow_blends
-            else 0
+        # Blend vs cut is decided per pair: transition_overlap_ms returns 0
+        # whenever analysis is missing or the pair cannot be made compatible
+        # within the render limits, which keeps unsafe handoffs as hard cuts.
+        overlap = transition_overlap_ms(
+            previous_analysis,
+            analysis,
+            shorter,
+            max_tempo_shift_pct=max_tempo_shift_pct,
+            max_pitch_shift_semitones=max_pitch_shift_semitones,
         )
         start_ms = cursor if previous is None else max(lock_before_ms, clip_end(previous) - overlap)
         end_ms = start_ms + duration_ms
@@ -427,15 +425,11 @@ def plan_future_mix(
         # obvious; transition shape belongs in EQ/filter/crossfader automation.
         clip["fade_in_ms"] = min(overlap, 8_000) if overlap else 0
         clip["fade_out_ms"] = 0
-        plan, overlay_reason = (
-            safe_overlay_plan(
-                previous_analysis,
-                analysis,
-                max_tempo_shift_pct=max_tempo_shift_pct,
-                max_pitch_shift_semitones=max_pitch_shift_semitones,
-            )
-            if allow_blends
-            else (None, "implicit blends disabled")
+        plan, overlay_reason = safe_overlay_plan(
+            previous_analysis,
+            analysis,
+            max_tempo_shift_pct=max_tempo_shift_pct,
+            max_pitch_shift_semitones=max_pitch_shift_semitones,
         )
         if plan is not None:
             clip["tempo_shift_pct"] = plan.target_tempo_shift_pct or 0.0
@@ -457,11 +451,11 @@ def plan_future_mix(
                 reason=reason,
             )
         )
-        if allow_blends and previous is not None and overlap and plan is not None:
+        if previous is not None and overlap and plan is not None:
             actual_overlap_ms = max(0, min(overlap, clip_end(previous) - start_ms))
             add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms, analysis)
 
-        if allow_blends and double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
+        if double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
             cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=150_000, after_ms=8_000)
             drop = first_structure(analysis, {"drop", "build"}) if cue is None else None
             cue_ms = int(cue.at_ms if cue is not None else drop.start_ms) if cue is not None or drop is not None else None
@@ -601,7 +595,6 @@ def main() -> int:
     parser.add_argument("--no-routines", action="store_true")
     parser.add_argument("--max-render-tempo-shift-pct", type=float, default=MAX_RENDER_TEMPO_SHIFT_PCT)
     parser.add_argument("--max-render-pitch-shift-semitones", type=int, default=MAX_RENDER_PITCH_SHIFT_SEMITONES)
-    parser.add_argument("--allow-blends", action="store_true", help="Allow automatic compatible-track overlaps and transition filter/EQ automation.")
     parser.add_argument("--cached-analysis-only", action="store_true", help="Use only cached DB analysis; missing tracks become explicit cut decisions.")
     parser.add_argument("--horizon-ms", type=int, help="Only rewrite future clips that begin before lock-before plus this horizon.")
     parser.add_argument("--apply", action="store_true")
@@ -633,7 +626,6 @@ def main() -> int:
         max_tempo_shift_pct=args.max_render_tempo_shift_pct,
         max_pitch_shift_semitones=args.max_render_pitch_shift_semitones,
         plan_until_ms=plan_until_ms,
-        allow_blends=args.allow_blends,
     )
     result = {
         "lock_before_ms": lock_before_ms,

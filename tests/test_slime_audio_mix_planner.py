@@ -130,7 +130,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=130_000,
             double_every=1,
-            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -169,7 +168,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(transition_plans["after"]["from_clip_id"], "next")
         self.assertEqual(transition_plans["after"]["pitch_shift_semitones"], clips["after"]["pitch_shift_semitones"])
 
-    def test_future_mix_planner_cuts_by_default_without_implicit_blends(self):
+    def test_future_mix_planner_cuts_when_analysis_is_missing(self):
         payload = {
             "version": 1,
             "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
@@ -185,9 +184,10 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         planned, moves = plan_future_mix(
             payload,
             {
+                # "after" has no analysis at all: the pair decision must fall
+                # back to an explicit cut, never a blind overlap.
                 "/music/current.flac": analysis("/music/current.flac"),
                 "/music/next.flac": analysis("/music/next.flac", tonic=0),
-                "/music/after.flac": analysis("/music/after.flac", tonic=0),
             },
             lock_before_ms=130_000,
             double_every=1,
@@ -197,7 +197,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(clips["after"]["start_ms"], clips["next"]["start_ms"] + clips["next"]["duration_ms"])
         self.assertEqual(clips["after"]["fade_in_ms"], 0)
         self.assertNotIn("double-after", clips)
-        self.assertEqual(planned.get("deck_automations", []), [])
         transition_plans = {item["to_clip_id"]: item for item in planned["transition_plans"]}
         self.assertEqual(transition_plans["after"]["decision"], "cut")
         self.assertEqual(transition_plans["after"]["overlap_ms"], 0)
@@ -223,7 +222,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             routine_every=0,
-            allow_blends=True,
         )
 
         self.assertTrue(any(move.kind == "blend" for move in moves))
@@ -249,7 +247,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             routine_every=0,
-            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -304,7 +301,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(transition_plan["to_clip_id"], "bad")
         self.assertEqual(transition_plan["decision"], "cut")
         self.assertEqual(transition_plan["overlap_ms"], 0)
-        self.assertIn("implicit blends disabled", transition_plan["reason"])
+        self.assertIn("below overlay threshold", transition_plan["reason"])
 
     def test_planner_can_rewrite_only_a_bounded_future_block(self):
         payload = {
@@ -333,7 +330,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             plan_until_ms=260_000,
             double_every=10,
             routine_every=0,
-            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -366,7 +362,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             double_every=10,
-            allow_blends=True,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -383,7 +378,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             max_pitch_shift_semitones=0,
-            allow_blends=True,
         )
         no_pitch_clips = {clip["id"]: clip for clip in no_pitch["clips"]}
         self.assertEqual(no_pitch_clips["next"]["start_ms"], no_pitch_clips["current"]["start_ms"] + no_pitch_clips["current"]["duration_ms"])
