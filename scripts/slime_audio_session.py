@@ -622,20 +622,55 @@ def master_tempo_shift_pct(source_bpm: float, master_bpm: float, max_stretch_pct
     return best
 
 
+def master_bpm_at(payload: dict[str, Any], at_ms: int) -> float | None:
+    """The master tempo knob's value at a timeline position.
+
+    `master_bpm` is the knob's base position; `master_bpm_automation` points
+    (at_ms/value) ride it — linear between points, base before the first,
+    held after the last.
+    """
+    base = payload.get("master_bpm")
+    points = sorted(
+        ((int(point["at_ms"]), float(point["value"])) for point in payload.get("master_bpm_automation", [])),
+        key=lambda item: item[0],
+    )
+    for point_ms, value in points:
+        if point_ms < 0:
+            raise ValueError("master_bpm_automation points must not be negative")
+        if value <= 0:
+            raise ValueError("master_bpm_automation values must be positive BPM")
+    if not points:
+        return float(base) if base else None
+    if base:
+        points.insert(0, (0, float(base)))
+    if at_ms <= points[0][0]:
+        return points[0][1]
+    if at_ms >= points[-1][0]:
+        return points[-1][1]
+    for (left_ms, left_value), (right_ms, right_value) in zip(points, points[1:]):
+        if left_ms <= at_ms <= right_ms:
+            if right_ms == left_ms:
+                return right_value
+            pct = (at_ms - left_ms) / (right_ms - left_ms)
+            return left_value + (right_value - left_value) * pct
+    return points[-1][1]
+
+
 def apply_master_tempo(payload: dict[str, Any]) -> dict[str, Any]:
     """Warp clips/stem groups to the session's master tempo, DAW-style.
 
     The session owns tempo: every clip carrying its analyzed `source_bpm`
-    renders at `master_bpm` (or its double/half) unless it opts out with
+    renders at the master tempo (or its double/half) unless it opts out with
     `warp: false` — the escape for sample drops and free-time material.
-    Derivation is idempotent and runs on every payload load, so editing
-    `master_bpm` behind the playhead retempos all future windows at the
+    The master is a knob: `master_bpm_automation` points ride it over the
+    timeline, and each clip warps to the knob's value at its own start (a
+    tempo drift lands with each incoming record; a clip never wobbles
+    internally). Derivation is idempotent and runs on every payload load, so
+    tempo edits behind the playhead retempo all future windows at the
     runner's next reload. Mic lean-ins are not clips and never warp.
     """
-    master = payload.get("master_bpm")
-    if not master:
+    if not payload.get("master_bpm") and not payload.get("master_bpm_automation"):
         return payload
-    master_bpm = float(master)
     max_stretch = abs(float(payload.get("max_tempo_stretch_pct", DEFAULT_MAX_WARP_STRETCH_PCT)))
     for event in list(payload.get("clips", [])) + list(payload.get("stem_groups", payload.get("stemGroups", []))):
         if not event.get("warp", True):
@@ -643,7 +678,10 @@ def apply_master_tempo(payload: dict[str, Any]) -> dict[str, Any]:
         source_bpm = event.get("source_bpm")
         if not source_bpm:
             continue
-        shift = master_tempo_shift_pct(float(source_bpm), master_bpm, max_stretch)
+        master = master_bpm_at(payload, int(event.get("start_ms") or 0))
+        if master is None:
+            continue
+        shift = master_tempo_shift_pct(float(source_bpm), master, max_stretch)
         event["tempo_shift_pct"] = round(shift, 3) if shift is not None else 0.0
     return payload
 
@@ -2229,20 +2267,36 @@ def set_master_tempo(
     bpm: float,
     *,
     max_tempo_stretch_pct: float | None = None,
+    points_json: str | None = None,
 ) -> dict[str, Any]:
-    """Set (or with bpm 0 release) the session's master tempo.
+    """Set (or with bpm 0 release) the session's master tempo knob.
 
-    Warped clips re-derive at the runner's next reload, so this retempos every
-    future window; already-rendered windows are untouched. Releasing returns
-    warped clips to their native tempo instead of freezing the last warp.
+    `points_json` automates the knob over the timeline (`[{"at": "45:00.000",
+    "value": 86}, ...]`); the scalar bpm is its base position. Warped clips
+    re-derive at the runner's next reload, so this retempos every future
+    window; already-rendered windows are untouched. Releasing returns warped
+    clips to their native tempo instead of freezing the last warp, and clears
+    any automation.
     """
     next_payload = copy.deepcopy(payload)
     if bpm and float(bpm) > 0:
         next_payload["master_bpm"] = float(bpm)
         if max_tempo_stretch_pct is not None:
             next_payload["max_tempo_stretch_pct"] = abs(float(max_tempo_stretch_pct))
+        if points_json is not None:
+            points = json.loads(points_json)
+            if not isinstance(points, list):
+                raise ValueError("master tempo points must be a JSON list")
+            next_payload["master_bpm_automation"] = [
+                {
+                    "at_ms": parse_ms(point.get("at", point.get("at_ms")), "master tempo point"),
+                    "value": float(point["value"]),
+                }
+                for point in points
+            ]
     else:
         next_payload.pop("master_bpm", None)
+        next_payload.pop("master_bpm_automation", None)
         for event in list(next_payload.get("clips", [])) + list(next_payload.get("stem_groups", [])):
             if event.get("warp", True) and event.get("source_bpm"):
                 event["tempo_shift_pct"] = 0.0

@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from slime_audio_session import apply_master_tempo
+from slime_audio_session import apply_master_tempo, master_bpm_at
 
 
 def load_session(path: Path) -> dict:
@@ -62,18 +62,26 @@ def source_bpm_lookup(db_path: Path, paths: list[str]) -> dict[str, float]:
     return lookup
 
 
-def tempo_identity(clips: list[dict], bpm_by_path: dict[str, float], master_bpm: float | None = None) -> dict:
-    rendered = []
+def tempo_identity(clips: list[dict], bpm_by_path: dict[str, float], session: dict | None = None) -> dict:
+    session = session or {}
+    master_bpm = session.get("master_bpm")
+    rendered: list[tuple[float, float | None]] = []
     for clip in clips:
         bpm = clip.get("source_bpm") or bpm_by_path.get(str(clip.get("path")))
         if bpm:
-            rendered.append(float(bpm) * (1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0))
+            # The master is an automatable knob; anchor each clip to its value
+            # at the clip's own start.
+            anchor = master_bpm_at(session, int(clip.get("start_ms") or 0)) if (master_bpm or session.get("master_bpm_automation")) else None
+            rendered.append((float(bpm) * (1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0), anchor))
     if not rendered:
         return {"analyzed_leads": 0, "master_bpm": master_bpm, "modal_bpm": None, "lock_coverage": None}
-    modal = Counter(round(bpm) for bpm in rendered).most_common(1)[0][0]
-    anchor = float(master_bpm) if master_bpm else float(modal)
+    modal = Counter(round(bpm) for bpm, _anchor in rendered).most_common(1)[0][0]
     # Double/half-time renders count as locked: they share the master pulse.
-    within = sum(1 for bpm in rendered if any(abs(bpm - anchor * k) <= 1.0 for k in (1.0, 2.0, 0.5)))
+    within = sum(
+        1
+        for bpm, anchor in rendered
+        if any(abs(bpm - (anchor if anchor else float(modal)) * k) <= 1.0 for k in (1.0, 2.0, 0.5))
+    )
     return {
         "analyzed_leads": len(rendered),
         "master_bpm": master_bpm,
@@ -152,7 +160,7 @@ def main() -> int:
         "tempo_identity": tempo_identity(
             leads,
             source_bpm_lookup(args.db, [str(c.get("path")) for c in leads if not c.get("source_bpm")]),
-            master_bpm=session.get("master_bpm"),
+            session=session,
         ),
         "transforms": transform_stats(leads),
         "layers": layer_stats(session),

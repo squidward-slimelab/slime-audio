@@ -185,8 +185,12 @@ def main() -> int:
     instant_double_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
 
     set_tempo_parser = sub.add_parser("set-tempo", parents=[common])
-    set_tempo_parser.add_argument("--bpm", type=float, required=True, help="Master tempo for the set; 0 releases warped clips back to native tempo.")
+    set_tempo_parser.add_argument("--bpm", type=float, required=True, help="Master tempo knob base position; 0 releases warped clips back to native tempo and clears automation.")
     set_tempo_parser.add_argument("--max-stretch-pct", type=float, help="Warp stretch limit; material out of reach plays neutral.")
+    set_tempo_parser.add_argument(
+        "--points-json",
+        help='Automate the master tempo knob: [{"at": "45:00.000", "value": 86}, ...]. Clips warp to the knob\'s value at their own start, so a ride lands with each incoming record.',
+    )
 
     set_warp_parser = sub.add_parser("set-warp", parents=[common])
     set_warp_parser.add_argument("--id", required=True)
@@ -251,6 +255,7 @@ def main() -> int:
                 payload,
                 args.bpm,
                 max_tempo_stretch_pct=args.max_stretch_pct,
+                points_json=args.points_json,
             ),
         )
     elif args.command == "set-warp":

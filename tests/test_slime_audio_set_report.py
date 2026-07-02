@@ -67,13 +67,27 @@ class SetReportTest(unittest.TestCase):
     def test_tempo_identity_counts_octave_renders_as_locked(self):
         # Against a 90 master: 90 straight, 180 double-time, 45 half-time all lock.
         clips = [
-            {"id": "l1", "path": "/m/a", "source_bpm": 90.0, "tempo_shift_pct": 0.0},
-            {"id": "l2", "path": "/m/b", "source_bpm": 178.0, "tempo_shift_pct": (180.0 / 178.0 - 1.0) * 100.0},
-            {"id": "l3", "path": "/m/c", "source_bpm": 130.0, "tempo_shift_pct": 0.0},
+            {"id": "l1", "path": "/m/a", "start_ms": 0, "source_bpm": 90.0, "tempo_shift_pct": 0.0},
+            {"id": "l2", "path": "/m/b", "start_ms": 1, "source_bpm": 178.0, "tempo_shift_pct": (180.0 / 178.0 - 1.0) * 100.0},
+            {"id": "l3", "path": "/m/c", "start_ms": 2, "source_bpm": 130.0, "tempo_shift_pct": 0.0},
         ]
-        identity = report.tempo_identity(clips, {}, master_bpm=90.0)
+        identity = report.tempo_identity(clips, {}, session={"master_bpm": 90.0})
         self.assertEqual(identity["analyzed_leads"], 3)
         self.assertAlmostEqual(identity["lock_coverage"], 2 / 3, places=3)
+
+    def test_tempo_identity_follows_master_automation(self):
+        # Knob rides 90 -> 80 over an hour; clips warped to the knob's value at
+        # their own start all count as locked.
+        session = {
+            "master_bpm": 90.0,
+            "master_bpm_automation": [{"at_ms": 3_600_000, "value": 80.0}],
+        }
+        clips = [
+            {"id": "l1", "path": "/m/a", "start_ms": 0, "source_bpm": 92.0, "tempo_shift_pct": (90.0 / 92.0 - 1.0) * 100.0},
+            {"id": "l2", "path": "/m/b", "start_ms": 3_600_000, "source_bpm": 84.0, "tempo_shift_pct": (80.0 / 84.0 - 1.0) * 100.0},
+        ]
+        identity = report.tempo_identity(clips, {}, session=session)
+        self.assertEqual(identity["lock_coverage"], 1.0)
 
     def test_transform_and_layer_and_motion_stats(self):
         transforms = report.transform_stats(self.leads)

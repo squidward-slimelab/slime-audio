@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import AUDACITY_REVERB_PRESETS, apply_master_tempo, audit_hidden_volume_sag, audit_session_durations, load_payload, load_session, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary, set_event_warp, set_master_tempo
+from slime_audio_session import AUDACITY_REVERB_PRESETS, apply_master_tempo, audit_hidden_volume_sag, audit_session_durations, load_payload, load_session, master_bpm_at, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary, set_event_warp, set_master_tempo
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
@@ -2432,6 +2432,35 @@ class MasterTempoTests(unittest.TestCase):
         payload["clips"][0].pop("source_bpm")
         edited = set_event_warp(payload, "lead-001", warp=True, source_bpm=85.0)
         self.assertEqual(edited["clips"][0]["source_bpm"], 85.0)
+
+    def test_master_knob_automation_rides_per_clip_start(self):
+        payload = self.payload(
+            clips=[
+                {"id": "lead-001", "deck": "deck-2", "path": "/music/a.flac", "start_ms": 0, "duration_ms": 240_000, "source_bpm": 90.0},
+                {"id": "lead-002", "deck": "deck-3", "path": "/music/b.flac", "start_ms": 1_800_000, "duration_ms": 240_000, "source_bpm": 90.0},
+                {"id": "lead-003", "deck": "deck-2", "path": "/music/c.flac", "start_ms": 3_600_000, "duration_ms": 240_000, "source_bpm": 90.0},
+            ]
+        )
+        payload["master_bpm_automation"] = [{"at_ms": 3_600_000, "value": 80.0}]
+        payload = apply_master_tempo(payload)
+        shifts = [clip["tempo_shift_pct"] for clip in payload["clips"]]
+        self.assertEqual(shifts[0], 0.0)  # base 90 at t=0
+        self.assertAlmostEqual(shifts[1], (85.0 / 90.0 - 1.0) * 100.0, places=2)  # midpoint of the ride
+        self.assertAlmostEqual(shifts[2], (80.0 / 90.0 - 1.0) * 100.0, places=2)  # knob settled at 80
+
+    def test_master_knob_holds_after_last_point_and_rejects_bad_values(self):
+        self.assertEqual(master_bpm_at({"master_bpm": 90.0, "master_bpm_automation": [{"at_ms": 60_000, "value": 84.0}]}, 999_999_999), 84.0)
+        self.assertEqual(master_bpm_at({"master_bpm": 90.0}, 0), 90.0)
+        self.assertIsNone(master_bpm_at({}, 0))
+        with self.assertRaises(ValueError):
+            master_bpm_at({"master_bpm_automation": [{"at_ms": 0, "value": -3}]}, 0)
+
+    def test_set_master_tempo_accepts_points_and_release_clears_them(self):
+        automated = set_master_tempo(self.payload(), 90.0, points_json='[{"at": "60:00.000", "value": 84}]')
+        self.assertEqual(automated["master_bpm_automation"], [{"at_ms": 3_600_000, "value": 84.0}])
+        released = set_master_tempo(automated, 0)
+        self.assertNotIn("master_bpm_automation", released)
+        self.assertNotIn("master_bpm", released)
 
 
 if __name__ == "__main__":
