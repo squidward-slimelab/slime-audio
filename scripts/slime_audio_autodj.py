@@ -1103,6 +1103,8 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         leads = sorted(selected, key=lead_score, reverse=True)
 
     fast_mode = fast_section_mode_for(selected)
+    # A hand-picked tracklist is the arrangement; never silently truncate it.
+    lead_cap = len(leads) if getattr(args, "track", None) else args.max_tracks
     cursor_ms = 0
     lead_clips: list[dict[str, Any]] = []
     lead_actions: list[dict[str, Any]] = []
@@ -1114,7 +1116,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
     stem_split_queued: list[str] = []
     transition_plans: list[dict[str, Any]] = []
     previous_track: SelectedTrack | None = None
-    for index, track in enumerate(leads[: args.max_tracks]):
+    for index, track in enumerate(leads[:lead_cap]):
         source_window = source_window_for_track(track, analyses.get(track.path), args, fast_mode=fast_mode)
         event_id = f"lead-{index + 1:03d}-{slugify(track.title)[:40]}"
         deck = "deck-2" if index % 2 == 0 else "deck-3"
@@ -1196,7 +1198,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
     # agent can author its own lean-ins over the handoffs it cares about.
     mic_lean_ins: list[dict[str, Any]] = []
     commentary_slots: list[dict[str, Any]] = []
-    arranged = leads[: args.max_tracks]
+    arranged = leads[:lead_cap]
     for index, start_ms in enumerate(lead_starts[1:], start=1):
         incoming = arranged[index] if index < len(arranged) else None
         if incoming is None:
