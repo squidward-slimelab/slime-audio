@@ -80,6 +80,12 @@ def chrome_binary() -> str:
         path = shutil.which(name)
         if path:
             return path
+    playwright_cache = Path.home() / ".cache" / "ms-playwright"
+    for candidate in sorted(
+        playwright_cache.glob("chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell")
+    ) + sorted(playwright_cache.glob("chromium-*/chrome-linux*/chrome")):
+        if candidate.is_file():
+            return str(candidate)
     raise FileNotFoundError("google-chrome/chromium is required for the web smoke test")
 
 

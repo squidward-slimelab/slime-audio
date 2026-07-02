@@ -3,178 +3,151 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>SlimeAudio Dashboard</title>
+    <title>SlimeAudio</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="app-shell">
-      <header class="topbar">
+      <header class="transport-rack" aria-label="transport">
         <div class="brand-block">
-          <p class="label">SlimeAudio</p>
+          <span class="brand-mark">SLIME<b>AUDIO</b></span>
           <h1 id="now-title">loading session</h1>
           <p id="now-meta" class="subtle">waiting for dashboard state</p>
         </div>
-        <div class="transport-strip" aria-label="transport status">
-          <div>
+
+        <div class="transport-cluster">
+          <div class="transport-buttons" aria-label="playback controls">
+            <button id="transport-restart" class="hw-button" type="button" title="restart">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3v10M13 3 6 8l7 5z"/></svg>
+            </button>
+            <button id="transport-play" class="hw-button play" type="button" title="play">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.5 13 8l-8.5 5.5z"/></svg>
+            </button>
+            <button id="transport-pause" class="hw-button" type="button" title="pause">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3h2.6v10H4.5zM8.9 3h2.6v10H8.9z"/></svg>
+            </button>
+          </div>
+          <div class="seek-cluster">
+            <div class="led-display">
+              <span id="playhead-time" class="led-time">--:--</span>
+              <span class="led-sep">/</span>
+              <span id="duration-time" class="led-duration">--:--</span>
+            </div>
+            <input id="transport-seek" type="range" min="0" max="1000" value="0" aria-label="seek" />
+          </div>
+        </div>
+
+        <div class="transport-readouts">
+          <div class="readout">
             <span class="label">transport</span>
-            <strong id="transport-status">loading</strong>
+            <span class="status-lamp"><i id="transport-lamp" class="lamp"></i><strong id="transport-status">loading</strong></span>
           </div>
-          <div>
-            <span class="label">playhead</span>
-            <strong id="playhead-time">--:--</strong>
-          </div>
-          <div>
-            <span class="label">window</span>
+          <div class="readout">
+            <span class="label">render window</span>
             <strong id="window-time">--:--</strong>
           </div>
-          <div>
+          <div class="readout">
             <span class="label">updated</span>
             <strong id="updated-time">--</strong>
           </div>
-        </div>
-        <div class="transport-controls" aria-label="playback controls">
-          <div class="transport-buttons">
-            <button id="transport-play" type="button" title="play">▶</button>
-            <button id="transport-pause" type="button" title="pause">⏸</button>
-            <button id="transport-restart" type="button" title="restart">↺</button>
+          <div class="readout">
+            <span class="label">follow</span>
+            <label class="follow-toggle"><input id="follow-playhead" type="checkbox" /><i></i></label>
           </div>
-          <label class="seek-control">
-            <span class="label">seek</span>
-            <input id="transport-seek" type="range" min="0" max="1000" value="0" />
-            <strong id="transport-seek-time">--:--</strong>
-          </label>
         </div>
       </header>
 
-      <section class="status-grid" aria-label="live status">
-        <article class="status-panel status-primary">
+      <section class="arrangement" aria-label="session timeline">
+        <div class="arrangement-toolbar">
+          <div>
+            <span class="label">arrangement</span>
+            <h2 id="timeline-title">native mix session</h2>
+          </div>
+          <span id="archive-banner" class="archive-banner" hidden>archived view — playback untouched</span>
+        </div>
+        <div class="arrangement-body">
+          <div id="time-axis" class="time-axis"></div>
+          <div id="timeline-scroll" class="timeline-scroll">
+            <div id="timeline" class="timeline"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="rack" aria-label="session panels">
+        <article class="panel panel-now">
           <div class="panel-head">
-            <div>
-              <p class="label">now</p>
-              <h2 id="current-title">nothing active</h2>
-            </div>
+            <span class="label">now playing</span>
             <span id="current-state" class="badge">idle</span>
           </div>
+          <h2 id="current-title">nothing active</h2>
           <p id="current-detail" class="detail-line">no current load</p>
-          <div class="progress-track" aria-label="session progress">
-            <div id="session-progress"></div>
-          </div>
+          <div class="progress-track" aria-label="session progress"><div id="session-progress"></div></div>
         </article>
 
-        <article class="status-panel">
-          <p class="label">next actions</p>
+        <article class="panel">
+          <div class="panel-head"><span class="label">up next</span></div>
           <div id="next-list" class="compact-list"></div>
         </article>
 
-        <article class="status-panel">
-          <p class="label">commentary</p>
+        <article class="panel">
+          <div class="panel-head"><span class="label">mic / commentary</span></div>
           <div id="commentary-list" class="compact-list"></div>
         </article>
 
-        <article class="status-panel">
-          <p class="label">health</p>
-          <div id="health-list" class="compact-list"></div>
+        <article class="panel">
+          <div class="panel-head"><span class="label">upcoming moves</span></div>
+          <div id="automation-list" class="compact-list"></div>
         </article>
-      </section>
 
-      <section class="archive-panel" aria-label="set archive">
-        <div class="timeline-toolbar">
-          <div>
-            <p class="label">set archive</p>
-            <h2 id="archive-title">active set</h2>
-          </div>
-          <div class="archive-actions">
-            <button id="view-active-set" type="button">active</button>
-            <button id="new-set" type="button">new</button>
-            <button id="save-loaded-set" type="button">save loaded</button>
-          </div>
-        </div>
-        <div id="archive-status" class="archive-status">loading archive</div>
-        <div id="archive-list" class="archive-list"></div>
-      </section>
-
-      <section class="timeline-panel" aria-label="session timeline">
-        <div class="timeline-toolbar">
-          <div>
-            <p class="label">arrangement</p>
-            <h2 id="timeline-title">native mix session</h2>
-          </div>
-          <label class="follow-toggle">
-            <input id="follow-playhead" type="checkbox" />
-            follow playhead
-          </label>
-        </div>
-        <div id="time-axis" class="time-axis"></div>
-        <div id="timeline-scroll" class="timeline-scroll">
-          <div id="timeline" class="timeline"></div>
-        </div>
-      </section>
-
-      <section class="mixer-panel" aria-label="mixer controls">
-        <div class="timeline-toolbar">
-          <div>
-            <p class="label">mixer</p>
-            <h2>controller surface</h2>
-          </div>
-          <span class="mixer-note">live state mirror</span>
-        </div>
-        <div id="mixer-channels" class="mixer-channels"></div>
-        <div id="crossfader-strip" class="crossfader-strip"></div>
-      </section>
-
-      <section class="feedback-panel" aria-label="DJ feedback">
-        <div class="timeline-toolbar">
-          <div>
-            <p class="label">feedback</p>
-            <h2 id="feedback-target">current playhead</h2>
-          </div>
-          <span id="feedback-status" class="feedback-status">ready</span>
-        </div>
-        <form id="feedback-form" class="feedback-form">
-          <div class="feedback-controls" role="group" aria-label="feedback category">
-            <label>
-              <input type="radio" name="category" value="selection" checked />
-              selection
-            </label>
-            <label>
-              <input type="radio" name="category" value="transition" />
-              transition
-            </label>
-            <label>
-              <input type="radio" name="category" value="effects" />
-              effects
-            </label>
-            <label>
-              <input type="radio" name="category" value="vibe" />
-              vibe
-            </label>
-            <label>
-              <input type="radio" name="category" value="technical" />
-              technical
-            </label>
-          </div>
-          <div class="feedback-rating" role="group" aria-label="quick rating">
-            <button type="button" data-rating="good">good</button>
-            <button type="button" data-rating="bad">bad</button>
-            <button type="button" data-rating="interesting">interesting</button>
-          </div>
-          <textarea id="feedback-note" rows="3" placeholder="what should change about this selection, transition, or effect?"></textarea>
-          <div class="feedback-actions">
-            <button id="feedback-now" type="button">use playhead</button>
-            <button type="submit">send feedback</button>
-          </div>
-        </form>
-        <div id="feedback-list" class="feedback-list"></div>
-      </section>
-
-      <section class="lower-grid">
-        <article class="status-panel">
-          <p class="label">automation</p>
-          <div id="automation-list" class="event-list"></div>
+        <article class="panel">
+          <div class="panel-head"><span class="label">health</span></div>
+          <div id="health-list" class="health-list"></div>
         </article>
-        <article class="status-panel">
-          <p class="label">session</p>
+
+        <article class="panel">
+          <div class="panel-head"><span class="label">session</span></div>
           <div id="session-summary" class="summary-grid"></div>
+        </article>
+
+        <article class="panel panel-archive">
+          <div class="panel-head">
+            <span class="label">set archive</span>
+            <div class="archive-actions">
+              <button id="view-active-set" type="button">active</button>
+              <button id="new-set" type="button">new</button>
+              <button id="save-loaded-set" type="button">save loaded</button>
+            </div>
+          </div>
+          <p id="archive-status" class="archive-status">loading archive</p>
+          <div id="archive-list" class="archive-list"></div>
+        </article>
+
+        <article class="panel panel-feedback">
+          <div class="panel-head">
+            <span class="label">dj feedback</span>
+            <span id="feedback-status" class="feedback-status">ready</span>
+          </div>
+          <p id="feedback-target" class="feedback-target">current playhead</p>
+          <form id="feedback-form" class="feedback-form">
+            <div class="feedback-controls" role="group" aria-label="feedback category">
+              <label><input type="radio" name="category" value="selection" checked /><span>selection</span></label>
+              <label><input type="radio" name="category" value="transition" /><span>transition</span></label>
+              <label><input type="radio" name="category" value="effects" /><span>effects</span></label>
+              <label><input type="radio" name="category" value="vibe" /><span>vibe</span></label>
+              <label><input type="radio" name="category" value="technical" /><span>technical</span></label>
+            </div>
+            <div class="feedback-rating" role="group" aria-label="quick rating">
+              <button type="button" data-rating="good">good</button>
+              <button type="button" data-rating="bad">bad</button>
+              <button type="button" data-rating="interesting">interesting</button>
+            </div>
+            <textarea id="feedback-note" rows="3" placeholder="what should change about this selection, transition, or effect?"></textarea>
+            <div class="feedback-actions">
+              <button id="feedback-now" type="button">use playhead</button>
+              <button type="submit" class="primary">send feedback</button>
+            </div>
+          </form>
+          <div id="feedback-list" class="feedback-list"></div>
         </article>
       </section>
     </main>
