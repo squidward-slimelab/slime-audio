@@ -2153,7 +2153,8 @@ def remove_event(
     next_payload = copy.deepcopy(payload)
     found = find_event(next_payload, event_id)
     if found is None:
-        raise ValueError(f"event id does not exist: {event_id}")
+        known = [str(item.get("id")) for coll in ("clips", "actions", "mic_lean_ins", "effects", "slip_events") for item in next_payload.get(coll, []) if isinstance(item, dict) and item.get("id")]
+        raise ValueError(f"event id does not exist: {event_id}; known ids: {', '.join(sorted(known)[:40])}")
     guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
     collection, index = found
     del next_payload[collection][index]
@@ -2179,7 +2180,8 @@ def move_event(
     next_payload = copy.deepcopy(payload)
     found = find_event(next_payload, event_id)
     if found is None:
-        raise ValueError(f"event id does not exist: {event_id}")
+        known = [str(item.get("id")) for coll in ("clips", "actions", "mic_lean_ins", "effects", "slip_events") for item in next_payload.get(coll, []) if isinstance(item, dict) and item.get("id")]
+        raise ValueError(f"event id does not exist: {event_id}; known ids: {', '.join(sorted(known)[:40])}")
     guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
     guard_live_edit(
         label=f"new start for {event_id}",
@@ -2211,7 +2213,8 @@ def beat_jump_clip(
     next_payload = copy.deepcopy(payload)
     found = find_event(next_payload, event_id)
     if found is None:
-        raise ValueError(f"event id does not exist: {event_id}")
+        known = [str(item.get("id")) for coll in ("clips", "actions", "mic_lean_ins", "effects", "slip_events") for item in next_payload.get(coll, []) if isinstance(item, dict) and item.get("id")]
+        raise ValueError(f"event id does not exist: {event_id}; known ids: {', '.join(sorted(known)[:40])}")
     collection, index = found
     if collection != "clips":
         raise ValueError(f"beat-jump only supports clips, not {collection}: {event_id}")

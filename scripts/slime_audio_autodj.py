@@ -1078,32 +1078,10 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
                 "decision": "tempo-locked",
                 "reason": f"lead stretched from {analysis.bpm:g} to target {target_bpm:g} BPM for the set",
             }
-        if previous_track is not None and analyses.get(previous_track.path) is not None and analysis is not None and not (target_bpm is not None and analysis.bpm):
-            plan = transition_plan(analyses[previous_track.path], analysis, max_pitch_shift=6)
-            transform = {
-                "tempo_shift_pct": float(plan.target_tempo_shift_pct or 0.0),
-                "pitch_shift_semitones": int(plan.pitch_shift_semitones or 0),
-            }
-            transform["transition_decision"] = {
-                "tempo_shift_pct": transform["tempo_shift_pct"],
-                "pitch_shift_semitones": transform["pitch_shift_semitones"],
-                "decision": plan.key_relation,
-                "score": plan.score,
-                "reason": "; ".join(plan.notes) or "explicit beat/key transition decision",
-            }
-            plan_payload = {
-                "id": f"transition-{event_id}",
-                "planner_role": "mix-planner-transition-plan",
-                "from_clip_id": f"lead-{index:03d}-{slugify(previous_track.title)[:40]}",
-                "to_clip_id": event_id,
-                "to_action_id": event_id,
-                "decision": plan.key_relation,
-                "tempo_shift_pct": transform["tempo_shift_pct"],
-                "pitch_shift_semitones": transform["pitch_shift_semitones"],
-                "score": plan.score,
-                "reason": "; ".join(plan.notes) or "explicit beat/key transition decision",
-            }
-            transition_plans.append(plan_payload)
+        # Leads render neutral unless the whole set is tempo-locked. Pairwise
+        # arrangement-time warping (chasing each neighbor's tempo/key) chained
+        # into +/-16% tempo and 4-semitone swings between songs; corrections
+        # belong to the planner, small and clamped, on real overlaps only.
         base_event = {
             "id": event_id,
             "deck": deck,

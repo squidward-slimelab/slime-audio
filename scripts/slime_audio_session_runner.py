@@ -662,6 +662,16 @@ def run_session(args: argparse.Namespace) -> int:
                 window.cleanup()
                 return 0
 
+            if fifo_hold is not None and not fifo_hold.active and fifo_hold.acquire(retries=1, retry_delay_s=0.2):
+                append_history(
+                    args.history_log,
+                    {
+                        "event": "session_fifo_hold_acquired",
+                        "fifo": str(args.snapcast_fifo),
+                        "session": str(args.session),
+                        "timestamp": iso_now(),
+                    },
+                )
             continuation = windows_streamed > 0 and fifo_hold is not None and fifo_hold.active
             running, stream = start_window_stream(args, window, continuation=continuation)
             windows_streamed += 1
