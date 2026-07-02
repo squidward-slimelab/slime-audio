@@ -258,11 +258,22 @@ Prefer named edit-api routines when they fit, then customize with automation or 
 Treat each effect according to what it is supposed to do in the mix.
 
 - `echo`: a delayed wet copy that decays by feedback. It should sound like repeats, not garbled volume wobble. Validate suspect echo with a simple arpeggio session.
-- `reverb`: a spatial wet copy with Audacity-style preset starting points. Pick presets for color, then tune wet level, tail, gain, room size, damping, and low-pass.
+- `reverb`: a spatial wet copy rendered by convolving the source window with an impulse response built from the effect parameters. Pick presets for color, then tune wet level, tail, gain, room size, damping, and low-pass.
 - `vinyl_brake`: a replacement effect. During the brake window, the dry target should be muted while the slowed record-motion render plays.
 - Scratches: replacement performance gestures. The source deck timeline should keep moving underneath, but the local dry source should be ducked only during the scratch clips.
 
 Hard source ducks are dangerous. They are correct for replacement moves like scratches and vinyl brakes, but they sound broken when placed after an echo stab or bed flourish with no obvious reason. If there is an audible volume cliff, inspect `gain_db` automation before blaming the effect DSP.
+
+### Effect Application
+
+Placement and timing decide whether an effect reads as a DJ move or as noise. Every effect needs a musical job; if it cannot be named, do not add the effect.
+
+- Beat-sync echo delays. `delay_ms` comes from the analyzed BPM, not the default: quarter note = `60000 / bpm`, dotted eighth = `x 0.75`, eighth = `x 0.5`. An off-grid delay smears the groove instead of riding it.
+- Throw echoes at exits: the last vocal word or hook hit before a cut, drop, or breakdown. Target a short source window (the phrase end, not a whole bar block), let the tail carry across the transition, and make sure the incoming material owns the space the tail decays into.
+- Use reverb as punctuation, not atmosphere. A short wash on the final snare/clap before a drop, or a tail on a vocal phrase end into a breakdown. Do not leave a reverb running under continuous full-mix material; that is mud, not space.
+- Brakes mark structural turns: the end of a lead before a genre or tempo flip, or as the fake-out before a drop. A brake in the middle of nothing reads as an error, not a gesture.
+- Match effect keys to the moment: echo/reverb tails carry the source's pitch, so a tail decaying over an incompatible incoming key clashes exactly like an unkeymatched overlap. Cut tails short or low-pass them when the next section changes key.
+- One gesture at a time. Stacking an echo throw, a reverb wash, and a filter sweep on the same phrase buries all three; pick the move that serves the transition and commit to it.
 
 ## Creative Set Workflow
 
