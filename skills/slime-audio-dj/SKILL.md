@@ -9,7 +9,7 @@ You are the DJ. The tools handle beatmatching math, key safety, and rendering; y
 
 A set is **full songs mixed into each other** — records play through and hand off where they musically should. That is the default (`--arrangement full`). Chopping tracks into anchored sections is a specific technique for rapid stem-remix work (`--arrangement sections`, implied by `--remix-focus`), not how normal sets are built.
 
-**Every set is a remix set.** Pick the set's tempo from the vibe and lock to it (`--target-bpm`); reshape records toward that tempo rather than hunting for records that already match. If the vibe is low-energy and your best material is fast, slow it down; if the vibe is high-energy and the crate is mellow, speed it up — those are often the most interesting mixes. A set whose leads all render neutral, handed off by cuts, is a playlist, and a playlist is a failed set. `RUBRIC.md` next to this file defines what a good set sounds like and how sets are graded — read it once before your first set.
+**Every set is a remix set, and the session owns tempo like a DAW project.** Pick the set's tempo from the vibe and set it as the master (`--target-bpm` writes `master_bpm` into the session); every clip warps to it at render time — straight, or automatically at double/half-time feel (a 175 BPM record sits happily in a 90 BPM set). Reshape records toward the set rather than hunting for records that already match: slowing great fast material down (or speeding mellow material up) often makes the most interesting mixes. There is no whole-set exemption from tempo — genuinely free-time material (rubato ambient, sample drops, spoken word) opts out *per clip* (`live_edit set-warp --id X --off`), and the mic never warps by construction. Change the master live with `live_edit set-tempo --bpm N`; it retempos every future window at the next reload. A set whose leads all render neutral, handed off by cuts, is a playlist, and a playlist is a failed set. `RUBRIC.md` next to this file defines what a good set sounds like and how sets are graded — read it once before your first set.
 
 **The one rule that outranks everything else: get music playing first.** Start audio within a couple of minutes of being asked, then keep improving the future timeline while the room listens. A decent first track now beats a perfect plan later, every time. If you notice yourself planning, validating, or re-generating for more than a few minutes with no audio out, stop and start something.
 
@@ -47,6 +47,10 @@ python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one
   --track "/mnt/.../first.flac" --track "/mnt/.../second.flac"   # in play order
 #    ...or let selection pick mechanically from the constraints (fastest start):
 python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one line of intent" --target-bpm 90
+#    Hand-picking a long set? Don't make the room wait on batch analysis:
+#    launch a short opener now (mechanical, or a few already-analyzed picks),
+#    curate the real tracklist while it plays, then append it behind the
+#    playhead with:  extend --track ... --track ...
 
 # 4. Keep it fed. Run this on a heartbeat/cron; it no-ops while there is
 #    enough runway and appends a fresh planned block when the buffer runs low.
@@ -55,7 +59,7 @@ python3 scripts/slime_audio_autodj.py extend --target-length-ms 0   # 0 = endles
 
 Useful `continue`/`extend` knobs:
 
-- `--target-bpm N` — tempo-lock the set: selection pulls tracks whose analyzed BPM can stretch to N (`--max-tempo-stretch-pct`, default 16), and every lead is authored to render at N. Under a lock the planner decides overlaps on key fit alone, so blends flow; unlocked, most pairs score below the overlay threshold and cut. This flag is the default move, not a knob — skip it only when the set deliberately has no tempo identity (pure ambient, spoken word).
+- `--target-bpm N` — set the session's master tempo: selection pulls tracks whose analyzed BPM can reach N straight or at double/half-time (`--max-tempo-stretch-pct`, default 16), and the session layer warps every analyzed lead to N on load. Under a master tempo the planner decides overlaps on key fit alone, so blends flow; without one, most pairs score below the overlay threshold and cut. This flag goes on every launch — free-time material opts out per clip with `set-warp --off`, never by skipping the master.
 - `--min-bpm/--max-bpm` — plain tempo-column browsing without a lock.
 - `--remix-focus --stem-aware-remix` — the hard-lane remix treatment: vocal/hook leads over rhythm beds, stem-resolved loads. Works at any energy — a slow vocal over a sparse dub bed is as much a remix as a festival mashup.
 - `--require-analysis` — restrict selection to tracks with BPM/key metadata (better blends, smaller pool).
@@ -89,6 +93,7 @@ Once audio is running, you are live. Work *ahead of the playhead* with `scripts/
 - **Selection steering**: re-rank what comes next from what is playing now; respect operator steering in the constraints file as hard input. Pull candidates from several angles (vibe queries, compatible keys/tempos, less-played corners). Don't loop the same crates; if selection keeps reaching for the same few artists, that is an acquisition gap — see Music Acquisition.
 - **Beds and layers**: `add-action` a `load_track` with `play_stems` (drums/bass/other) under a lead, key/tempo-matched, carved with `knob_lerp` filter and EQ moves. Beds usually sit −6 to −9 dB under a full lead — audible enough to change the groove.
 - **Moves**: `instant-double-routine` (`stabs`, `one-beat-trades`, `offbeat-swaps`, `hook-tease`, `echo-stabs`, `echo-drop`, `scratch-cuts`, `slip-brake`, `brake-drop`), `add-effect`, `beat-jump`, `crossfader`, `fader-routing`. Every move needs a musical job you could name out loud; if you can't, don't add it.
+- **Tempo**: `set-tempo --bpm N` changes the master for every future window (a set can breathe — easing the master down through a sleep set is a real arc move); `set-warp --id X --off` frees a sample drop or rubato cue from the master; `set-warp --id X --source-bpm N` lets hand-added material warp.
 - **Mic**: you author every line yourself (autodj publishes `commentary_slots` — handoff timing plus incoming artist/title/BPM/key — as raw material). Short, spaced, about the music: name the incoming record when it earns it, call the energy move, tease the drop. Never talk about talking, never reuse template lines, never invent artist facts. Schedule with `slime_audio_lean_ins.py` on `deck-5` with ducking; skip the mic entirely for sleep/background sets.
 - **Proof renders**: for a risky routine or an uncertain bed, render a short window through `slime_audio_session_mixdown.py --routine-id/--from/--duration --verify` and listen-check the report. Don't block a normal live set on full-set proofs.
 

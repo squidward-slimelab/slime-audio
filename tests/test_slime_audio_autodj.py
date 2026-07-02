@@ -2087,5 +2087,41 @@ class SlimeAudioAutodjExtendTests(unittest.TestCase):
         self.assertEqual(plan["to_action_id"], "ext-42-lead-002")
 
 
+class MasterTempoPayloadTests(unittest.TestCase):
+    """--target-bpm makes the session own tempo instead of baking per-lead shifts."""
+
+    def test_target_bpm_writes_master_and_source_bpm(self):
+        tracks = [selected_track(f"/music/lead-{index}.flac") for index in range(2)]
+        args = autodj_args(min_tracks=2, max_tracks=2, target_bpm=90.0, max_tempo_stretch_pct=30.0)
+        payload = session_payload(tracks, args, analyses={track.path: analysis(track.path) for track in tracks})
+        self.assertEqual(payload["master_bpm"], 90.0)
+        self.assertEqual(payload["max_tempo_stretch_pct"], 30.0)
+        leads = [clip for clip in payload["clips"] if clip.get("planner_role") == "lead"]
+        self.assertTrue(leads)
+        for clip in leads:
+            self.assertEqual(clip["source_bpm"], 120.0)
+        # Derivation is the session layer's job, applied on every load/parse.
+        derived = autodj.parse_session(payload)
+        rendered = {round(120.0 * (1 + clip.tempo_shift_pct / 100.0), 1) for clip in derived.clips}
+        self.assertEqual(rendered, {90.0})
+
+    def test_no_target_bpm_keeps_leads_neutral_but_stamps_source(self):
+        tracks = [selected_track("/music/lead.flac")]
+        args = autodj_args(min_tracks=1, max_tracks=1)
+        payload = session_payload(tracks, args, analyses={tracks[0].path: analysis(tracks[0].path)})
+        self.assertNotIn("master_bpm", payload)
+        lead = next(clip for clip in payload["clips"] if clip.get("planner_role") == "lead")
+        self.assertEqual(lead["tempo_shift_pct"], 0.0)
+        self.assertEqual(lead["source_bpm"], 120.0)
+
+    def test_master_tempo_bands_include_octaves(self):
+        bands = autodj.master_tempo_bands(90.0, 16.0)
+        self.assertEqual(len(bands), 3)
+        self.assertTrue(any(low <= 90 <= high for low, high in bands))
+        self.assertTrue(any(low <= 175 <= high for low, high in bands))
+        self.assertTrue(any(low <= 45 <= high for low, high in bands))
+        self.assertFalse(any(low <= 130 <= high for low, high in bands))
+
+
 if __name__ == "__main__":
     unittest.main()

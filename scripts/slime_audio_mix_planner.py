@@ -401,6 +401,10 @@ def plan_future_mix(
     target_bpm: float | None = None,
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
     next_payload = copy.deepcopy(payload)
+    if target_bpm is None and next_payload.get("master_bpm"):
+        # The session owns tempo: a master_bpm session is tempo-locked whether
+        # or not the caller passed the flag.
+        target_bpm = float(next_payload["master_bpm"])
     normalize_clip_times(next_payload)
     next_payload["deck_automations"] = [
         automation

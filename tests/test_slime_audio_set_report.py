@@ -64,6 +64,17 @@ class SetReportTest(unittest.TestCase):
         self.assertEqual(identity["analyzed_leads"], 3)
         self.assertAlmostEqual(identity["lock_coverage"], 2 / 3, places=3)
 
+    def test_tempo_identity_counts_octave_renders_as_locked(self):
+        # Against a 90 master: 90 straight, 180 double-time, 45 half-time all lock.
+        clips = [
+            {"id": "l1", "path": "/m/a", "source_bpm": 90.0, "tempo_shift_pct": 0.0},
+            {"id": "l2", "path": "/m/b", "source_bpm": 178.0, "tempo_shift_pct": (180.0 / 178.0 - 1.0) * 100.0},
+            {"id": "l3", "path": "/m/c", "source_bpm": 130.0, "tempo_shift_pct": 0.0},
+        ]
+        identity = report.tempo_identity(clips, {}, master_bpm=90.0)
+        self.assertEqual(identity["analyzed_leads"], 3)
+        self.assertAlmostEqual(identity["lock_coverage"], 2 / 3, places=3)
+
     def test_transform_and_layer_and_motion_stats(self):
         transforms = report.transform_stats(self.leads)
         self.assertEqual(transforms["reshaped_leads"], 2)

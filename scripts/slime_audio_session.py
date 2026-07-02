@@ -598,7 +598,54 @@ def load_session(path: Path) -> MixSession:
 
 
 def load_payload(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return apply_master_tempo(json.loads(path.read_text(encoding="utf-8")))
+
+
+DEFAULT_MAX_WARP_STRETCH_PCT = 16.0
+
+
+def master_tempo_shift_pct(source_bpm: float, master_bpm: float, max_stretch_pct: float) -> float | None:
+    """Smallest render stretch that puts a source at the session's master tempo.
+
+    Tries straight, double-time, and half-time interpretations (a 180 BPM
+    source fits a 90 master unstretched at half-time feel). Returns None when
+    no interpretation lands inside the stretch limit — such material plays at
+    its authored tempo instead of being audibly warped.
+    """
+    if source_bpm <= 0 or master_bpm <= 0:
+        return None
+    best: float | None = None
+    for multiple in (1.0, 2.0, 0.5):
+        shift = (master_bpm * multiple / source_bpm - 1.0) * 100.0
+        if abs(shift) <= max_stretch_pct and (best is None or abs(shift) < abs(best)):
+            best = shift
+    return best
+
+
+def apply_master_tempo(payload: dict[str, Any]) -> dict[str, Any]:
+    """Warp clips/stem groups to the session's master tempo, DAW-style.
+
+    The session owns tempo: every clip carrying its analyzed `source_bpm`
+    renders at `master_bpm` (or its double/half) unless it opts out with
+    `warp: false` — the escape for sample drops and free-time material.
+    Derivation is idempotent and runs on every payload load, so editing
+    `master_bpm` behind the playhead retempos all future windows at the
+    runner's next reload. Mic lean-ins are not clips and never warp.
+    """
+    master = payload.get("master_bpm")
+    if not master:
+        return payload
+    master_bpm = float(master)
+    max_stretch = abs(float(payload.get("max_tempo_stretch_pct", DEFAULT_MAX_WARP_STRETCH_PCT)))
+    for event in list(payload.get("clips", [])) + list(payload.get("stem_groups", payload.get("stemGroups", []))):
+        if not event.get("warp", True):
+            continue
+        source_bpm = event.get("source_bpm")
+        if not source_bpm:
+            continue
+        shift = master_tempo_shift_pct(float(source_bpm), master_bpm, max_stretch)
+        event["tempo_shift_pct"] = round(shift, 3) if shift is not None else 0.0
+    return payload
 
 
 def write_payload(path: Path, payload: dict[str, Any]) -> None:
@@ -705,6 +752,10 @@ def load_track_group_from_action(
         group["stem_set_id"] = str(action["stem_set_id"])
     if action.get("manifest_path"):
         group["manifest_path"] = str(action["manifest_path"])
+    if action.get("source_bpm"):
+        group["source_bpm"] = float(action["source_bpm"])
+    if "warp" in action:
+        group["warp"] = bool(action["warp"])
     return group, deck
 
 
@@ -927,6 +978,10 @@ def compile_actions_payload_legacy(payload: dict[str, Any]) -> dict[str, Any]:
                 group["stem_set_id"] = str(action["stem_set_id"])
             if action.get("manifest_path"):
                 group["manifest_path"] = str(action["manifest_path"])
+            if action.get("source_bpm"):
+                group["source_bpm"] = float(action["source_bpm"])
+            if "warp" in action:
+                group["warp"] = bool(action["warp"])
             stem_groups.append(group)
             group_payloads[group_id] = group
             if deck not in decks:
@@ -1553,7 +1608,7 @@ def audit_hidden_volume_sag(
 
 
 def parse_session(payload: dict[str, Any]) -> MixSession:
-    payload = compile_actions_payload(payload)
+    payload = apply_master_tempo(compile_actions_payload(payload))
     decks = [str(deck) for deck in payload.get("decks", [])]
     if not decks:
         decks = list(DEFAULT_SESSION_DECKS)
@@ -2165,6 +2220,59 @@ def remove_event(
         clip["automations"] = [
             automation for automation in clip.get("automations", []) if automation.get("target", clip.get("id")) != event_id
         ]
+    parse_session(next_payload)
+    return next_payload
+
+
+def set_master_tempo(
+    payload: dict[str, Any],
+    bpm: float,
+    *,
+    max_tempo_stretch_pct: float | None = None,
+) -> dict[str, Any]:
+    """Set (or with bpm 0 release) the session's master tempo.
+
+    Warped clips re-derive at the runner's next reload, so this retempos every
+    future window; already-rendered windows are untouched. Releasing returns
+    warped clips to their native tempo instead of freezing the last warp.
+    """
+    next_payload = copy.deepcopy(payload)
+    if bpm and float(bpm) > 0:
+        next_payload["master_bpm"] = float(bpm)
+        if max_tempo_stretch_pct is not None:
+            next_payload["max_tempo_stretch_pct"] = abs(float(max_tempo_stretch_pct))
+    else:
+        next_payload.pop("master_bpm", None)
+        for event in list(next_payload.get("clips", [])) + list(next_payload.get("stem_groups", [])):
+            if event.get("warp", True) and event.get("source_bpm"):
+                event["tempo_shift_pct"] = 0.0
+    parse_session(next_payload)
+    return next_payload
+
+
+def set_event_warp(
+    payload: dict[str, Any],
+    event_id: str,
+    *,
+    warp: bool,
+    source_bpm: float | None = None,
+    lock_before_ms: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Opt a clip in or out of master-tempo warping (sample drops opt out)."""
+    next_payload = copy.deepcopy(payload)
+    found = find_event(next_payload, event_id)
+    if found is None:
+        known = [str(item.get("id")) for coll in ("clips", "actions", "mic_lean_ins", "effects", "slip_events") for item in next_payload.get(coll, []) if isinstance(item, dict) and item.get("id")]
+        raise ValueError(f"event id does not exist: {event_id}; known ids: {', '.join(sorted(known)[:40])}")
+    guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
+    collection, index = found
+    event = next_payload[collection][index]
+    event["warp"] = bool(warp)
+    if source_bpm is not None:
+        event["source_bpm"] = float(source_bpm)
+    if not warp:
+        event["tempo_shift_pct"] = 0.0
     parse_session(next_payload)
     return next_payload
 

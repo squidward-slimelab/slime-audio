@@ -765,6 +765,7 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
         "transport": transport,
         "session": {
             "timeline_mode": session_payload.get("timeline_mode", "native"),
+            "master_bpm": session_payload.get("master_bpm"),
             "duration_ms": duration_ms,
             "counts": counts,
             "decks": session_payload.get("decks", []),

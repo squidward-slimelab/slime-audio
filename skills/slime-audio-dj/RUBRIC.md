@@ -34,8 +34,11 @@ The defining category. A listener half-paying attention should not be able to po
 where one record ends and the next begins, except where a hard cut was an obvious
 deliberate gesture.
 
-- The set has a tempo identity: leads are tempo-locked to a vibe-derived BPM (or a
-  documented deliberate drift, e.g. a sleep set that slows through the night).
+- The set has a tempo identity: a master tempo derived from the vibe, with leads
+  warped to it straight or at double/half-time (a documented deliberate drift — e.g.
+  a sleep set whose master eases down through the night — also counts). Free-time
+  material opting out *per clip* is craft; a whole set with no master tempo is not:
+  "this material has no tempo" is a per-track claim, never a set-level excuse.
 - Handoffs are predominantly blends placed at musical boundaries; cuts exist as
   *choices* with a reason you could say out loud, not as the planner's shrug.
 - The set has a nameable arc (rising, sinking, plateau-and-release…) that matches the

@@ -188,6 +188,19 @@ class TasteProfile:
         return bool(self.top_artists or self.top_tracks)
 
 
+def master_tempo_bands(target_bpm: float, max_tempo_stretch_pct: float) -> list[tuple[float, float]]:
+    """Analyzed-BPM ranges whose tracks can render at the master tempo.
+
+    Straight plus double/half-time interpretations, mirroring the session
+    layer's warp (slime_audio_session.master_tempo_shift_pct).
+    """
+    stretch = max(0.0, float(max_tempo_stretch_pct)) / 100.0
+    return [
+        (target_bpm * multiple / (1.0 + stretch), target_bpm * multiple * (1.0 + stretch))
+        for multiple in (1.0, 2.0, 0.5)
+    ]
+
+
 def iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -401,12 +414,16 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
     band_max = getattr(args, "max_bpm", None)
     target_bpm = getattr(args, "target_bpm", None)
     if target_bpm is not None and band_min is None and band_max is None:
-        stretch = max(0.0, float(getattr(args, "max_tempo_stretch_pct", 16.0))) / 100.0
-        band_min = target_bpm / (1.0 + stretch)
-        band_max = target_bpm * (1.0 + stretch)
-    if band_min is not None or band_max is not None:
+        bands = master_tempo_bands(float(target_bpm), float(getattr(args, "max_tempo_stretch_pct", 16.0)))
+    elif band_min is not None or band_max is not None:
+        bands = [(band_min, band_max)]
+    else:
+        bands = []
+    for low, high in bands:
         # Tempo-column browsing: pull the whole analyzed BPM band directly so a
-        # requested tempo range never depends on random pool draws.
+        # requested tempo range never depends on random pool draws. A master
+        # tempo pulls its double/half-time octave bands too — a 175 BPM track
+        # is in-band for a 90 BPM set at half-time feel.
         rows = candidate_rows(
             conn,
             constraints,
@@ -415,9 +432,9 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
             limit=args.sql_pool_limit,
             query=None,
             pool_limit=args.sql_pool_limit,
-            bpm_range=(band_min, band_max),
+            bpm_range=(low, high),
         )
-        add_pool_rows(rows, reason=f"tempo band {band_min or 0:g}-{band_max or 999:g} bpm")
+        add_pool_rows(rows, reason=f"tempo band {low or 0:g}-{high or 999:g} bpm")
     if args.stem_aware_remix:
         stem_filters = ["t.preferred_path IS NOT NULL", "lower(t.preferred_path) NOT LIKE '%/separated/%'"]
         stem_params: list[Any] = []
@@ -528,19 +545,19 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
     max_bpm = getattr(args, "max_bpm", None)
     target_bpm = getattr(args, "target_bpm", None)
     if target_bpm is not None and min_bpm is None and max_bpm is None:
-        stretch = max(0.0, float(getattr(args, "max_tempo_stretch_pct", 16.0))) / 100.0
-        min_bpm = target_bpm / (1.0 + stretch)
-        max_bpm = target_bpm * (1.0 + stretch)
-    if min_bpm is not None or max_bpm is not None:
+        bands = master_tempo_bands(float(target_bpm), float(getattr(args, "max_tempo_stretch_pct", 16.0)))
+    elif min_bpm is not None or max_bpm is not None:
+        bands = [(min_bpm, max_bpm)]
+    else:
+        bands = []
+    if bands:
         # Tempo-column browsing: the band prefilters the pool so ranking
-        # windows only ever see in-band tracks.
-        pool = [
-            row
-            for row in pool
-            if row.get("tunebat_bpm") is not None
-            and (min_bpm is None or float(row["tunebat_bpm"]) >= min_bpm)
-            and (max_bpm is None or float(row["tunebat_bpm"]) <= max_bpm)
-        ]
+        # windows only ever see in-band tracks (a master tempo accepts its
+        # double/half-time octaves too).
+        def in_band(bpm: float) -> bool:
+            return any((low is None or bpm >= low) and (high is None or bpm <= high) for low, high in bands)
+
+        pool = [row for row in pool if row.get("tunebat_bpm") is not None and in_band(float(row["tunebat_bpm"]))]
         if not pool:
             raise SystemExit("no candidates inside the requested BPM band")
     rng = random.SystemRandom()
@@ -1121,28 +1138,17 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         event_id = f"lead-{index + 1:03d}-{slugify(track.title)[:40]}"
         deck = "deck-2" if index % 2 == 0 else "deck-3"
         analysis = analyses.get(track.path)
+        # The session owns tempo, DAW-style: leads carry their analyzed
+        # source_bpm and the session layer warps them to master_bpm (straight
+        # or double/half-time) on every load. Leads render neutral when there
+        # is no master or no analysis. Pairwise arrangement-time warping
+        # (chasing each neighbor's tempo/key) chained into +/-16% tempo and
+        # 4-semitone swings between songs; corrections belong to the planner,
+        # small and clamped, on real overlaps only.
         transform: dict[str, Any] = {"tempo_shift_pct": 0.0, "pitch_shift_semitones": 0}
         plan_payload: dict[str, Any] | None = None
-        target_bpm = getattr(args, "target_bpm", None)
-        if target_bpm is not None and analysis is not None and analysis.bpm:
-            # Tempo-locked set: every lead renders at the target tempo. This is
-            # the deliberate slowed/sped remix move, not drift correction. A
-            # track beyond the stretch limit plays neutral rather than warped.
-            lock_pct = (float(target_bpm) / float(analysis.bpm) - 1.0) * 100.0
-            stretch_limit = abs(float(getattr(args, "max_tempo_stretch_pct", 16.0)))
-            if abs(lock_pct) > stretch_limit:
-                lock_pct = 0.0
-            transform = {"tempo_shift_pct": round(lock_pct, 3), "pitch_shift_semitones": 0}
-            transform["transition_decision"] = {
-                "tempo_shift_pct": transform["tempo_shift_pct"],
-                "pitch_shift_semitones": 0,
-                "decision": "tempo-locked",
-                "reason": f"lead stretched from {analysis.bpm:g} to target {target_bpm:g} BPM for the set",
-            }
-        # Leads render neutral unless the whole set is tempo-locked. Pairwise
-        # arrangement-time warping (chasing each neighbor's tempo/key) chained
-        # into +/-16% tempo and 4-semitone swings between songs; corrections
-        # belong to the planner, small and clamped, on real overlaps only.
+        if analysis is not None and analysis.bpm:
+            transform["source_bpm"] = float(analysis.bpm)
         base_event = {
             "id": event_id,
             "deck": deck,
@@ -1223,6 +1229,14 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         "version": 1,
         "timeline_mode": "autodj-arrangement",
         "decks": ["deck-1", "deck-2", "deck-3", VOCAL_DECK],
+        **(
+            {
+                "master_bpm": float(args.target_bpm),
+                "max_tempo_stretch_pct": abs(float(getattr(args, "max_tempo_stretch_pct", 16.0))),
+            }
+            if getattr(args, "target_bpm", None) is not None
+            else {}
+        ),
         "clips": sorted(timeline_events, key=lambda clip: (int(clip.get("start_ms") or 0), str(clip.get("id") or ""))),
         "actions": sorted(actions, key=lambda action: (int(action.get("at_ms", action.get("start_ms", 0)) or 0), str(action.get("id") or ""))),
         "transition_plans": transition_plans,

@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import AUDACITY_REVERB_PRESETS, audit_hidden_volume_sag, audit_session_durations, load_session, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary
+from slime_audio_session import AUDACITY_REVERB_PRESETS, apply_master_tempo, audit_hidden_volume_sag, audit_session_durations, load_payload, load_session, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary, set_event_warp, set_master_tempo
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
@@ -2327,6 +2327,111 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload.get("automations", []), [])
         self.assertEqual(payload["deck_automations"][0]["target"], "deck-2")
         self.assertEqual(session.deck_automations[0].param, "gain_db")
+
+
+class MasterTempoTests(unittest.TestCase):
+    """The session owns tempo: clips warp to master_bpm like a DAW project."""
+
+    @staticmethod
+    def payload(master_bpm=90.0, clips=None):
+        return {
+            "version": 1,
+            "master_bpm": master_bpm,
+            "decks": ["deck-1", "deck-2", "deck-3", "deck-5"],
+            "clips": clips
+            if clips is not None
+            else [
+                {
+                    "id": "lead-001",
+                    "deck": "deck-2",
+                    "path": "/music/a.flac",
+                    "start_ms": 0,
+                    "duration_ms": 240_000,
+                    "source_bpm": 85.0,
+                    "tempo_shift_pct": 0.0,
+                    "pitch_shift_semitones": 0,
+                }
+            ],
+            "mic_lean_ins": [
+                {"id": "mic-001", "deck": "deck-5", "start_ms": 30_000, "text": "authored line"}
+            ],
+        }
+
+    def test_straight_warp_to_master(self):
+        payload = apply_master_tempo(self.payload())
+        self.assertAlmostEqual(payload["clips"][0]["tempo_shift_pct"], (90.0 / 85.0 - 1.0) * 100.0, places=2)
+
+    def test_half_time_interpretation_uses_smallest_stretch(self):
+        payload = self.payload()
+        payload["clips"][0]["source_bpm"] = 175.0
+        payload = apply_master_tempo(payload)
+        # 175 -> 180 (double of master) is +2.86%, far closer than -48% straight.
+        self.assertAlmostEqual(payload["clips"][0]["tempo_shift_pct"], (180.0 / 175.0 - 1.0) * 100.0, places=2)
+
+    def test_double_time_interpretation(self):
+        payload = self.payload()
+        payload["clips"][0]["source_bpm"] = 46.0
+        payload = apply_master_tempo(payload)
+        self.assertAlmostEqual(payload["clips"][0]["tempo_shift_pct"], (45.0 / 46.0 - 1.0) * 100.0, places=2)
+
+    def test_out_of_reach_plays_neutral(self):
+        payload = self.payload()
+        payload["clips"][0]["source_bpm"] = 130.0
+        payload = apply_master_tempo(payload)
+        self.assertEqual(payload["clips"][0]["tempo_shift_pct"], 0.0)
+
+    def test_warp_false_keeps_authored_tempo(self):
+        payload = self.payload()
+        payload["clips"][0]["warp"] = False
+        payload["clips"][0]["tempo_shift_pct"] = 3.0
+        payload = apply_master_tempo(payload)
+        self.assertEqual(payload["clips"][0]["tempo_shift_pct"], 3.0)
+
+    def test_missing_source_bpm_untouched_and_pitch_preserved(self):
+        payload = self.payload()
+        payload["clips"][0].pop("source_bpm")
+        payload["clips"][0]["tempo_shift_pct"] = 1.5
+        payload["clips"][0]["pitch_shift_semitones"] = 2
+        payload = apply_master_tempo(payload)
+        self.assertEqual(payload["clips"][0]["tempo_shift_pct"], 1.5)
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], 2)
+
+    def test_derivation_is_idempotent_and_mic_never_warps(self):
+        payload = apply_master_tempo(apply_master_tempo(self.payload()))
+        self.assertAlmostEqual(payload["clips"][0]["tempo_shift_pct"], (90.0 / 85.0 - 1.0) * 100.0, places=2)
+        self.assertEqual(payload["mic_lean_ins"][0], self.payload()["mic_lean_ins"][0])
+
+    def test_load_payload_derives_from_disk(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "session.json"
+            path.write_text(json.dumps(self.payload()), encoding="utf-8")
+            payload = load_payload(path)
+        self.assertAlmostEqual(payload["clips"][0]["tempo_shift_pct"], (90.0 / 85.0 - 1.0) * 100.0, places=2)
+
+    def test_set_master_tempo_release_returns_native_tempo(self):
+        payload = apply_master_tempo(self.payload())
+        released = set_master_tempo(payload, 0)
+        self.assertNotIn("master_bpm", released)
+        self.assertEqual(released["clips"][0]["tempo_shift_pct"], 0.0)
+
+    def test_set_master_tempo_updates_master(self):
+        updated = set_master_tempo(self.payload(), 100.0, max_tempo_stretch_pct=20.0)
+        self.assertEqual(updated["master_bpm"], 100.0)
+        self.assertEqual(updated["max_tempo_stretch_pct"], 20.0)
+
+    def test_set_event_warp_off_zeroes_tempo_and_respects_lock(self):
+        payload = apply_master_tempo(self.payload())
+        with self.assertRaises(ValueError):
+            set_event_warp(payload, "lead-001", warp=False, lock_before_ms=120_000)
+        edited = set_event_warp(payload, "lead-001", warp=False, lock_before_ms=120_000, force=True)
+        self.assertIs(edited["clips"][0]["warp"], False)
+        self.assertEqual(edited["clips"][0]["tempo_shift_pct"], 0.0)
+
+    def test_set_event_warp_stamps_source_bpm(self):
+        payload = self.payload()
+        payload["clips"][0].pop("source_bpm")
+        edited = set_event_warp(payload, "lead-001", warp=True, source_bpm=85.0)
+        self.assertEqual(edited["clips"][0]["source_bpm"], 85.0)
 
 
 if __name__ == "__main__":

@@ -16,10 +16,14 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from slime_audio_session import apply_master_tempo
+
 
 def load_session(path: Path) -> dict:
     with path.open() as handle:
-        return json.load(handle)
+        return apply_master_tempo(json.load(handle))
 
 
 def lead_clips(session: dict) -> list[dict]:
@@ -58,18 +62,21 @@ def source_bpm_lookup(db_path: Path, paths: list[str]) -> dict[str, float]:
     return lookup
 
 
-def tempo_identity(clips: list[dict], bpm_by_path: dict[str, float]) -> dict:
+def tempo_identity(clips: list[dict], bpm_by_path: dict[str, float], master_bpm: float | None = None) -> dict:
     rendered = []
     for clip in clips:
-        bpm = bpm_by_path.get(str(clip.get("path")))
+        bpm = clip.get("source_bpm") or bpm_by_path.get(str(clip.get("path")))
         if bpm:
-            rendered.append(bpm * (1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0))
+            rendered.append(float(bpm) * (1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0))
     if not rendered:
-        return {"analyzed_leads": 0, "modal_bpm": None, "lock_coverage": None}
+        return {"analyzed_leads": 0, "master_bpm": master_bpm, "modal_bpm": None, "lock_coverage": None}
     modal = Counter(round(bpm) for bpm in rendered).most_common(1)[0][0]
-    within = sum(1 for bpm in rendered if abs(bpm - modal) <= 1.0)
+    anchor = float(master_bpm) if master_bpm else float(modal)
+    # Double/half-time renders count as locked: they share the master pulse.
+    within = sum(1 for bpm in rendered if any(abs(bpm - anchor * k) <= 1.0 for k in (1.0, 2.0, 0.5)))
     return {
         "analyzed_leads": len(rendered),
+        "master_bpm": master_bpm,
         "modal_bpm": modal,
         "lock_coverage": round(within / len(rendered), 3),
     }
@@ -142,7 +149,11 @@ def main() -> int:
         "title": session.get("title"),
         "duration_min": round(duration_ms / 60000.0, 1),
         "transitions": transition_stats(session),
-        "tempo_identity": tempo_identity(leads, source_bpm_lookup(args.db, [str(c.get("path")) for c in leads])),
+        "tempo_identity": tempo_identity(
+            leads,
+            source_bpm_lookup(args.db, [str(c.get("path")) for c in leads if not c.get("source_bpm")]),
+            master_bpm=session.get("master_bpm"),
+        ),
         "transforms": transform_stats(leads),
         "layers": layer_stats(session),
         "motion": motion_stats(session),
@@ -163,9 +174,10 @@ def main() -> int:
     ratio = "n/a" if t["blend_ratio"] is None else f"{t['blend_ratio']:.0%}"
     print(f"handoffs     : {t['blends']} blends / {t['cuts']} cuts ({ratio} blended, mean overlap {t['mean_overlap_ms'] // 1000}s)")
     if ti["modal_bpm"] is not None:
-        print(f"tempo        : modal {ti['modal_bpm']} BPM, {ti['lock_coverage']:.0%} of {ti['analyzed_leads']} analyzed leads within ±1")
+        anchor = f"master {ti['master_bpm']:g}" if ti.get("master_bpm") else f"modal {ti['modal_bpm']}"
+        print(f"tempo        : {anchor} BPM, {ti['lock_coverage']:.0%} of {ti['analyzed_leads']} analyzed leads locked (incl. double/half-time)")
     else:
-        print("tempo        : no analyzed leads found in library db")
+        print("tempo        : no analyzed leads found in session or library db")
     print(f"reshaping    : {tf['reshaped_leads']}/{tf['leads']} leads carry tempo/pitch transforms")
     print(f"layers       : {report['layers']['stem_layers']} stem layers; actions {report['layers']['actions'] or 'none'}")
     m = report["motion"]

@@ -184,6 +184,15 @@ def main() -> int:
     instant_double_parser.add_argument("--cache", type=Path, default=session.DEFAULT_DJ_CACHE)
     instant_double_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
 
+    set_tempo_parser = sub.add_parser("set-tempo", parents=[common])
+    set_tempo_parser.add_argument("--bpm", type=float, required=True, help="Master tempo for the set; 0 releases warped clips back to native tempo.")
+    set_tempo_parser.add_argument("--max-stretch-pct", type=float, help="Warp stretch limit; material out of reach plays neutral.")
+
+    set_warp_parser = sub.add_parser("set-warp", parents=[common])
+    set_warp_parser.add_argument("--id", required=True)
+    set_warp_parser.add_argument("--off", action="store_true", help="Opt this event out of master-tempo warping (sample drops, free-time material).")
+    set_warp_parser.add_argument("--source-bpm", type=float, help="Stamp the source BPM so the event can warp to the master tempo.")
+
     routine_parser = sub.add_parser("instant-double-routine", parents=[common])
     routine_parser.add_argument("--source-id", required=True)
     routine_parser.add_argument("--id", required=True)
@@ -234,6 +243,29 @@ def main() -> int:
     elif args.command == "remove":
         args.affected_ids = [args.id]
         apply_edit(args, lambda payload, lock_ms: session.remove_event(payload, args.id, lock_before_ms=lock_ms, force=args.force))
+    elif args.command == "set-tempo":
+        args.affected_ids = ["master-tempo"]
+        apply_edit(
+            args,
+            lambda payload, _lock_ms: session.set_master_tempo(
+                payload,
+                args.bpm,
+                max_tempo_stretch_pct=args.max_stretch_pct,
+            ),
+        )
+    elif args.command == "set-warp":
+        args.affected_ids = [args.id]
+        apply_edit(
+            args,
+            lambda payload, lock_ms: session.set_event_warp(
+                payload,
+                args.id,
+                warp=not args.off,
+                source_bpm=args.source_bpm,
+                lock_before_ms=lock_ms,
+                force=args.force,
+            ),
+        )
     elif args.command == "move":
         args.affected_ids = [args.id]
         apply_edit(args, lambda payload, lock_ms: session.move_event(payload, args.id, args.start, lock_before_ms=lock_ms, force=args.force))
