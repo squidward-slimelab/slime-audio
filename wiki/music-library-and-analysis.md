@@ -84,6 +84,10 @@ python3 scripts/slime_audio_candidates.py set-constraints --vibe "fresh daytime"
 
 Candidate output should carry reasons the DJ can explain. If the list is too narrow after exclusions, change the query/vibe and search again instead of reusing stale tracks.
 
+Repeat plays now carry real rotation pressure in candidate scoring (up to `-0.30` from `plays_seen` plus recency penalties), so heavily mirrored favorites cannot outrank fresh material forever. Stem readiness never filters candidates; stem-aware selection only applies a small tie-break bonus and queues background splits for what taste actually picked.
+
+`slime_music_library.py stats` includes a `genre_lanes` block (loose text-lane counts plus `edm_share`) for acquisition planning: while the EDM share is low, weight new downloads toward club rhythm material so the remix bed pool grows alongside the leads.
+
 ## Agent Playbook
 
 The detailed operating workflow for acquiring music, rescanning, analyzing, selecting candidates, planning creative beds, and rendering proofs lives in [skills/slime-audio-dj/SKILL.md](../skills/slime-audio-dj/SKILL.md).

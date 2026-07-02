@@ -11,6 +11,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = REPO_ROOT / "runtime" / "slime-music-library.sqlite3"
@@ -500,11 +501,45 @@ def read_text_value(path: Path | None, value: str | None) -> str:
     return value or ""
 
 
+# Loose text lanes for acquisition planning. These are search heuristics over
+# titles/artists/paths, not authoritative genre tags.
+GENRE_LANE_TERMS: dict[str, tuple[str, ...]] = {
+    "techno": ("techno",),
+    "house": ("house",),
+    "dnb": ("drum and bass", "drum n bass", "dnb", "jungle", "neurofunk"),
+    "dubstep": ("dubstep", "riddim", "brostep"),
+    "bass": ("bass music", "breakbeat", "breaks", "garage", "uk bass"),
+    "electronic": ("electronic", "electro", "edm", "rave", "trance", "hardstyle", "hardcore techno"),
+}
+
+
+def genre_lane_counts(conn: sqlite3.Connection) -> dict[str, Any]:
+    rows = conn.execute("SELECT normalized_title, normalized_artist, lower(locations) AS locations FROM tracks").fetchall()
+    counts = {lane: 0 for lane in GENRE_LANE_TERMS}
+    edm_tracks = 0
+    total = 0
+    for row in rows:
+        total += 1
+        haystack = " ".join(str(row[key] or "") for key in ("normalized_title", "normalized_artist", "locations"))
+        matched = [lane for lane, terms in GENRE_LANE_TERMS.items() if any(term in haystack for term in terms)]
+        for lane in matched:
+            counts[lane] += 1
+        if matched:
+            edm_tracks += 1
+    return {
+        "lanes": counts,
+        "edm_tracks": edm_tracks,
+        "total_tracks": total,
+        "edm_share": round(edm_tracks / total, 4) if total else 0.0,
+    }
+
+
 def command_stats(conn: sqlite3.Connection) -> None:
     summary = {
         "files": conn.execute("SELECT COUNT(*) AS value FROM files").fetchone()["value"],
         "unique_tracks": conn.execute("SELECT COUNT(*) AS value FROM duplicate_groups").fetchone()["value"],
         "duplicate_groups": conn.execute("SELECT COUNT(*) AS value FROM duplicate_groups WHERE copies > 1").fetchone()["value"],
+        "genre_lanes": genre_lane_counts(conn),
         "sources": rows_to_dicts(
             conn.execute(
                 """

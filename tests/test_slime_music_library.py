@@ -167,6 +167,31 @@ class SlimeMusicLibraryTests(unittest.TestCase):
             count = conn.execute("SELECT COUNT(*) AS count FROM files").fetchone()["count"]
             self.assertEqual(count, 0)
 
+    def test_genre_lane_counts_reports_edm_share(self):
+        from slime_music_library import Source, genre_lane_counts
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            root = temp / "Music"
+            for name in (
+                "Techno Crew/Warehouse/01 - Concrete Pulse.flac",
+                "Songwriter/Acoustic/01 - Kitchen Ballad.flac",
+                "DnB Unit/Jungle Tapes/01 - Ratchet Break.flac",
+            ):
+                track = root / name
+                track.parent.mkdir(parents=True, exist_ok=True)
+                track.write_bytes(b"x" * 64)
+            conn = connect(temp / "library.sqlite3")
+            scan(conn, [Source("patrick", "rockhouse", root, 100)], prune=True)
+
+            lanes = genre_lane_counts(conn)
+
+        self.assertEqual(lanes["total_tracks"], 3)
+        self.assertEqual(lanes["lanes"]["techno"], 1)
+        self.assertEqual(lanes["lanes"]["dnb"], 1)
+        self.assertEqual(lanes["edm_tracks"], 2)
+        self.assertAlmostEqual(lanes["edm_share"], 2 / 3, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

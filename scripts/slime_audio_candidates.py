@@ -420,7 +420,9 @@ def score_candidate(row: dict[str, Any], constraints: SetConstraints, *, play_me
     if play_meta:
         last_played_ts = play_meta.get("last_played_ts")
         plays_seen = int(play_meta.get("plays_seen") or 0)
-        penalty = min(0.12, plays_seen * 0.03)
+        # Long-term rotation pressure: repeat plays must be able to outweigh
+        # copy/quality boosts, or the same well-mirrored tracks win every set.
+        penalty = min(0.30, plays_seen * 0.06)
         if isinstance(last_played_ts, (int, float)):
             age_hours = max(0.0, (time.time() - float(last_played_ts)) / 3600)
             if age_hours < 6:

@@ -96,6 +96,10 @@ For vocal hooks/acapellas, use `scripts/slime_audio_vocal_cues.py align-session`
 
 If the requested mix needs material that is not already in the database, acquire it first, put it on a mounted music share, then load it into the library before using it in a session. Do not build sets from temporary download folders.
 
+Acquisition is also how the library's balance gets fixed. `slime_music_library.py stats` reports `genre_lanes` with an `edm_share`; while that share is low, weight new downloads toward EDM/club rhythm material (techno, house, dnb, dubstep, bass, breaks) because the remix workflow needs a deep bed pool: the target sound is a strong vocal/hook lead over fresh electronic rhythm sounds. This is a weighting, not a rule — keep acquiring leads the operator asks about, and as the EDM share grows, let the weighting relax. Also rotate the bed pool itself: if recent sets keep reaching for the same rhythm artist or crate, acquiring a fresh alternative in that lane is higher value than another lead.
+
+Selection must never quietly shrink to "whatever already has stems or analysis." Taste, history, and the operator's ask pick the tracks; missing stems get queued for background splitting and missing analysis gets backfilled. If a set keeps replaying the same corner of the library, that is a selection bug or an acquisition gap — fix it rather than accepting the loop.
+
 Use the local Soulseek/sldl wrapper named in operator notes. Pick a destination from the mounted music roots by checking free space and writeability, not by habit:
 
 ```bash
