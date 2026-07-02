@@ -367,7 +367,7 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
     pool: list[dict[str, Any]] = []
     queries = [None] if args.include_broad_pool else []
     source_words: list[str] = []
-    for word in normalize(f"{constraints.direction} {constraints.notes}").split():
+    for word in normalize(f"{constraints.vibe} {constraints.direction} {constraints.notes}").split():
         if len(word) >= 4 and word not in VIBE_STOP_WORDS:
             source_words.append(word)
     queries.extend(source_words[: args.query_count])
