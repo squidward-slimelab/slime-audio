@@ -99,7 +99,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             },
             lock_before_ms=0,
             double_every=0,
-            routine_every=0,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -221,7 +220,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
                 "/music/next.flac": analysis("/music/next.flac"),
             },
             lock_before_ms=0,
-            routine_every=0,
         )
 
         self.assertTrue(any(move.kind == "blend" for move in moves))
@@ -246,7 +244,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
                 "/music/next.flac": analysis("/music/next.flac", drop_ms=36_000, explicit_drop_cue=True),
             },
             lock_before_ms=0,
-            routine_every=0,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -329,7 +326,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
             lock_before_ms=130_000,
             plan_until_ms=260_000,
             double_every=10,
-            routine_every=0,
         )
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
@@ -382,39 +378,6 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         no_pitch_clips = {clip["id"]: clip for clip in no_pitch["clips"]}
         self.assertEqual(no_pitch_clips["next"]["start_ms"], no_pitch_clips["current"]["start_ms"] + no_pitch_clips["current"]["duration_ms"])
         self.assertIn("cut", no_pitch_moves[-1].reason)
-
-    def test_future_mix_planner_can_add_real_routines_from_cache(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            cache = Path(temp_dir) / "dj-cache.json"
-            tracks = ["/music/current.flac", "/music/next.flac", "/music/after.flac"]
-            write_analysis_cache(cache, tracks)
-            payload = {
-                "version": 1,
-                "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
-                "clips": [
-                    {"id": "current", "deck": "deck-3", "path": tracks[0], "start_ms": 0, "duration_ms": 120_000},
-                    {"id": "next", "deck": "deck-1", "path": tracks[1], "start_ms": 140_000, "duration_ms": 120_000},
-                    {"id": "after", "deck": "deck-2", "path": tracks[2], "start_ms": 280_000, "duration_ms": 120_000},
-                ],
-                "mic_lean_ins": [],
-                "automations": [],
-            }
-
-            planned, moves = plan_future_mix(
-                payload,
-                {track: analysis(track) for track in tracks},
-                lock_before_ms=130_000,
-                double_every=10,
-                routine_every=1,
-                routine_cache_path=cache,
-            )
-
-        self.assertTrue(any(move.kind == "routine" for move in moves))
-        self.assertTrue(any(clip.get("routine_recipe") == "echo-stabs" for clip in planned["clips"]))
-        self.assertTrue(any(clip.get("routine_recipe") == "loop-roll" for clip in planned["clips"]))
-        self.assertTrue(any(effect.get("routine_recipe") == "echo-stabs" for effect in planned.get("effects", [])))
-        self.assertTrue(any(slip.get("routine_recipe") == "loop-roll" for slip in planned.get("slip_events", [])))
-
 
 if __name__ == "__main__":
     unittest.main()

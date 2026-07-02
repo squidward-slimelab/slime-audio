@@ -21,7 +21,6 @@ from slime_audio_dj import (
     transition_plan,
 )
 from slime_audio_session import load_payload, parse_session, playhead_ms_from_state, write_payload
-from slime_audio_session import add_instant_double_routine
 
 DECK_ORDER = ["deck-2", "deck-3", "deck-1", "deck-4"]
 DEFAULT_LOCK_LEAD_MS = 20_000
@@ -29,7 +28,6 @@ DEFAULT_DOUBLE_DURATION_MS = 12_000
 MIN_OVERLAY_SCORE = 0.72
 MAX_RENDER_TEMPO_SHIFT_PCT = 4.0
 MAX_RENDER_PITCH_SHIFT_SEMITONES = 2
-AUTO_ROUTINE_RECIPES = ["echo-stabs", "loop-roll", "scratch-cuts", "one-beat-trades"]
 FILTER_OPEN_HZ = 22_050
 
 
@@ -174,21 +172,6 @@ def choose_deck(
         if deck_available(clips, deck, start_ms, end_ms):
             return deck
     return deck_order[0]
-
-
-def auto_routine_start_ms(clip: dict[str, Any], analysis: TrackAnalysis | None, *, lock_before_ms: int) -> int | None:
-    start_ms = int(clip.get("start_ms", 0))
-    duration_ms = int(clip.get("duration_ms") or 0)
-    if duration_ms < 36_000:
-        return None
-    phrase = phrase_ms(analysis)
-    routine_start = start_ms + phrase
-    if routine_start < lock_before_ms:
-        routine_start = lock_before_ms + 4_000
-    latest_start = start_ms + duration_ms - 10_000
-    if routine_start > latest_start:
-        return None
-    return routine_start
 
 
 def add_deck_automation(
@@ -343,9 +326,6 @@ def plan_future_mix(
     *,
     lock_before_ms: int,
     double_every: int = 0,
-    routine_every: int = 2,
-    routine_cache_path: Path | None = None,
-    routine_db_path: Path = DEFAULT_LIBRARY_DB,
     max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
     max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
     plan_until_ms: int | None = None,
@@ -495,40 +475,6 @@ def plan_future_mix(
         for automation in next_payload.get("automations", [])
         if not (automation.get("target") == "master" and automation.get("param") == "duck_volume" and automation.get("planner_role") == "mix-planner")
     ]
-    if routine_cache_path is not None and routine_every > 0:
-        routine_targets = [
-            (clip, analyses.get(str(clip.get("path"))))
-            for clip in sorted(next_payload.get("clips", []), key=lambda item: int(item.get("start_ms", 0)))
-            if clip.get("kind") not in {"planner-double", "effect-track"} and int(clip.get("start_ms", 0)) >= lock_before_ms
-        ]
-        routine_index = 0
-        for clip, analysis in routine_targets:
-            if routine_index % routine_every != 0:
-                routine_index += 1
-                continue
-            start_ms = auto_routine_start_ms(clip, analysis, lock_before_ms=lock_before_ms)
-            if start_ms is None:
-                routine_index += 1
-                continue
-            recipe = AUTO_ROUTINE_RECIPES[(routine_index // routine_every) % len(AUTO_ROUTINE_RECIPES)]
-            routine_id = f"auto-{recipe}-{clip.get('id')}"
-            try:
-                next_payload = add_instant_double_routine(
-                    next_payload,
-                    source_id=str(clip.get("id")),
-                    routine_id=routine_id,
-                    recipe=recipe,
-                    start=str(start_ms),
-                    cache_path=routine_cache_path,
-                    cue_db=routine_db_path,
-                    lock_before_ms=lock_before_ms,
-                    force=False,
-                )
-            except ValueError as error:
-                planned.append(PlannedMove("routine-skip", routine_id, start_ms, str(error), str(clip.get("id"))))
-            else:
-                planned.append(PlannedMove("routine", routine_id, start_ms, recipe, str(clip.get("id"))))
-            routine_index += 1
     parse_session(next_payload)
     return next_payload, planned
 
@@ -591,8 +537,6 @@ def main() -> int:
     parser.add_argument("--lock-before-ms", type=int)
     parser.add_argument("--lock-lead-ms", type=int, default=DEFAULT_LOCK_LEAD_MS)
     parser.add_argument("--double-every", type=int, default=0)
-    parser.add_argument("--routine-every", type=int, default=2)
-    parser.add_argument("--no-routines", action="store_true")
     parser.add_argument("--max-render-tempo-shift-pct", type=float, default=MAX_RENDER_TEMPO_SHIFT_PCT)
     parser.add_argument("--max-render-pitch-shift-semitones", type=int, default=MAX_RENDER_PITCH_SHIFT_SEMITONES)
     parser.add_argument("--cached-analysis-only", action="store_true", help="Use only cached DB analysis; missing tracks become explicit cut decisions.")
@@ -620,9 +564,6 @@ def main() -> int:
         analyses,
         lock_before_ms=lock_before_ms,
         double_every=args.double_every,
-        routine_every=0 if args.no_routines else args.routine_every,
-        routine_cache_path=None if args.no_routines else args.cache,
-        routine_db_path=args.db,
         max_tempo_shift_pct=args.max_render_tempo_shift_pct,
         max_pitch_shift_semitones=args.max_render_pitch_shift_semitones,
         plan_until_ms=plan_until_ms,

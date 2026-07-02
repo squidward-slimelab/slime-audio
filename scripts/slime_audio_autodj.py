@@ -398,27 +398,11 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
             query=query,
             pool_limit=args.sql_pool_limit,
             randomize_pool=query is None,
-            require_structure=args.structured_source_only,
         )
         add_pool_rows(rows, reason=f"rhythm lane query: {query}" if args.remix_focus and query in REMIX_RHYTHM_LANES else None)
     if args.stem_aware_remix:
         stem_filters = ["t.preferred_path IS NOT NULL", "lower(t.preferred_path) NOT LIKE '%/separated/%'"]
         stem_params: list[Any] = []
-        if args.structured_source_only:
-            stem_filters.append(
-                """
-                EXISTS (
-                    SELECT 1
-                    FROM track_dj_structure ds
-                    WHERE ds.path = t.preferred_path
-                      AND ds.kind != 'outro'
-                      AND ds.confidence >= 0.45
-                      AND ds.end_ms > ds.start_ms
-                      AND ds.end_ms - ds.start_ms >= ?
-                )
-                """
-            )
-            stem_params.append(8_000)
         stem_rows = conn.execute(
             f"""
             SELECT
@@ -596,13 +580,7 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
             break
         if row.get("downloaded_material"):
             try_select(row)
-    # Every lead must survive the structure filter. When analysis of missing
-    # tracks is disabled (cached-only live path) rejections are likely, so
-    # select a bounded 2x surplus; structured-source-only pools are already
-    # pre-filtered and need no surplus. Never exhaust the pool: analyzing the
-    # whole pool up front is what used to keep the room silent for 20+ minutes.
-    expect_rejections = not args.analyze_missing_sections and not args.structured_source_only
-    runway_stop_ms = args.min_runway_ms * (2 if expect_rejections else 1)
+    runway_stop_ms = args.min_runway_ms
     for row in ranked:
         if try_select(row):
             if len(selected) >= args.max_tracks:
@@ -860,7 +838,7 @@ def load_or_analyze_selected(selected: list[SelectedTrack], args: argparse.Names
             missing.append(path)
         else:
             analyses[track.path] = analysis
-    if missing and args.analyze_missing_sections:
+    if missing:
         for analysis in analyze_with_cache(
             missing,
             args.analysis_cache,
@@ -1164,9 +1142,6 @@ def run_planner(session_path: Path, args: argparse.Namespace, *, lock_before_ms:
         "--session",
         str(session_path),
         "--cached-analysis-only",
-        "--routine-every",
-        str(args.routine_every),
-        "--no-routines",
         "--apply",
     ]
     if lock_before_ms is not None:
@@ -3664,8 +3639,6 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--analysis-backend", choices=["auto", "ffmpeg"], default="ffmpeg")
     parser.add_argument("--analysis-sample-rate", type=int, default=44_100)
     parser.add_argument("--tunebat-analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
-    parser.add_argument("--analyze-missing-sections", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--structured-source-only", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--max-per-artist", type=int, default=1)
     parser.add_argument("--recent-limit", type=int, default=120)
     parser.add_argument("--recent-material-policy", choices=["penalty", "ban", "off"], default="penalty")
@@ -3702,7 +3675,6 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
     parser.add_argument("--bed-highpass-hz", type=float, default=90.0)
     parser.add_argument("--max-structural-beds", type=int, default=4)
-    parser.add_argument("--routine-every", type=int, default=3)
     parser.add_argument("--min-creative-moves", type=int, default=2)
     parser.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
     parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
