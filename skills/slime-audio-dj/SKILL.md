@@ -9,6 +9,8 @@ You are the DJ. The tools handle beatmatching math, key safety, and rendering; y
 
 A set is **full songs mixed into each other** — records play through and hand off where they musically should. That is the default (`--arrangement full`). Chopping tracks into anchored sections is a specific technique for rapid stem-remix work (`--arrangement sections`, implied by `--remix-focus`), not how normal sets are built.
 
+**Every set is a remix set.** Pick the set's tempo from the vibe and lock to it (`--target-bpm`); reshape records toward that tempo rather than hunting for records that already match. If the vibe is low-energy and your best material is fast, slow it down; if the vibe is high-energy and the crate is mellow, speed it up — those are often the most interesting mixes. A set whose leads all render neutral, handed off by cuts, is a playlist, and a playlist is a failed set. `RUBRIC.md` next to this file defines what a good set sounds like and how sets are graded — read it once before your first set.
+
 **The one rule that outranks everything else: get music playing first.** Start audio within a couple of minutes of being asked, then keep improving the future timeline while the room listens. A decent first track now beats a perfect plan later, every time. If you notice yourself planning, validating, or re-generating for more than a few minutes with no audio out, stop and start something.
 
 ## Privacy
@@ -33,14 +35,18 @@ python3 scripts/slime_audio_candidates.py set-constraints \
 
 # 3. Start the set. This selects, arranges, key/beat-safes the overlaps, and
 #    launches the live runner with about 5 minutes of buffer. Audio starts now.
-#    Browse the crates first (never query the sqlite db directly - browse IS
-#    the crate view: artist/title/tempo filters, ! marks unreachable files):
+#    First decide the set's tempo from the vibe (downtempo ≈ 85-95, house ≈
+#    122-126, dnb ≈ 170-174) — --target-bpm goes on every launch; without it
+#    leads render at native tempo and most handoffs fall back to cuts.
+#    Browse the crates (never query the sqlite db directly - browse IS the
+#    crate view: artist/title/tempo filters, ! marks unreachable files):
 python3 scripts/slime_music_library.py browse --artist "someone" --min-bpm 80 --max-bpm 100 --limit 30
 #    Then either hand-pick the tracklist (best for a themed request)...
 python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one line of intent" \
+  --target-bpm 90 \
   --track "/mnt/.../first.flac" --track "/mnt/.../second.flac"   # in play order
 #    ...or let selection pick mechanically from the constraints (fastest start):
-python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one line of intent"
+python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one line of intent" --target-bpm 90
 
 # 4. Keep it fed. Run this on a heartbeat/cron; it no-ops while there is
 #    enough runway and appends a fresh planned block when the buffer runs low.
@@ -49,9 +55,9 @@ python3 scripts/slime_audio_autodj.py extend --target-length-ms 0   # 0 = endles
 
 Useful `continue`/`extend` knobs:
 
-- `--target-bpm N` — tempo-lock the set: selection pulls tracks whose analyzed BPM can stretch to N (`--max-tempo-stretch-pct`, default 16), and every lead is authored to render at N. Slowing interesting tracks down (or speeding them up) is a first-class DJ move and often makes the most interesting mixes; use it whenever the vibe implies a tempo (downtempo ≈ 85-95, house ≈ 122-126, dnb ≈ 170-174).
+- `--target-bpm N` — tempo-lock the set: selection pulls tracks whose analyzed BPM can stretch to N (`--max-tempo-stretch-pct`, default 16), and every lead is authored to render at N. Under a lock the planner decides overlaps on key fit alone, so blends flow; unlocked, most pairs score below the overlay threshold and cut. This flag is the default move, not a knob — skip it only when the set deliberately has no tempo identity (pure ambient, spoken word).
 - `--min-bpm/--max-bpm` — plain tempo-column browsing without a lock.
-- `--remix-focus --stem-aware-remix` — the hard-lane remix treatment: vocal/hook leads over rhythm beds, stem-resolved loads. Prefer for energetic requests.
+- `--remix-focus --stem-aware-remix` — the hard-lane remix treatment: vocal/hook leads over rhythm beds, stem-resolved loads. Works at any energy — a slow vocal over a sparse dub bed is as much a remix as a festival mashup.
 - `--require-analysis` — restrict selection to tracks with BPM/key metadata (better blends, smaller pool).
 - `--query-count 12` — let the constraint vibe/direction words become library query lanes.
 
@@ -76,6 +82,8 @@ Safety that is built into the tools (you never have to think about it):
 
 ## Performing the set (this is your actual job)
 
+**Launch is the midpoint of the job, not the end.** `continue` gives you a competent skeleton — leads at the set tempo with planner blends. What makes it a *set* is what you layer on top while the first records play. Before you consider the job done, make real performance passes over the future timeline: stem/bed layers where the vibe allows, filter rides into the bigger transitions, a move or two with a nameable job. Then run `scripts/slime_audio_set_report.py SESSION.json` and read it against `RUBRIC.md` — if it reads like a playlist (low blend ratio, no tempo identity, zero layers), you are not done. Walking away right after launch ships a D.
+
 Once audio is running, you are live. Work *ahead of the playhead* with `scripts/slime_audio_live_edit.py` (state-locked; it will refuse edits under the needle):
 
 - **Selection steering**: re-rank what comes next from what is playing now; respect operator steering in the constraints file as hard input. Pull candidates from several angles (vibe queries, compatible keys/tempos, less-played corners). Don't loop the same crates; if selection keeps reaching for the same few artists, that is an acquisition gap — see Music Acquisition.
@@ -94,7 +102,7 @@ Craft notes that consistently separate good sets from canned ones:
 
 ## Music Acquisition
 
-If the library doesn't have the right music for the vibe, **getting the right music is part of the job** — do not settle for whatever title-matches the vibe words. Think of the artists/albums that actually fit (use your own musical knowledge; a web search for ideas is fine), then:
+**Shopping is part of every set, not a fallback for empty crates.** While the first tracks play, think of a record or two that would make *this* set better — a bridge the arc is missing, a bed the remix lane needs, the track you kept wishing was there while browsing (use your own musical knowledge; a web search for ideas is fine). Do not settle for whatever title-matches the vibe words. Then:
 
 1. `cat runtime/operator-notes.md` for the download tool and share layout.
 2. Pick the mounted `Music` share with the most free space (`df -h /mnt/*`).
