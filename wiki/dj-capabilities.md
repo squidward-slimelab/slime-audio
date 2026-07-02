@@ -16,7 +16,6 @@ Supported edit concepts include:
 - `beat-jump`
 - `instant-double`
 - `instant-double-routine`
-- `mashup-bed`
 - `fader-routing`
 - `crossfader`
 

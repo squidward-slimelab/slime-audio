@@ -2415,12 +2415,12 @@ def clip_start_end(payload: dict[str, Any], clip_id: str) -> tuple[int, int]:
         raise ValueError(f"event id does not exist: {clip_id}")
     collection, index = found
     if collection != "clips":
-        raise ValueError(f"mashup bed target must be a clip: {clip_id}")
+        raise ValueError(f"clip window target must be a clip: {clip_id}")
     clip = payload[collection][index]
     start_ms = event_start_ms(clip)
     duration = clip.get("duration_ms", clip.get("duration"))
     if duration is None:
-        raise ValueError(f"clip {clip_id} needs a duration before it can be used as a mashup bed")
+        raise ValueError(f"clip {clip_id} needs a duration before its window can be used")
     return start_ms, start_ms + parse_ms(duration, f"clip {clip_id} duration")
 
 
@@ -3012,47 +3012,6 @@ def add_scratch_cut_routine(
     return next_payload
 
 
-def add_mashup_bed(
-    payload: dict[str, Any],
-    *,
-    bed_id: str,
-    start: str | None,
-    end: str | None,
-    gain_db: float,
-    lowpass_hz: float | None,
-    highpass_hz: float | None,
-    lock_before_ms: int | None = None,
-    force: bool = False,
-) -> dict[str, Any]:
-    next_payload = copy.deepcopy(payload)
-    clip_start_ms, clip_end_ms = clip_start_end(next_payload, bed_id)
-    start_ms = parse_ms(start, "mashup bed start") if start is not None else clip_start_ms
-    end_ms = parse_ms(end, "mashup bed end") if end is not None else clip_end_ms
-    if end_ms <= start_ms:
-        raise ValueError("--end must be after --start")
-    guard_event_live_edit(next_payload, bed_id, lock_before_ms=lock_before_ms, force=force)
-    guard_live_edit(label=f"mashup bed automation for {bed_id}", start_ms=start_ms, lock_before_ms=lock_before_ms, force=force)
-    found = find_event(next_payload, bed_id)
-    if found is None:
-        raise ValueError(f"bed clip does not exist: {bed_id}")
-    bed_payload = next_payload[found[0]][found[1]]
-    deck = str(bed_payload.get("deck") or "")
-    if not deck:
-        raise ValueError(f"bed clip {bed_id} has no deck")
-
-    def points(value: float) -> list[dict[str, float | int]]:
-        return [{"at_ms": start_ms, "value": value}, {"at_ms": end_ms, "value": value}]
-
-    automations = next_payload.setdefault("deck_automations", [])
-    automations.append({"target": deck, "param": "gain_db", "points": points(gain_db), "source_clip_id": bed_id})
-    if lowpass_hz is not None:
-        automations.append({"target": deck, "param": "lowpass_hz", "points": points(lowpass_hz), "source_clip_id": bed_id})
-    if highpass_hz is not None:
-        automations.append({"target": deck, "param": "highpass_hz", "points": points(highpass_hz), "source_clip_id": bed_id})
-    parse_session(next_payload)
-    return next_payload
-
-
 def add_live_edit_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--lock-before",
@@ -3216,15 +3175,6 @@ def main() -> int:
     crossfader_parser.add_argument("--points-json", required=True)
     add_live_edit_args(crossfader_parser)
 
-    mashup_bed_parser = sub.add_parser("mashup-bed")
-    mashup_bed_parser.add_argument("session", type=Path)
-    mashup_bed_parser.add_argument("--bed-id", required=True)
-    mashup_bed_parser.add_argument("--start")
-    mashup_bed_parser.add_argument("--end")
-    mashup_bed_parser.add_argument("--gain-db", type=float, default=-8.0)
-    mashup_bed_parser.add_argument("--lowpass-hz", type=float, default=1800.0)
-    mashup_bed_parser.add_argument("--highpass-hz", type=float)
-    add_live_edit_args(mashup_bed_parser)
     args = parser.parse_args()
 
     if args.command == "template":
@@ -3462,25 +3412,6 @@ def main() -> int:
             ),
         )
         print("added crossfader automation")
-        return 0
-
-    if args.command == "mashup-bed":
-        lock_before_ms = live_edit_lock(args)
-        write_payload(
-            args.session,
-            add_mashup_bed(
-                load_payload(args.session),
-                bed_id=args.bed_id,
-                start=args.start,
-                end=args.end,
-                gain_db=args.gain_db,
-                lowpass_hz=args.lowpass_hz,
-                highpass_hz=args.highpass_hz,
-                lock_before_ms=lock_before_ms,
-                force=args.force,
-            ),
-        )
-        print(f"added mashup bed automation for {args.bed_id}")
         return 0
 
     session = load_session(args.session)

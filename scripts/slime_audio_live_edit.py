@@ -187,14 +187,6 @@ def main() -> int:
     routine_parser.add_argument("--cache", type=Path, default=session.DEFAULT_DJ_CACHE)
     routine_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
 
-    mashup_parser = sub.add_parser("mashup-bed", parents=[common])
-    mashup_parser.add_argument("--bed-id", required=True)
-    mashup_parser.add_argument("--start")
-    mashup_parser.add_argument("--end")
-    mashup_parser.add_argument("--gain-db", type=float, default=-8.0)
-    mashup_parser.add_argument("--lowpass-hz", type=float, default=1800.0)
-    mashup_parser.add_argument("--highpass-hz", type=float)
-
     args = parser.parse_args()
 
     if args.command == "add-action":
@@ -363,22 +355,6 @@ def main() -> int:
                 cue_db=args.cue_db,
                 cache_path=args.cache,
                 min_confidence=args.min_confidence,
-                lock_before_ms=lock_ms,
-                force=args.force,
-            ),
-        )
-    elif args.command == "mashup-bed":
-        args.affected_ids = [args.bed_id]
-        apply_edit(
-            args,
-            lambda payload, lock_ms: session.add_mashup_bed(
-                payload,
-                bed_id=args.bed_id,
-                start=args.start,
-                end=args.end,
-                gain_db=args.gain_db,
-                lowpass_hz=args.lowpass_hz,
-                highpass_hz=args.highpass_hz,
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),

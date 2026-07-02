@@ -10,7 +10,6 @@ Download the Windows installer from GitHub releases.
 
 - `SlimeAudio.Tray`: Windows tray app that listens on UDP `47777`.
 - `SlimeAudio.Send`: sends a PCM WAV to one or more devices with a shared future start timestamp.
-- `scripts/slime_audio_drops.py`: watches Spotify playback and sends timed phrase drops during specific songs.
 - `scripts/slime_audio_stream.py`: decodes a local audio file and streams it to any combo of discovered receivers with one synced start timestamp.
 - `scripts/slime_audio_session.py`: validates planned live-mix sessions with up to four decks, arbitrary clip start times, trims, mic lean-ins, and automation envelopes.
 - `scripts/slime_audio_web.py`: serves the read-only now-playing, scrub bar, and canonical DJ session timeline dashboard.
@@ -76,40 +75,6 @@ For a no-install smoke test from the repo:
 ```bash
 PYTHONPATH=src python3 -m spotify_brain run status --dry-run
 ```
-
-## Timed Sample Drops
-
-Timed drops are local and playback-aware. Write the phrases once in a JSON plan, then run the dropper while Spotify plays. It polls `spogo status`, matches the active track, and only sends drops while `is_playing` is true. If Spotify is paused, drops wait or skip instead of talking over silence.
-
-Spotify sometimes reports `progress_ms: 0` even when a song is already playing. By default, the runner will not fire timed drops until it has a reliable song clock: either Spotify reports a non-zero progress value, or the runner observes a track change and can treat that as the start. This avoids arming a plan from stale status and dropping samples at the wrong point in a song.
-
-Spotify documents its Web API limit as a rolling 30 second window, but does not publish a fixed request count. In local SPATULA probing, 5 second status polling was clean, 3 second status polling was clean in a short test, and 1.5 second polling correlated with `RESOURCE_EXHAUSTED` failures. The drop runner defaults to 5 seconds and backs off up to 30 seconds on status failures.
-
-```json
-{
-  "target": "SPATULA:47777",
-  "voice": "en-US-GuyNeural",
-  "rate": "-14%",
-  "volume": 1.7,
-  "poll_ms": 5000,
-  "max_poll_ms": 30000,
-  "require_known_progress": true,
-  "drops": [
-    {
-      "id": "pocket",
-      "track_uri": "spotify:track:3hmCHZFkgE4tkJKSqpOUhz",
-      "at": "0:42.500",
-      "text": "small checkpoint. youre in the pocket now."
-    }
-  ]
-}
-```
-
-```bash
-python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
-```
-
-Use `track_uri` for exact matching. `track_id` and `track_name` also work for quick local plans.
 
 ## Local File Streaming
 
@@ -178,7 +143,6 @@ Mix planning turns the analysis into executable session edits. `slime_audio_mix_
 Mashup planning is the target shape for DJ sets. A basic mashup uses one or more compatible tracks as filtered rhythmic/harmonic beds under another lead section. Until stem separation exists, use gain plus low-pass/high-pass automation to carve space for the lead:
 
 ```bash
-python3 scripts/slime_audio_session.py mashup-bed runtime/mix-session.json --bed-id break-loop --start 01:16.000 --end 01:48.000 --gain-db -8 --lowpass-hz 1800 --highpass-hz 100
 ```
 
 DJ analysis hydrates BPM/key/Camelot from `runtime/slime-music-library.sqlite3` TuneBat fields before using raw local estimates. Missing DB metadata should be filled with `scripts/slime_music_library.py analyze-tunebat-local DUPLICATE_KEY`; filename tags are ignored. The raw analyzer is useful for structure windows, but TuneBat-backed DB facts are the authority for beat/key planning. Drop/clip export proofs should still render through `slime_audio_session_mixdown.py --verify`, which rejects silent output before anything is shared or played.
@@ -211,7 +175,6 @@ python3 scripts/slime_audio_session.py summary runtime/mix-session.json
 python3 scripts/slime_audio_live_edit.py add-mic --id drop-2 --deck deck-5 --start 01:20.000 --text "quick note" --volume 1.7 --duck-volume 0.45 --reason "scheduled lean-in"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param gain_db --points-json '[{"at":"01:12.000","value":-18},{"at":"01:16.000","value":-2}]' --reason "shape bed entrance"
 python3 scripts/slime_audio_live_edit.py automate --target break-loop --param eq_low_db --points-json '[{"at":"01:16.000","value":-4},{"at":"01:48.000","value":-4}]' --reason "thin bed lows under lead"
-python3 scripts/slime_audio_live_edit.py mashup-bed --bed-id break-loop --start 01:16.000 --end 01:48.000 --gain-db -8 --lowpass-hz 1800 --highpass-hz 100
 python3 scripts/slime_audio_live_edit.py instant-double-routine --source-id break-loop --id break-loop-stabs --recipe stabs --start 01:24.000 --cache runtime/dj-analysis-cache.json
 python3 scripts/slime_audio_live_edit.py instant-double-routine --source-id break-loop --id break-loop-offbeat --recipe offbeat-swaps --start 01:24.000 --cache runtime/dj-analysis-cache.json
 python3 scripts/slime_audio_live_edit.py instant-double-routine --source-id break-loop --id break-loop-echo --recipe echo-stabs --start 01:24.000 --cache runtime/dj-analysis-cache.json

@@ -13,7 +13,6 @@
 - `apps/SlimeAudio/` contains the .NET Windows receiver/sender app, protocol library, tests, installer assets, and solution file.
 - `deploy/systemd/` contains Linux service units for local SlimeAudio services.
 - `docs/` contains older durable docs. New durable docs should be mirrored into `wiki/`.
-- `drops/` contains drop plan material for timed phrase drops.
 - `scripts/` contains the SlimeAudio operational toolchain: DJ analysis, session editing, live editing, mix planning, mixdown rendering, streaming, TTS lean-ins, dashboard serving, music library indexing, and web smoke checks.
 - `skills/slime-audio-dj/` contains the Codex/OpenClaw skill agents should read before planning, rendering, or playing DJ sets.
 - `src/spotify_brain/` contains the Python Spotify wrapper around `spogo`.

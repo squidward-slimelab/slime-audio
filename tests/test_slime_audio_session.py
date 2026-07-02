@@ -2175,53 +2175,6 @@ class SlimeAudioSessionTests(unittest.TestCase):
                     ]
                 )
 
-    def test_cli_mashup_bed_adds_filter_and_gain_automation(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "session.json"
-            path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "decks": ["deck-1", "deck-2"],
-                        "clips": [
-                            {"id": "bed", "deck": "deck-1", "path": "/music/bed.flac", "start": 0, "duration": 60_000},
-                            {"id": "lead", "deck": "deck-2", "path": "/music/lead.flac", "start": 16_000, "duration": 32_000},
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            self.assertEqual(
-                run_cli(
-                    [
-                        "slime_audio_session.py",
-                        "mashup-bed",
-                        str(path),
-                        "--bed-id",
-                        "bed",
-                        "--start",
-                        "00:16.000",
-                        "--end",
-                        "00:48.000",
-                        "--gain-db",
-                        "-10",
-                        "--lowpass-hz",
-                        "1800",
-                        "--highpass-hz",
-                        "100",
-                    ]
-                ),
-                0,
-            )
-            session = load_session(path)
-
-        self.assertEqual(session.automations, [])
-        self.assertEqual([automation.param for automation in session.deck_automations], ["gain_db", "lowpass_hz", "highpass_hz"])
-        self.assertEqual([automation.target for automation in session.deck_automations], ["deck-1", "deck-1", "deck-1"])
-        self.assertEqual(session.deck_automations[0].points[0].at_ms, 16_000)
-        self.assertEqual(session.deck_automations[0].points[-1].at_ms, 48_000)
-
     def test_cli_automate_deck_writes_deck_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"

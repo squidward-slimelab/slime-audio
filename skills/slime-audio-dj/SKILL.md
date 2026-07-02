@@ -30,7 +30,6 @@ Keep this skill generic and portable.
 - `scripts/slime_audio_commentary_planner.py`: add tasteful future commentary lean-ins with spacing, context, and logs.
 - `scripts/slime_audio_session_mixdown.py`: render compiled session actions/stem groups/clips and lean-ins into one Snapcast-ready mix file.
 - `scripts/slime_audio_session_runner.py`: run the native timestamped session in live-editable render windows.
-- `scripts/slime_audio_tts.py` and `scripts/slime_audio_drops.py`: legacy Spotify/drop helpers; do not use them for Snapcast-era mix lean-ins unless explicitly working on legacy Spotify playback.
 
 ## Immediacy First
 
@@ -52,7 +51,7 @@ Frontend state is part of the live-start contract. When starting real playback f
 
 When the operator asks for a mix, proof, routine, or revision, build it through the session edit API. The job is not to make an external audio collage; the job is to express the mix as editable session data so the runner, dashboard, review renders, and future agents all see the same thing.
 
-Use `scripts/slime_audio_live_edit.py` for active or future edits against the live session. Use `scripts/slime_audio_session.py` for offline setup against a named session file. These commands expose the same mix primitives: `add-action` for `load_track`/`stem_toggle`/`knob_lerp`, `move`, `remove`, `automate`, `add-effect`, `slip`, `fader-routing`, `crossfader`, `beat-jump`, `instant-double`, `instant-double-routine`, and `mashup-bed`.
+Use `scripts/slime_audio_live_edit.py` for active or future edits against the live session. Use `scripts/slime_audio_session.py` for offline setup against a named session file. These commands expose the same mix primitives: `add-action` for `load_track`/`stem_toggle`/`knob_lerp`, `move`, `remove`, `automate`, `add-effect`, `slip`, `fader-routing`, `crossfader`, `beat-jump`, `instant-double`, and `instant-double-routine`.
 
 The normal offline/proof sequence is:
 
@@ -240,7 +239,6 @@ When a live set is already playing and the operator says drops or blends sound o
 
 Prefer named edit-api routines when they fit, then customize with automation or effects. A good mix should have audible intent: doubles, stabs, filters, beds, brakes, echoes, scratches, crossfader cuts, lean-ins, or tension/release. If the operator asks for a showpiece, do not let long stretches play vanilla unless the restraint is the actual choice.
 
-- `mashup-bed`: legacy render-data helper for carving an already-loaded rhythm bed under a lead. Prefer `load_track` plus `knob_lerp` for new bed authoring.
 - EDM beds: make heavy use of rhythmically stable electronic/techno/house/dubstep/dnb/bass music/club tracks underneath lead songs, vocals, hooks, and pop material. Keep the bed audible enough to change the groove, not so buried that the mix reads as vanilla. Use EQ/filter carving, trim, and fader automation to leave room for the lead.
 - `instant-double`: clone a source onto another deck at the same musical position for trades, cuts, and layered emphasis.
 - `stabs` / `one-beat-trades` / `offbeat-swaps`: quantized double routines for audible DJ-style motion.

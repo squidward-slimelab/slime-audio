@@ -837,7 +837,7 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIn("atempo=1.030000", filters)
         self.assertIn("atrim=start=0.000:duration=10.300", filters)
 
-    def test_mixdown_filter_renders_clip_mashup_bed_automation(self):
+    def test_mixdown_filter_renders_static_bed_carve_automation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
             session_path.write_text(

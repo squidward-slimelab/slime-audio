@@ -88,14 +88,6 @@ flag exists only for manual receiver/FIFO debugging; autodj deliberately does
 not expose it, because a live set that cannot be live-edited is a degraded
 path.
 
-## Timed Drops
-
-`scripts/slime_audio_drops.py` watches Spotify playback and sends timed phrase drops from a JSON plan. It polls `spogo status`, matches the active track, and avoids firing over paused or unknown-progress playback.
-
-```bash
-python3 scripts/slime_audio_drops.py --plan drops.json --max-minutes 20
-```
-
 ## Services
 
 Systemd service files live in `deploy/systemd/`. Keep service docs here updated when units, paths, environment variables, or runtime expectations change.
