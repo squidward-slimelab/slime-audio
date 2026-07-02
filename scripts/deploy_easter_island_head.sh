@@ -15,6 +15,12 @@ fi
 "$VENV_DIR/bin/python" -m pip install -e .
 "$VENV_DIR/bin/python" -m compileall scripts src tests
 
+# Native DJ analyzer; slime_audio_dj.py falls back to pure Python if this
+# fails or the toolchain is missing, so a build failure is non-fatal.
+if command -v g++ >/dev/null 2>&1; then
+  make -C native || echo "warning: native analyzer build failed; Python fallback stays active"
+fi
+
 sudo install -m 0644 deploy/systemd/slime-audio-web.service /etc/systemd/system/slime-audio-web.service
 sudo install -m 0644 deploy/systemd/slime-music-library.service /etc/systemd/system/slime-music-library.service
 sudo install -m 0644 deploy/systemd/slime-music-library.timer /etc/systemd/system/slime-music-library.timer
