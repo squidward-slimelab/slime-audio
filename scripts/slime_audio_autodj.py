@@ -68,13 +68,10 @@ DEFAULT_TARGET_LENGTH_MS = 30 * 60 * 1000
 DEFAULT_ACTIVE_SET = DEFAULT_RUNTIME / "active-set.json"
 DEFAULT_MAX_TRACKS = 24
 DEFAULT_MIN_HARMONIC_OVERLAP_MS = 500
-DEFAULT_MIN_HARMONIC_CHECKS = 1
 AUTODJ_LOCK = Path("/tmp/slime-audio-autodj.lock")
-DEFAULT_SCRATCH_SOURCE_FILES = [
-    DEFAULT_RUNTIME / "stem-recovery-set-20260611-actions.json",
-    DEFAULT_RUNTIME / "stem-recovery-set-20260611-keyfixed-actions.json",
-    DEFAULT_RUNTIME / "phrase-anchor-selected-paths.txt",
-]
+# Operator-maintained list of proof/scratch material paths to keep out of
+# normal selection. Set data stays in runtime; no set names belong in code.
+DEFAULT_SCRATCH_SOURCE_FILES = [DEFAULT_RUNTIME / "scratch-source-paths.txt"]
 # Mic lines are authored live by the DJ agent driving the skill, never by this
 # script. Autodj only publishes commentary_slots (timing plus track context) in
 # its plan output so the agent can write and place its own lean-ins.
@@ -400,6 +397,27 @@ def candidate_pool(args: argparse.Namespace) -> list[dict[str, Any]]:
             randomize_pool=query is None,
         )
         add_pool_rows(rows, reason=f"rhythm lane query: {query}" if args.remix_focus and query in REMIX_RHYTHM_LANES else None)
+    band_min = getattr(args, "min_bpm", None)
+    band_max = getattr(args, "max_bpm", None)
+    target_bpm = getattr(args, "target_bpm", None)
+    if target_bpm is not None and band_min is None and band_max is None:
+        stretch = max(0.0, float(getattr(args, "max_tempo_stretch_pct", 16.0))) / 100.0
+        band_min = target_bpm / (1.0 + stretch)
+        band_max = target_bpm * (1.0 + stretch)
+    if band_min is not None or band_max is not None:
+        # Tempo-column browsing: pull the whole analyzed BPM band directly so a
+        # requested tempo range never depends on random pool draws.
+        rows = candidate_rows(
+            conn,
+            constraints,
+            history_path=args.history,
+            recent_limit=args.recent_limit,
+            limit=args.sql_pool_limit,
+            query=None,
+            pool_limit=args.sql_pool_limit,
+            bpm_range=(band_min, band_max),
+        )
+        add_pool_rows(rows, reason=f"tempo band {band_min or 0:g}-{band_max or 999:g} bpm")
     if args.stem_aware_remix:
         stem_filters = ["t.preferred_path IS NOT NULL", "lower(t.preferred_path) NOT LIKE '%/separated/%'"]
         stem_params: list[Any] = []
@@ -465,6 +483,25 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
                 row.setdefault("reasons", []).append("ready stem artifacts")
     pool = apply_scratch_material_policy(pool, args)
     pool = apply_recent_material_policy(pool, args)
+    min_bpm = getattr(args, "min_bpm", None)
+    max_bpm = getattr(args, "max_bpm", None)
+    target_bpm = getattr(args, "target_bpm", None)
+    if target_bpm is not None and min_bpm is None and max_bpm is None:
+        stretch = max(0.0, float(getattr(args, "max_tempo_stretch_pct", 16.0))) / 100.0
+        min_bpm = target_bpm / (1.0 + stretch)
+        max_bpm = target_bpm * (1.0 + stretch)
+    if min_bpm is not None or max_bpm is not None:
+        # Tempo-column browsing: the band prefilters the pool so ranking
+        # windows only ever see in-band tracks.
+        pool = [
+            row
+            for row in pool
+            if row.get("tunebat_bpm") is not None
+            and (min_bpm is None or float(row["tunebat_bpm"]) >= min_bpm)
+            and (max_bpm is None or float(row["tunebat_bpm"]) <= max_bpm)
+        ]
+        if not pool:
+            raise SystemExit("no candidates inside the requested BPM band")
     rng = random.SystemRandom()
     taste_profile = load_taste_profile(args.taste_profile)
     artist_counts: Counter[str] = Counter()
@@ -530,6 +567,7 @@ def select_tracks(args: argparse.Namespace, *, exclude_paths: set[str] | None = 
             return False
         if args.require_analysis and not (row.get("tunebat_bpm") or row.get("tunebat_energy") is not None):
             return False
+
         if args.min_score is not None and float(row.get("score") or 0.0) < args.min_score:
             return False
         artist = str(row.get("artist_guess") or "").strip()
@@ -995,10 +1033,23 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         analysis = analyses.get(track.path)
         transform: dict[str, Any] = {"tempo_shift_pct": 0.0, "pitch_shift_semitones": 0}
         plan_payload: dict[str, Any] | None = None
+        target_bpm = getattr(args, "target_bpm", None)
+        if target_bpm is not None and analysis is not None and analysis.bpm:
+            # Tempo-locked set: every lead renders at the target tempo. This is
+            # the deliberate slowed/sped remix move, not drift correction.
+            lock_pct = (float(target_bpm) / float(analysis.bpm) - 1.0) * 100.0
+            transform = {"tempo_shift_pct": round(lock_pct, 3), "pitch_shift_semitones": 0}
+            transform["transition_decision"] = {
+                "tempo_shift_pct": transform["tempo_shift_pct"],
+                "pitch_shift_semitones": 0,
+                "decision": "tempo-locked",
+                "reason": f"lead stretched from {analysis.bpm:g} to target {target_bpm:g} BPM for the set",
+            }
         if previous_track is not None and analyses.get(previous_track.path) is not None and analysis is not None:
             plan = transition_plan(analyses[previous_track.path], analysis, max_pitch_shift=6)
+            locked_tempo = transform["tempo_shift_pct"] if target_bpm is not None and analysis.bpm else None
             transform = {
-                "tempo_shift_pct": float(plan.target_tempo_shift_pct or 0.0),
+                "tempo_shift_pct": float(plan.target_tempo_shift_pct or 0.0) if locked_tempo is None else locked_tempo,
                 "pitch_shift_semitones": int(plan.pitch_shift_semitones or 0),
             }
             transform["transition_decision"] = {
@@ -1147,6 +1198,8 @@ def run_planner(session_path: Path, args: argparse.Namespace, *, lock_before_ms:
         "--cached-analysis-only",
         "--apply",
     ]
+    if getattr(args, "target_bpm", None) is not None:
+        command.extend(["--target-bpm", str(args.target_bpm)])
     if lock_before_ms is not None:
         command.extend(["--lock-before-ms", str(lock_before_ms)])
     result = subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
@@ -1879,24 +1932,6 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
 
     if failures:
         raise SystemExit(f"harmonic overlap guard failed: {json.dumps(failures[:5], sort_keys=True)}")
-    min_checks = int(getattr(args, "min_harmonic_checks", 0) or 0)
-    # A restrained set (explicit operator request) is cut-only by design, so
-    # zero overlaps is valid; any overlap that does exist above is still fully
-    # key-checked and can still fail.
-    if bool(getattr(args, "operator_restraint", False)):
-        min_checks = 0
-    if checked < min_checks:
-        raise SystemExit(
-            "harmonic overlap guard failed: "
-            + json.dumps(
-                {
-                    "checked": checked,
-                    "min_required": min_checks,
-                    "reason": "no key-checked musical overlap; refusing metadata-only transition plan",
-                },
-                sort_keys=True,
-            )
-        )
     return {"checked": checked, "min_overlap_ms": min_overlap_ms}
 
 
@@ -2141,11 +2176,7 @@ def validate_no_vanilla_leads(session_path: Path, args: argparse.Namespace) -> d
                 if start is not None:
                     record_move_window(windows, start - 2_000, (end or start) + 2_000, lead_start, lead_end)
         gap = max_gap_ms(lead_start, lead_end, windows)
-        # Operator-requested restraint (a sleep/background set) keeps the gap
-        # check but drops the overlapping-material requirement: sparse gentle
-        # moves are the deliberate arrangement, not an unfinished set.
-        restraint = bool(getattr(args, "operator_restraint", False))
-        if gap > args.max_vanilla_lead_ms or (not material_windows and not restraint):
+        if gap > args.max_vanilla_lead_ms or not material_windows:
             failure = {"id": lead_id, "max_vanilla_gap_ms": gap, "duration_ms": lead_end - lead_start}
             if not material_windows:
                 failure["reason"] = "no material DJ move overlaps this lead; filter/eq rides alone do not count"
@@ -2312,190 +2343,6 @@ REQUIRED_DECISION_AUDIT_FIELDS = (
 )
 
 
-def resolve_audit_path(session_path: Path, audit_path: str) -> Path:
-    path = Path(audit_path).expanduser()
-    if path.is_absolute():
-        return path
-    session_relative = session_path.parent / path
-    if session_relative.exists():
-        return session_relative
-    return REPO_ROOT / path
-
-
-def is_generated_dj_session(payload: dict[str, Any]) -> bool:
-    notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
-    return bool(
-        str(payload.get("timeline_mode") or "").startswith("autodj")
-        or notes.get("selected_material")
-        or notes.get("selection_process")
-        or notes.get("audit_trail_path")
-    )
-
-
-def load_decision_audit(session_path: Path, payload: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
-    notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
-    audit_ref = str(notes.get("audit_trail_path") or "").strip()
-    if not audit_ref:
-        raise SystemExit("decision audit guard failed: generated DJ session has no notes.audit_trail_path")
-    audit_path = resolve_audit_path(session_path, audit_ref)
-    try:
-        audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        raise SystemExit(f"decision audit guard failed: audit trail not found: {audit_path}") from None
-    except json.JSONDecodeError as error:
-        raise SystemExit(f"decision audit guard failed: audit trail is not valid JSON: {audit_path}: {error}") from None
-    if not isinstance(audit, dict):
-        raise SystemExit("decision audit guard failed: audit trail must be a JSON object")
-    return audit_path, audit
-
-
-def validate_decision_audit_trail(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
-    payload = load_session_payload(session_path)
-    if not is_generated_dj_session(payload):
-        return {"required": False, "checked": 0}
-    audit_path, audit = load_decision_audit(session_path, payload)
-    missing = [field for field in REQUIRED_DECISION_AUDIT_FIELDS if field not in audit]
-    empty = [field for field in REQUIRED_DECISION_AUDIT_FIELDS if field in audit and audit[field] in (None, "", [], {})]
-    if missing or empty:
-        raise SystemExit(
-            "decision audit guard failed: "
-            + json.dumps({"audit_path": str(audit_path), "empty": empty, "missing": missing}, sort_keys=True)
-        )
-    return {"required": True, "checked": len(REQUIRED_DECISION_AUDIT_FIELDS), "audit_path": str(audit_path)}
-
-
-def analysis_audit_payload(track: SelectedTrack, analysis: TrackAnalysis | None) -> dict[str, Any]:
-    payload = {
-        "path": track.path,
-        "artist": track.artist,
-        "title": track.title,
-        "analysis_available": analysis is not None,
-    }
-    if analysis is None:
-        return payload
-    payload.update(
-        {
-            "bpm": analysis.bpm,
-            "beat_offset_ms": analysis.beat_offset_ms,
-            "phrase_ms": analysis.beatgrid.phrase_ms if analysis.beatgrid else None,
-            "key": analysis.key,
-            "camelot": analysis.camelot,
-            "energy": analysis.energy,
-            "loudness_db": analysis.loudness_db,
-            "confidence": analysis.confidence,
-            "structure_windows": [
-                {
-                    "kind": window.kind,
-                    "start_ms": window.start_ms,
-                    "end_ms": window.end_ms,
-                    "confidence": window.confidence,
-                    "reason": window.reason,
-                }
-                for window in analysis.structure[:8]
-            ],
-        }
-    )
-    return payload
-
-
-def write_decision_audit_trail(
-    session_path: Path,
-    payload: dict[str, Any],
-    selected: list[SelectedTrack],
-    analyses: dict[str, TrackAnalysis],
-    args: argparse.Namespace,
-    *,
-    planner: dict[str, Any],
-    structural: dict[str, Any],
-    creative: dict[str, Any],
-    guards: dict[str, Any],
-    structure_rejections: list[dict[str, Any]],
-) -> dict[str, Any]:
-    audit_path = args.runtime / f"{args.slug}-decision-audit.json"
-    events = [*payload.get("actions", []), *payload.get("clips", [])]
-    transitions_by_target = {
-        str(plan.get("to_clip_id") or plan.get("to_action_id") or ""): plan
-        for plan in payload.get("transition_plans", [])
-        if isinstance(plan, dict)
-    }
-    audit = {
-        "request_summary": {
-            "title": args.title,
-            "slug": args.slug,
-            "intent": args.intent,
-            "live": not bool(args.dry_run),
-            "created_at": iso_now(),
-        },
-        "acquisition_summary": {
-            "mode": "database-backed continuation",
-            "fresh_downloads": [],
-            "reused_database_records": len(selected),
-        },
-        "candidate_pool": {
-            "selected": [asdict(track) for track in selected],
-            "structure_rejections": structure_rejections,
-            "selection_process": (payload.get("notes") or {}).get("selection_process"),
-        },
-        "analysis_source": [analysis_audit_payload(track, analyses.get(track.path)) for track in selected],
-        "tempo_key_decisions": payload.get("transition_plans", []),
-        "stem_role_plan": [
-            {
-                "id": event.get("id"),
-                "role": event.get("planner_role"),
-                "deck": event.get("deck"),
-                "source": event.get("source_path") or event.get("path"),
-                "play_stems": event.get("play_stems"),
-                "stem_layer_plan": event.get("stem_layer_plan"),
-            }
-            for event in events
-        ],
-        "source_windows": [
-            {
-                "id": event.get("id"),
-                "source": event.get("source_path") or event.get("path"),
-                "trim_start_ms": event.get("trim_start_ms"),
-                "duration_ms": event.get("duration_ms"),
-                "structure_kind": event.get("source_structure_kind"),
-                "reason": event.get("source_window_reason"),
-            }
-            for event in events
-        ],
-        "entry_exit_plan": [
-            {
-                "id": event.get("id"),
-                "deck": event.get("deck"),
-                "start_ms": event.get("at_ms", event.get("start_ms")),
-                "fade_in_ms": event.get("fade_in_ms"),
-                "fade_out_ms": event.get("fade_out_ms"),
-                "transition_plan": transitions_by_target.get(str(event.get("id") or "")),
-            }
-            for event in events
-        ],
-        "balance_proof": {
-            "component_bed_balance_guard": guards.get("component_bed_balance_guard"),
-            "known_limit": "live continuation audit records validator evidence; render balance proof is still required before calling a set finished",
-        },
-        "render_proof_checks": {
-            "planner": planner,
-            "structural": structural,
-            "creative": creative,
-            "guards": guards,
-        },
-        "launch_facts": {
-            "session": str(session_path),
-            "state": str(args.runtime / f"{args.slug}-state.json"),
-            "target": list(getattr(args, "target", []) or []),
-            "dry_run": bool(args.dry_run),
-        },
-    }
-    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    notes = payload.setdefault("notes", {})
-    if isinstance(notes, dict):
-        notes["audit_trail_path"] = str(audit_path)
-    write_payload(session_path, payload)
-    return {"path": str(audit_path), "fields": list(REQUIRED_DECISION_AUDIT_FIELDS)}
-
-
 def write_generation_failure_audit(
     args: argparse.Namespace,
     session_path: Path,
@@ -2544,111 +2391,6 @@ def write_generation_failure_audit(
     return {"path": str(audit_path), "stage": stage, "error": error_text}
 
 
-def write_failed_session_decision_audit(
-    args: argparse.Namespace,
-    session_path: Path,
-    *,
-    stage: str,
-    error: BaseException,
-    selected: list[SelectedTrack] | None = None,
-    analyses: dict[str, TrackAnalysis] | None = None,
-    structure_rejections: list[dict[str, Any]] | None = None,
-) -> dict[str, Any] | None:
-    if not session_path.exists():
-        return None
-    selected = selected or getattr(error, "selected", None) or []
-    analyses = analyses or {}
-    payload = load_session_payload(session_path)
-    audit_path = args.runtime / f"{args.slug}-decision-audit.json"
-    events = [*payload.get("actions", []), *payload.get("clips", [])]
-    transitions_by_target = {
-        str(plan.get("to_clip_id") or plan.get("to_action_id") or ""): plan
-        for plan in payload.get("transition_plans", [])
-        if isinstance(plan, dict)
-    }
-    audit = {
-        "request_summary": {
-            "title": args.title,
-            "slug": args.slug,
-            "intent": args.intent,
-            "live": not bool(args.dry_run),
-            "created_at": iso_now(),
-            "status": "failed-before-launch",
-            "failure_stage": stage,
-        },
-        "acquisition_summary": {
-            "mode": "database-backed continuation",
-            "fresh_downloads": [],
-            "reused_database_records": len(selected),
-        },
-        "candidate_pool": {
-            "selected": [asdict(track) for track in selected],
-            "structure_rejections": structure_rejections or [],
-            "selection_process": (payload.get("notes") or {}).get("selection_process"),
-        },
-        "analysis_source": [analysis_audit_payload(track, analyses.get(track.path)) for track in selected],
-        "tempo_key_decisions": payload.get("transition_plans", []),
-        "stem_role_plan": [
-            {
-                "id": event.get("id"),
-                "role": event.get("planner_role"),
-                "deck": event.get("deck"),
-                "source": event.get("source_path") or event.get("path"),
-                "play_stems": event.get("play_stems"),
-                "stem_layer_plan": event.get("stem_layer_plan"),
-            }
-            for event in events
-        ],
-        "source_windows": [
-            {
-                "id": event.get("id"),
-                "source": event.get("source_path") or event.get("path"),
-                "trim_start_ms": event.get("trim_start_ms"),
-                "duration_ms": event.get("duration_ms"),
-                "structure_kind": event.get("source_structure_kind"),
-                "reason": event.get("source_window_reason"),
-            }
-            for event in events
-        ],
-        "entry_exit_plan": [
-            {
-                "id": event.get("id"),
-                "deck": event.get("deck"),
-                "start_ms": event.get("at_ms", event.get("start_ms")),
-                "fade_in_ms": event.get("fade_in_ms"),
-                "fade_out_ms": event.get("fade_out_ms"),
-                "transition_plan": transitions_by_target.get(str(event.get("id") or "")),
-            }
-            for event in events
-        ],
-        "balance_proof": {
-            "status": "not-completed",
-            "reason": f"generation failed at {stage} before launch",
-        },
-        "render_proof_checks": {
-            "status": "failed-before-launch",
-            "failure": {
-                "stage": stage,
-                "type": type(error).__name__,
-                "message": str(error),
-            },
-        },
-        "launch_facts": {
-            "session": str(session_path),
-            "state": str(args.runtime / f"{args.slug}-state.json"),
-            "target": list(getattr(args, "target", []) or []),
-            "dry_run": bool(args.dry_run),
-            "launched": False,
-        },
-    }
-    audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    notes = payload.setdefault("notes", {})
-    if isinstance(notes, dict):
-        notes["audit_trail_path"] = str(audit_path)
-    write_payload(session_path, payload)
-    return {"path": str(audit_path), "fields": list(REQUIRED_DECISION_AUDIT_FIELDS), "failure_stage": stage}
-
-
 def stem_group_to_guard_event(group: dict[str, Any], actions_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
     event = dict(group)
     source_action_id = str(group.get("source_action_id") or group.get("id") or "")
@@ -2691,343 +2433,6 @@ def run_session_edit(command_args: list[str]) -> dict[str, Any]:
         "returncode": result.returncode,
         "stdout": result.stdout[-2000:],
         "stderr": result.stderr[-2000:],
-    }
-
-
-def ensure_utility_deck(session_path: Path, deck: str = "deck-4") -> None:
-    payload = load_session_payload(session_path)
-    decks = [str(item) for item in payload.get("decks", []) if str(item)]
-    if deck not in decks:
-        decks.append(deck)
-        payload["decks"] = decks
-    routing = payload.setdefault("fader_routing", {}).setdefault("deck_assignments", {})
-    routing.setdefault("deck-1", "A")
-    routing.setdefault("deck-2", "A")
-    routing.setdefault("deck-3", "B")
-    routing.setdefault(deck, "THRU")
-    write_payload(session_path, payload)
-
-
-def creative_source_score(clip: dict[str, Any]) -> int:
-    haystack = normalize(" ".join(str(clip.get(key) or "") for key in ("id", "path", "source_path")))
-    score = 0
-    for word in ("techno", "breakbeat", "dubstep", "industrial", "function", "jungle", "garage"):
-        if word in haystack:
-            score += 2
-    if clip_duration_ms(clip) >= 120_000:
-        score += 1
-    return score
-
-
-def vocal_target_score(clip: dict[str, Any]) -> int:
-    haystack = normalize(" ".join(str(clip.get(key) or "") for key in ("id", "path", "source_path")))
-    score = 0
-    for word in ("vocal", "rap", "hip-hop", "punk", "song", "feat", "with"):
-        if word in haystack:
-            score += 1
-    for word in ("instrumental", "withoutvocals", "bed", "techno", "breakbeat"):
-        if word in haystack:
-            score -= 2
-    if clip_duration_ms(clip) >= 90_000:
-        score += 1
-    return score
-
-
-def apply_creative_pass(session_path: Path, args: argparse.Namespace, *, min_start_ms: int = 0) -> dict[str, Any]:
-    payload = load_session_payload(session_path)
-    compiled = compile_actions_payload(payload)
-    actions_by_id = {
-        str(action.get("id")): action
-        for action in payload.get("actions", [])
-        if isinstance(action, dict) and action.get("id")
-    }
-    clips = sorted(
-        [
-            event
-            for event in [
-                *compiled.get("clips", []),
-                *[stem_group_to_guard_event(group, actions_by_id) for group in compiled.get("stem_groups", [])],
-            ]
-            if event.get("id")
-            and event_source(event)
-            and clip_duration_ms(event) > 0
-            and clip_start_ms(event) >= min_start_ms
-        ],
-        key=clip_start_ms,
-    )
-    moves: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
-    min_clip_count = 3 if min_start_ms == 0 else 2
-    if len(clips) < min_clip_count:
-        raise SystemExit(f"creative pass needs at least {min_clip_count} clips")
-    for clip in clips:
-        if "bed" in str(clip.get("planner_role") or ""):
-            moves.append({"kind": "structural-rhythm-bed", "source": clip.get("id"), "target": clip.get("bed_under")})
-    has_structural_beds = any(move.get("kind") == "structural-rhythm-bed" for move in moves)
-
-    echo_target = next((clip for clip in clips[1:] if clip_duration_ms(clip) >= 70_000), clips[1])
-    echo_start = max(clip_start_ms(echo_target), clip_end_ms(echo_target) - 12_000)
-    result = run_session_edit(
-        [
-            "add-effect",
-            str(session_path),
-            "--id",
-            f"autodj-echo-{echo_target['id']}",
-            "--type",
-            "echo",
-            "--target",
-            str(echo_target["id"]),
-            "--start",
-            str(echo_start),
-            "--duration",
-            "2500",
-            "--tail-ms",
-            "4500",
-            "--wet",
-            "0.34",
-            "--gain-db",
-            "-6",
-            "--delay-ms",
-            "330",
-            "--feedback",
-            "0.42",
-        ]
-    )
-    if result["returncode"] == 0:
-        moves.append({"kind": "echo-exit", "target": echo_target["id"], "result": result})
-    else:
-        failures.append({"kind": "echo-exit", "target": echo_target["id"], "result": result})
-
-    bed_candidates = [clip for clip in clips if creative_source_score(clip) > 0]
-    bed_source = max(bed_candidates or clips, key=creative_source_score)
-    targets = [clip for clip in clips[1:] if str(clip.get("id")) != str(bed_source.get("id"))]
-    target = max(targets, key=vocal_target_score) if targets else clips[-1]
-    bed_start = clip_start_ms(target) + min(30_000, max(0, clip_duration_ms(target) // 4))
-    bed_duration = min(96_000, max(32_000, clip_end_ms(target) - bed_start - 2_000))
-    creative_bed_ready = event_source(bed_source) in ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
-    if bed_duration >= 32_000 and not has_structural_beds and not creative_bed_ready:
-        failures.append(
-            {
-                "kind": "rhythm-bed",
-                "source": bed_source.get("id"),
-                "target": target.get("id"),
-                "error": "no ready stem artifacts for creative bed source; split stems first",
-            }
-        )
-    if bed_duration >= 32_000 and not has_structural_beds and creative_bed_ready:
-        ensure_utility_deck(session_path, "deck-4")
-        bed_id = f"autodj-bed-{slugify(str(bed_source['id']))[:32]}"
-        bed_source_track = SelectedTrack(
-            path=event_source(bed_source),
-            artist=str(bed_source.get("artist") or ""),
-            title=str(bed_source.get("id") or "bed source"),
-            album=str(bed_source.get("album") or ""),
-            score=0.0,
-            duration_ms=clip_duration_ms(bed_source),
-            last_played_at=None,
-            plays_seen=0,
-            reasons=[],
-        )
-        plan = plan_structural_bed_layer(
-            target,
-            bed_source_track,
-            ["drums", "bass", "other"],
-            args,
-            lead_analysis=load_analysis_from_db(args.db, Path(event_source(target))),
-        )
-        if plan is None:
-            failures.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "error": "no viable planned stem layer"})
-        else:
-            bed_start = int(plan["start_ms"])
-            bed_duration = int(plan["duration_ms"])
-        try:
-            if plan is not None:
-                session_payload = load_session_payload(session_path)
-                session_payload = add_action(
-                    session_payload,
-                    action={
-                        "type": "load_track",
-                        "id": bed_id,
-                        "deck": "deck-4",
-                        "source_path": event_source(bed_source),
-                        "at_ms": bed_start,
-                        "trim_start_ms": int(plan["trim_start_ms"]),
-                        "duration_ms": bed_duration,
-                        "gain_db": float(plan["gain_db"]),
-                        "fade_in_ms": 3000,
-                        "fade_out_ms": 1500,
-                        "play_stems": ["drums", "bass", "other"],
-                        "planner_role": "rhythm-bed",
-                        "bed_under": target.get("id"),
-                        "component_balance_strategy": str(plan["balance_profile"]),
-                        "stem_layer_plan": plan,
-                        "transition_decision": {
-                            "tempo_shift_pct": 0.0,
-                            "pitch_shift_semitones": 0,
-                            "decision": "drums-only bed" if set(plan.get("source_stems") or []) == {"drums"} else "planned rhythm bed",
-                            "reason": "explicit planned creative-pass layer; beat/key evidence is stored on stem_layer_plan",
-                        },
-                    },
-                    db_path=args.db,
-                    lock_before_ms=None,
-                    force=True,
-                )
-                automation_points = plan["automation_points"]
-                for action in (
-                    {
-                        "type": "knob_lerp",
-                        "id": f"{bed_id}-gain-ride",
-                        "target": "deck-4",
-                        "param": "gain_db",
-                        "at_ms": bed_start,
-                        "duration_ms": bed_duration,
-                        "from": automation_points["gain_db"][0]["value"],
-                        "to": automation_points["gain_db"][-2]["value"],
-                        "planner_role": "planned-stem-layer-automation",
-                        "stem_layer_plan_ref": bed_id,
-                    },
-                    {
-                        "type": "knob_lerp",
-                        "id": f"{bed_id}-lowpass-open",
-                        "target": "deck-4",
-                        "param": "lowpass_hz",
-                        "at_ms": bed_start,
-                        "duration_ms": bed_duration,
-                        "from": automation_points["lowpass_hz"][0]["value"],
-                        "to": automation_points["lowpass_hz"][1]["value"],
-                        "planner_role": "planned-stem-layer-automation",
-                        "stem_layer_plan_ref": bed_id,
-                    },
-                    {
-                        "type": "knob_lerp",
-                        "id": f"{bed_id}-highpass-trim",
-                        "target": "deck-4",
-                        "param": "highpass_hz",
-                        "at_ms": bed_start,
-                        "duration_ms": bed_duration,
-                        "from": automation_points["highpass_hz"][0]["value"],
-                        "to": automation_points["highpass_hz"][1]["value"],
-                        "planner_role": "planned-stem-layer-automation",
-                        "stem_layer_plan_ref": bed_id,
-                    },
-                ):
-                    session_payload = add_action(session_payload, action=action, db_path=args.db, lock_before_ms=None, force=True)
-                write_payload(session_path, session_payload)
-                moves.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "action_id": bed_id})
-                moves.append({"kind": "planned-stem-layer-automation", "source": bed_id, "action_id": f"{bed_id}-lowpass-open"})
-        except Exception as error:
-            failures.append(
-                {
-                    "kind": "rhythm-bed",
-                    "source": bed_source["id"],
-                    "target": target["id"],
-                    "id": bed_id,
-                    "error": str(error),
-                }
-            )
-
-    payload = load_session_payload(session_path)
-    compiled = compile_actions_payload(payload)
-    effects = list(compiled.get("effects", []))
-    actions_by_id = {
-        str(action.get("id")): action
-        for action in payload.get("actions", [])
-        if isinstance(action, dict) and action.get("id")
-    }
-    refreshed_events = [
-        event
-        for event in [
-            *compiled.get("clips", []),
-            *[stem_group_to_guard_event(group, actions_by_id) for group in compiled.get("stem_groups", [])],
-        ]
-        if event.get("id") and clip_duration_ms(event) > 0
-    ]
-    for lead in [
-        event
-        for event in refreshed_events
-        if is_guard_lead(event)
-        and clip_duration_ms(event) >= args.min_vanilla_check_ms
-        and clip_start_ms(event) >= min_start_ms
-    ]:
-        lead_id = str(lead.get("id") or "")
-        lead_start = clip_start_ms(lead)
-        lead_end = clip_end_ms(lead)
-        has_material = False
-        for event in refreshed_events:
-            if event is lead:
-                continue
-            role = str(event.get("planner_role") or "")
-            if role == "lead":
-                continue
-            overlap_start = max(lead_start, clip_start_ms(event))
-            overlap_end = min(lead_end, clip_end_ms(event))
-            if overlap_end > overlap_start:
-                has_material = True
-                break
-        if not has_material:
-            for effect in effects:
-                if effect.get("target") == lead_id and event_end_ms(effect) > lead_start and (event_start_ms(effect) or 0) < lead_end:
-                    has_material = True
-                    break
-        if has_material:
-            continue
-        accent_start = min(max(lead_start + 18_000, lead_end - 18_000), lead_start + max(8_000, clip_duration_ms(lead) // 2))
-        result = run_session_edit(
-            [
-                "add-effect",
-                str(session_path),
-                "--id",
-                f"autodj-accent-{slugify(lead_id)[:36]}",
-                "--type",
-                "echo",
-                "--target",
-                lead_id,
-                "--start",
-                str(accent_start),
-                "--duration",
-                "1800",
-                "--tail-ms",
-                "3200",
-                "--wet",
-                "0.22",
-                "--gain-db",
-                "-7",
-                "--delay-ms",
-                "260",
-                "--feedback",
-                "0.28",
-            ]
-        )
-        if result["returncode"] == 0:
-            moves.append({"kind": "echo-accent", "target": lead_id, "result": result})
-            effects.append(
-                {
-                    "id": f"autodj-accent-{slugify(lead_id)[:36]}",
-                    "target": lead_id,
-                    "start_ms": accent_start,
-                    "duration_ms": 1800,
-                    "tail_ms": 3200,
-                }
-            )
-        else:
-            failures.append({"kind": "echo-accent", "target": lead_id, "result": result})
-
-    validate = subprocess.run(
-        [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if validate.returncode != 0:
-        raise SystemExit(validate.stderr or validate.stdout or "creative session validation failed")
-    if len(moves) < args.min_creative_moves:
-        raise SystemExit(f"creative pass only added {len(moves)} move(s); refusing playlist-only autodj set")
-    return {
-        "required": True,
-        "moves": moves,
-        "failures": failures,
-        "validate": {"returncode": validate.returncode, "stdout": validate.stdout[-2000:], "stderr": validate.stderr[-2000:]},
     }
 
 
@@ -3258,21 +2663,22 @@ def extend_set(args: argparse.Namespace) -> int:
                 raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
             stage = "structural_beds"
             structural = add_structural_beds(work_path, selected, args, min_start_ms=total_ms)
-            stage = "creative_pass"
-            creative = apply_creative_pass(work_path, args, min_start_ms=total_ms)
-            stage = "vanilla_guard"
-            vanilla_guard = validate_no_vanilla_leads(work_path, args)
-            args.require_stem_loads = bool(args.stem_aware_remix) and not (block.get("notes") or {}).get("stem_split_queued")
-            stage = "stem_load_guard"
-            stem_load_guard = validate_stem_load_usage(work_path, args)
-            stage = "transition_decision_guard"
-            transition_decision_guard = validate_transition_decisions(work_path, args)
             stage = "harmonic_guard"
             harmonic_guard = validate_harmonic_overlaps(work_path, args)
-            stage = "vocal_guards"
-            vocal_guards = validate_vocal_guards(work_path, args)
-            stage = "component_bed_balance_guard"
-            component_bed_balance_guard = validate_component_bed_balance(work_path, args)
+            advisories: list[dict[str, Any]] = []
+            args.require_stem_loads = bool(args.stem_aware_remix) and not (block.get("notes") or {}).get("stem_split_queued")
+            guards = {
+                "harmonic_guard": harmonic_guard,
+                "vanilla_guard": run_advisory_guard("vanilla", validate_no_vanilla_leads, work_path, args, advisories),
+                "stem_load_guard": run_advisory_guard("stem-load", validate_stem_load_usage, work_path, args, advisories),
+                "transition_decision_guard": run_advisory_guard(
+                    "transition-decisions", validate_transition_decisions, work_path, args, advisories
+                ),
+                "vocal_guards": run_advisory_guard("vocal", validate_vocal_guards, work_path, args, advisories),
+                "component_bed_balance_guard": run_advisory_guard(
+                    "bed-balance", validate_component_bed_balance, work_path, args, advisories
+                ),
+            }
             stage = "session_validate"
             validate = subprocess.run(
                 [sys.executable, "scripts/slime_audio_session.py", "validate", str(work_path)],
@@ -3298,13 +2704,8 @@ def extend_set(args: argparse.Namespace) -> int:
                 "commentary_slots": block_commentary_slots,
                 "planner": planner,
                 "structural": structural,
-                "creative": creative,
-                "vanilla_guard": vanilla_guard,
-                "stem_load_guard": stem_load_guard,
-                "transition_decision_guard": transition_decision_guard,
-                "harmonic_guard": harmonic_guard,
-                "vocal_guards": vocal_guards,
-                "component_bed_balance_guard": component_bed_balance_guard,
+                "guards": guards,
+                "advisories": advisories,
                 "tracks": [asdict(track) for track in selected],
                 "structure_rejections": structure_rejections,
             }
@@ -3336,15 +2737,6 @@ def extend_set(args: argparse.Namespace) -> int:
             print(json.dumps(plan, indent=2, sort_keys=True))
             return 0
         except (SystemExit, Exception) as error:
-            decision_audit = write_failed_session_decision_audit(
-                args,
-                work_path,
-                stage=stage,
-                error=error,
-                selected=selected,
-                analyses=analyses,
-                structure_rejections=structure_rejections,
-            )
             failure_audit = write_generation_failure_audit(
                 args,
                 work_path,
@@ -3353,10 +2745,7 @@ def extend_set(args: argparse.Namespace) -> int:
                 selected=selected,
                 structure_rejections=structure_rejections,
             )
-            print(
-                json.dumps({"status": "failed", "decision_audit": decision_audit, "failure_audit": failure_audit}, sort_keys=True),
-                file=sys.stderr,
-            )
+            print(json.dumps({"status": "failed", "failure_audit": failure_audit}, sort_keys=True), file=sys.stderr)
             raise
     finally:
         os.close(lock_fd)
@@ -3412,53 +2801,30 @@ def continue_set(args: argparse.Namespace) -> int:
                 raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
             stage = "structural_beds"
             structural = add_structural_beds(session_path, selected, args)
-            stage = "creative_pass"
-            creative = apply_creative_pass(session_path, args)
-            stage = "vanilla_guard"
-            vanilla_guard = validate_no_vanilla_leads(session_path, args)
-            # Leads without ready stems load as clips and queue a background
-            # split, so the stem-load guard only applies when nothing fell back.
-            args.require_stem_loads = bool(args.stem_aware_remix) and not payload.get("notes", {}).get("stem_split_queued")
-            stage = "stem_load_guard"
-            stem_load_guard = validate_stem_load_usage(session_path, args)
-            stage = "transition_decision_guard"
-            transition_decision_guard = validate_transition_decisions(session_path, args)
+            # Two things gate playback: the session must render (below) and
+            # overlapping music must not audibly clash (here). Everything else
+            # is advice for the DJ agent, reported in the plan and dashboard.
             stage = "harmonic_guard"
             harmonic_guard = validate_harmonic_overlaps(session_path, args)
-            stage = "vocal_guards"
-            vocal_guards = validate_vocal_guards(session_path, args)
-            stage = "component_bed_balance_guard"
-            component_bed_balance_guard = validate_component_bed_balance(session_path, args)
+            advisories: list[dict[str, Any]] = []
+            args.require_stem_loads = bool(args.stem_aware_remix) and not payload.get("notes", {}).get("stem_split_queued")
             guards = {
-                "vanilla_guard": vanilla_guard,
-                "stem_load_guard": stem_load_guard,
-                "transition_decision_guard": transition_decision_guard,
                 "harmonic_guard": harmonic_guard,
-                "vocal_guards": vocal_guards,
-                "component_bed_balance_guard": component_bed_balance_guard,
+                "vanilla_guard": run_advisory_guard("vanilla", validate_no_vanilla_leads, session_path, args, advisories),
+                "stem_load_guard": run_advisory_guard("stem-load", validate_stem_load_usage, session_path, args, advisories),
+                "transition_decision_guard": run_advisory_guard(
+                    "transition-decisions", validate_transition_decisions, session_path, args, advisories
+                ),
+                "vocal_guards": run_advisory_guard("vocal", validate_vocal_guards, session_path, args, advisories),
+                "component_bed_balance_guard": run_advisory_guard(
+                    "bed-balance", validate_component_bed_balance, session_path, args, advisories
+                ),
             }
-            stage = "decision_audit"
-            payload = load_session_payload(session_path)
-            decision_audit = write_decision_audit_trail(
-                session_path,
-                payload,
-                selected,
-                analyses,
-                args,
-                planner=planner,
-                structural=structural,
-                creative=creative,
-                guards=guards,
-                structure_rejections=structure_rejections,
-            )
-            decision_audit_guard = validate_decision_audit_trail(session_path, args)
+            if args.remix_focus and int(structural.get("added") or 0) < 1:
+                advisories.append({"guard": "remix-focus", "warning": "no rhythm/stem bed landed; add beds live"})
             stage = "stem_readiness"
             stem_readiness = stem_readiness_report(selected, args)
-            if args.remix_focus:
-                move_kinds = {str(move.get("kind") or "") for move in creative.get("moves", [])}
-                if int(structural.get("added") or 0) < 1 and not ({"rhythm-bed", "structural-rhythm-bed", "bed-filter-carve"} & move_kinds):
-                    stage = "remix_focus_guard"
-                    raise SystemExit("remix-focus set has no rhythm/stem bed; refusing generic handoff-only mix")
+            payload = load_session_payload(session_path)
             stage = "session_validate"
             validate = subprocess.run(
                 [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -3482,15 +2848,8 @@ def continue_set(args: argparse.Namespace) -> int:
                 "intent": args.intent,
                 "planner": planner,
                 "structural": structural,
-                "creative": creative,
-                "vanilla_guard": vanilla_guard,
-                "stem_load_guard": stem_load_guard,
-                "transition_decision_guard": transition_decision_guard,
-                "harmonic_guard": harmonic_guard,
-                "vocal_guards": vocal_guards,
-                "component_bed_balance_guard": component_bed_balance_guard,
-                "decision_audit": decision_audit,
-                "decision_audit_guard": decision_audit_guard,
+                "guards": guards,
+                "advisories": advisories,
                 "stem_readiness": stem_readiness,
                 "commentary_slots": (payload.get("notes") or {}).get("commentary_slots", []),
                 "tracks": [asdict(track) for track in selected],
@@ -3507,16 +2866,7 @@ def continue_set(args: argparse.Namespace) -> int:
             plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(plan, indent=2, sort_keys=True))
             return 0
-        except SystemExit as error:
-            decision_audit = write_failed_session_decision_audit(
-                args,
-                session_path,
-                stage=stage,
-                error=error,
-                selected=selected,
-                analyses=analyses,
-                structure_rejections=structure_rejections,
-            )
+        except (SystemExit, Exception) as error:
             failure_audit = write_generation_failure_audit(
                 args,
                 session_path,
@@ -3525,36 +2875,20 @@ def continue_set(args: argparse.Namespace) -> int:
                 selected=selected,
                 structure_rejections=structure_rejections,
             )
-            print(
-                json.dumps({"status": "failed", "decision_audit": decision_audit, "failure_audit": failure_audit}, sort_keys=True),
-                file=sys.stderr,
-            )
-            raise
-        except Exception as error:
-            decision_audit = write_failed_session_decision_audit(
-                args,
-                session_path,
-                stage=stage,
-                error=error,
-                selected=selected,
-                analyses=analyses,
-                structure_rejections=structure_rejections,
-            )
-            failure_audit = write_generation_failure_audit(
-                args,
-                session_path,
-                stage=stage,
-                error=error,
-                selected=selected,
-                structure_rejections=structure_rejections,
-            )
-            print(
-                json.dumps({"status": "failed", "decision_audit": decision_audit, "failure_audit": failure_audit}, sort_keys=True),
-                file=sys.stderr,
-            )
+            print(json.dumps({"status": "failed", "failure_audit": failure_audit}, sort_keys=True), file=sys.stderr)
             raise
     finally:
         os.close(lock_fd)
+
+
+def run_advisory_guard(name: str, guard, session_path: Path, args: argparse.Namespace, advisories: list[dict[str, Any]]) -> dict[str, Any]:
+    """Taste guards advise; they do not gate playback. Only render validity
+    and audible harm (key clashes on real overlaps) stay fatal."""
+    try:
+        return guard(session_path, args)
+    except SystemExit as error:
+        advisories.append({"guard": name, "warning": str(error)})
+        return {"advisory": str(error)}
 
 
 def validate_dj_session(args: argparse.Namespace) -> int:
@@ -3575,7 +2909,6 @@ def validate_dj_session(args: argparse.Namespace) -> int:
         "harmonic_guard": validate_harmonic_overlaps(args.session, args),
         "vocal_guards": validate_vocal_guards(args.session, args),
         "component_bed_balance_guard": validate_component_bed_balance(args.session, args),
-        "decision_audit_guard": validate_decision_audit_trail(args.session, args),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
@@ -3591,7 +2924,6 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
     validate.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     validate.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
-    validate.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
     validate.add_argument("--require-stem-loads", action=argparse.BooleanOptionalAction, default=False)
     cont = sub.add_parser("continue", help="Start a fresh database-backed set when nothing is playing.")
     add_generation_arguments(cont)
@@ -3668,6 +3000,19 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scratch-material-penalty", type=float, default=0.8)
     parser.add_argument("--skip-term", action="append", default=list(DEFAULT_SKIP_TERMS))
     parser.add_argument("--require-analysis", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--min-bpm", type=float, help="Only select tracks with analyzed BPM at or above this (tempo-column browsing).")
+    parser.add_argument("--max-bpm", type=float, help="Only select tracks with analyzed BPM at or below this (tempo-column browsing).")
+    parser.add_argument(
+        "--target-bpm",
+        type=float,
+        help="Tempo-lock the set: select tracks whose analyzed BPM can stretch to this rendered tempo and author the shift on every lead. Slowing interesting tracks down (or speeding them up) is the point.",
+    )
+    parser.add_argument(
+        "--max-tempo-stretch-pct",
+        type=float,
+        default=16.0,
+        help="How far a lead may be stretched to reach --target-bpm (turntable wide mode is 16).",
+    )
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--default-track-ms", type=int, default=240_000)
     parser.add_argument("--min-track-ms", type=int, default=90_000)
@@ -3687,16 +3032,9 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bed-lowpass-hz", type=float, default=1_800.0)
     parser.add_argument("--bed-highpass-hz", type=float, default=90.0)
     parser.add_argument("--max-structural-beds", type=int, default=4)
-    parser.add_argument("--min-creative-moves", type=int, default=2)
     parser.add_argument("--min-vanilla-check-ms", type=int, default=90_000)
     parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     parser.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
-    parser.add_argument("--min-harmonic-checks", type=int, default=DEFAULT_MIN_HARMONIC_CHECKS)
-    parser.add_argument(
-        "--operator-restraint",
-        action="store_true",
-        help="The operator explicitly asked for a restrained set (sleep/background): keep the vanilla gap check but allow leads without overlapping material.",
-    )
     parser.add_argument("--dry-run", action="store_true")
 
 

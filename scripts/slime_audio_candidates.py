@@ -267,6 +267,7 @@ def candidate_rows(
     include_untagged: bool = False,
     pool_limit: int | None = None,
     randomize_pool: bool = False,
+    bpm_range: tuple[float | None, float | None] | None = None,
 ) -> list[dict[str, Any]]:
     recent_plays = recent_play_index(conn, history_path, recent_limit)
     filters = [
@@ -302,6 +303,15 @@ def candidate_rows(
         filters.append("(normalized_title LIKE ? OR normalized_artist LIKE ? OR lower(locations) LIKE lower(?))")
         normalized = f"%{normalize(query)}%"
         params.extend([normalized, normalized, f"%{query}%"])
+    if bpm_range is not None:
+        low, high = bpm_range
+        filters.append("tunebat_bpm IS NOT NULL")
+        if low is not None:
+            filters.append("tunebat_bpm >= ?")
+            params.append(low)
+        if high is not None:
+            filters.append("tunebat_bpm <= ?")
+            params.append(high)
     where = " AND ".join(filters)
     order_by = "ORDER BY random()" if randomize_pool else "ORDER BY preferred_quality_score DESC, copies DESC, server_count DESC"
     rows = conn.execute(

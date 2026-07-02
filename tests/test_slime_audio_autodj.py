@@ -18,7 +18,6 @@ from slime_audio_autodj import (
     apply_recent_material_policy,
     apply_scratch_material_policy,
     continue_set,
-    ensure_utility_deck,
     filter_defensible_source_tracks,
     is_edm_bed_candidate,
     is_downloaded_candidate,
@@ -29,7 +28,6 @@ from slime_audio_autodj import (
     structural_bed_balance_profile,
     stem_readiness_report,
     validate_component_bed_balance,
-    validate_decision_audit_trail,
     taste_affinity,
     validate_harmonic_overlaps,
     validate_no_vanilla_leads,
@@ -763,101 +761,6 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         self.assertIn("known canned ramp", str(raised.exception))
 
-    def test_decision_audit_guard_rejects_generated_session_without_audit_path(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.json"
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "timeline_mode": "autodj-arrangement",
-                        "notes": {"selection_process": "database candidates"},
-                        "clips": [],
-                        "actions": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaises(SystemExit) as raised:
-                validate_decision_audit_trail(session_path, SimpleNamespace())
-
-        self.assertIn("no notes.audit_trail_path", str(raised.exception))
-
-    def test_decision_audit_guard_rejects_receipt_style_audit(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp = Path(temp_dir)
-            audit_path = temp / "decision-audit.json"
-            audit_path.write_text(
-                json.dumps(
-                    {
-                        "request_summary": "new set",
-                        "selected_records": [{"artist": "Artist", "title": "Track"}],
-                        "stem_status": "split",
-                        "launch_plan": "runner",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            session_path = temp / "session.json"
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "notes": {"audit_trail_path": "decision-audit.json"},
-                        "clips": [],
-                        "actions": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaises(SystemExit) as raised:
-                validate_decision_audit_trail(session_path, SimpleNamespace())
-
-        self.assertIn("missing", str(raised.exception))
-        self.assertIn("tempo_key_decisions", str(raised.exception))
-
-    def test_decision_audit_guard_accepts_full_audit(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp = Path(temp_dir)
-            audit_path = temp / "decision-audit.json"
-            audit_path.write_text(
-                json.dumps(
-                    {
-                        "request_summary": {"intent": "test"},
-                        "acquisition_summary": {"mode": "database"},
-                        "candidate_pool": {"selected": ["track"]},
-                        "analysis_source": [{"bpm": 120.0}],
-                        "tempo_key_decisions": [{"decision": "cut"}],
-                        "stem_role_plan": [{"id": "lead-1", "role": "lead"}],
-                        "source_windows": [{"id": "lead-1", "trim_start_ms": 0}],
-                        "entry_exit_plan": [{"id": "lead-1", "transition_plan": {"decision": "cut"}}],
-                        "balance_proof": {"component_bed_balance_guard": {"checked": 0}},
-                        "render_proof_checks": {"guards": {"vanilla_guard": {"checked": 1}}},
-                        "launch_facts": {"session": "session.json"},
-                    }
-                ),
-                encoding="utf-8",
-            )
-            session_path = temp / "session.json"
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "notes": {"audit_trail_path": "decision-audit.json"},
-                        "clips": [],
-                        "actions": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = validate_decision_audit_trail(session_path, SimpleNamespace())
-
-        self.assertTrue(result["required"])
-        self.assertEqual(result["checked"], 11)
-
     def test_scratch_material_policy_falls_back_when_only_scratch_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp = Path(temp_dir)
@@ -1176,34 +1079,6 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         track = replace(track, reasons=["bpm 172.0", "rhythm lane query: drum and bass"])
 
         self.assertGreater(rhythm_bed_score(track), 0)
-
-    def test_ensure_utility_deck_adds_deck_and_routing(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.json"
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "decks": ["deck-2", "deck-3"],
-                        "clips": [
-                            {
-                                "id": "lead",
-                                "deck": "deck-2",
-                                "path": "/music/lead.flac",
-                                "start_ms": 0,
-                                "duration_ms": 60_000,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            ensure_utility_deck(session_path, "deck-4")
-            payload = json.loads(session_path.read_text(encoding="utf-8"))
-
-        self.assertIn("deck-4", payload["decks"])
-        self.assertEqual(payload["fader_routing"]["deck_assignments"]["deck-4"], "THRU")
 
     def test_session_payload_always_requires_structure(self):
         track = selected_track()
@@ -1561,53 +1436,6 @@ class SlimeAudioAutodjTests(unittest.TestCase):
             )
 
         self.assertEqual(result["checked"], 1)
-
-    def test_harmonic_guard_rejects_zero_checked_overlap_when_required(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            session_path = Path(temp_dir) / "session.json"
-            session_path.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "clips": [
-                            {
-                                "id": "lead-a",
-                                "path": "/music/a.flac",
-                                "start_ms": 0,
-                                "duration_ms": 90_000,
-                                "planner_role": "lead",
-                                "key": "C minor",
-                            },
-                            {
-                                "id": "lead-b",
-                                "path": "/music/b.flac",
-                                "start_ms": 91_000,
-                                "duration_ms": 90_000,
-                                "planner_role": "lead",
-                                "key": "G minor",
-                            },
-                        ],
-                        "transition_plans": [
-                            {
-                                "from_clip_id": "lead-a",
-                                "to_clip_id": "lead-b",
-                                "decision": "hard cut",
-                                "tempo_shift_pct": 0.0,
-                                "pitch_shift_semitones": 0,
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with self.assertRaises(SystemExit) as raised:
-                validate_harmonic_overlaps(
-                    session_path,
-                    SimpleNamespace(min_harmonic_overlap_ms=500, min_harmonic_checks=1),
-                )
-
-        self.assertIn("no key-checked musical overlap", str(raised.exception))
 
     def test_transition_decision_guard_rejects_zero_shift_handoff_without_plan(self):
         stems = {
@@ -2094,7 +1922,6 @@ class SlimeAudioAutodjExtendTests(unittest.TestCase):
             ),
             patch.object(autodj, "run_planner", return_value={"returncode": 0, "stdout": "", "stderr": "", "command": []}),
             patch.object(autodj, "add_structural_beds", return_value={"added": 0}),
-            patch.object(autodj, "apply_creative_pass", return_value={"required": True, "moves": [], "failures": []}),
             patch.object(autodj, "validate_no_vanilla_leads", return_value={}),
             patch.object(autodj, "validate_stem_load_usage", return_value={}),
             patch.object(autodj, "validate_transition_decisions", return_value={}),

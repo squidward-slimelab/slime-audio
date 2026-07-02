@@ -10,6 +10,7 @@ from typing import Any
 
 from slime_audio_dj import (
     DEFAULT_CACHE,
+    major_equivalent_tonic,
     DEFAULT_LIBRARY_DB,
     DEFAULT_TUNEBAT_LOCAL_ANALYZER,
     TrackAnalysis,
@@ -110,8 +111,61 @@ def safe_overlay_plan(
         return None, f"pitch shift {plan.pitch_shift_semitones:+d} exceeds allowed render shift"
     if tempo_shift > max_tempo_shift_pct:
         return None, f"tempo shift {tempo_shift:.2f}% too large for current renderer"
+    # The repo key-fit policy (and the autodj harmonic guard) requires the
+    # overlapped keys to share a relative-major tonic after the chosen shift.
+    # Camelot-adjacent pairs score well but are not alignable, so they cut.
+    if (
+        source.tonic is not None
+        and source.mode in {"major", "minor"}
+        and target.tonic is not None
+        and target.mode in {"major", "minor"}
+    ):
+        source_relative = major_equivalent_tonic(source.tonic % 12, source.mode)
+        target_relative = major_equivalent_tonic((target.tonic + int(plan.pitch_shift_semitones or 0)) % 12, target.mode)
+        if source_relative != target_relative:
+            return None, "keys are not relative-tonic alignable within render limits"
     pitch_note = f"; pitch {plan.pitch_shift_semitones:+d}" if plan.pitch_shift_semitones else ""
     return plan, f"score {plan.score}; {plan.key_relation}; tempo {plan.target_tempo_shift_pct or 0.0:+.2f}%{pitch_note}"
+
+
+def tempo_locked_key_plan(
+    source: TrackAnalysis | None,
+    target: TrackAnalysis | None,
+    max_pitch_shift_semitones: int,
+) -> tuple[Any | None, str]:
+    """Key alignment for a tempo-locked pair: tempos are already identical by
+    authored shifts, so only relative-tonic alignment within the pitch limit
+    decides blend vs cut."""
+    if source is None or target is None:
+        return None, "missing analysis"
+    plan = transition_plan(source, target, max_pitch_shift=max_pitch_shift_semitones)
+    if (
+        source.tonic is None
+        or source.mode not in {"major", "minor"}
+        or target.tonic is None
+        or target.mode not in {"major", "minor"}
+    ):
+        return None, "missing key metadata"
+    if abs(plan.pitch_shift_semitones) > max_pitch_shift_semitones:
+        return None, f"pitch shift {plan.pitch_shift_semitones:+d} exceeds allowed render shift"
+    source_relative = major_equivalent_tonic(source.tonic % 12, source.mode)
+    target_relative = major_equivalent_tonic((target.tonic + int(plan.pitch_shift_semitones or 0)) % 12, target.mode)
+    if source_relative != target_relative:
+        return None, "keys are not relative-tonic alignable within render limits"
+    pitch_note = f"; pitch {plan.pitch_shift_semitones:+d}" if plan.pitch_shift_semitones else ""
+    return plan, f"key {plan.key_relation}{pitch_note}"
+
+
+def tempo_locked_overlap_ms(
+    source: TrackAnalysis | None,
+    target: TrackAnalysis | None,
+    shorter_ms: int,
+    max_pitch_shift_semitones: int,
+) -> int:
+    plan, _reason = tempo_locked_key_plan(source, target, max_pitch_shift_semitones)
+    if plan is None:
+        return 0
+    return max(6_000, min(int(phrase_ms(source) or 16_000), shorter_ms // 3))
 
 
 def transition_overlap_ms(
@@ -329,6 +383,7 @@ def plan_future_mix(
     max_tempo_shift_pct: float = MAX_RENDER_TEMPO_SHIFT_PCT,
     max_pitch_shift_semitones: int = MAX_RENDER_PITCH_SHIFT_SEMITONES,
     plan_until_ms: int | None = None,
+    target_bpm: float | None = None,
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
     next_payload = copy.deepcopy(payload)
     normalize_clip_times(next_payload)
@@ -387,13 +442,18 @@ def plan_future_mix(
         # Blend vs cut is decided per pair: transition_overlap_ms returns 0
         # whenever analysis is missing or the pair cannot be made compatible
         # within the render limits, which keeps unsafe handoffs as hard cuts.
-        overlap = transition_overlap_ms(
-            previous_analysis,
-            analysis,
-            shorter,
-            max_tempo_shift_pct=max_tempo_shift_pct,
-            max_pitch_shift_semitones=max_pitch_shift_semitones,
-        )
+        # In a tempo-locked set every clip is authored to the same rendered
+        # tempo, so tempo compatibility is free and only key fit decides.
+        if target_bpm is not None:
+            overlap = tempo_locked_overlap_ms(previous_analysis, analysis, shorter, max_pitch_shift_semitones)
+        else:
+            overlap = transition_overlap_ms(
+                previous_analysis,
+                analysis,
+                shorter,
+                max_tempo_shift_pct=max_tempo_shift_pct,
+                max_pitch_shift_semitones=max_pitch_shift_semitones,
+            )
         start_ms = cursor if previous is None else max(lock_before_ms, clip_end(previous) - overlap)
         end_ms = start_ms + duration_ms
         deck = choose_deck(rebuilt, start_ms, end_ms, deck_order=deck_order, avoid={previous_deck} if previous_deck else set())
@@ -405,20 +465,34 @@ def plan_future_mix(
         # obvious; transition shape belongs in EQ/filter/crossfader automation.
         clip["fade_in_ms"] = min(overlap, 8_000) if overlap else 0
         clip["fade_out_ms"] = 0
-        plan, overlay_reason = safe_overlay_plan(
-            previous_analysis,
-            analysis,
-            max_tempo_shift_pct=max_tempo_shift_pct,
-            max_pitch_shift_semitones=max_pitch_shift_semitones,
-        )
-        if plan is not None:
-            clip["tempo_shift_pct"] = plan.target_tempo_shift_pct or 0.0
-            clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
-            reason = f"overlap {overlap}ms; {overlay_reason}"
+        if target_bpm is not None:
+            # Authored tempo locks are the arrangement; the planner only picks
+            # the key alignment for overlaps and never rewrites tempo.
+            plan, overlay_reason = (None, "tempo-locked cut") if not overlap else tempo_locked_key_plan(
+                previous_analysis, analysis, max_pitch_shift_semitones
+            )
+            if plan is not None:
+                clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
+                reason = f"overlap {overlap}ms; tempo-locked; {overlay_reason}"
+            else:
+                overlap = 0
+                clip["start_ms"] = cursor if previous is None else max(lock_before_ms, clip_end(previous))
+                reason = f"cut; {overlay_reason}"
         else:
-            clip["tempo_shift_pct"] = 0.0
-            clip["pitch_shift_semitones"] = 0
-            reason = f"cut; {overlay_reason}"
+            plan, overlay_reason = safe_overlay_plan(
+                previous_analysis,
+                analysis,
+                max_tempo_shift_pct=max_tempo_shift_pct,
+                max_pitch_shift_semitones=max_pitch_shift_semitones,
+            )
+            if plan is not None:
+                clip["tempo_shift_pct"] = plan.target_tempo_shift_pct or 0.0
+                clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
+                reason = f"overlap {overlap}ms; {overlay_reason}"
+            else:
+                # A cut is not permission to erase authored rendered
+                # corrections; leave the clip's own tempo/pitch alone.
+                reason = f"cut; {overlay_reason}"
         rebuilt.append(clip)
         planned.append(PlannedMove("blend" if overlap and plan is not None else "cut", str(clip.get("id")), start_ms, reason, str(previous.get("id")) if previous else None))
         next_payload.setdefault("transition_plans", []).append(
@@ -541,6 +615,11 @@ def main() -> int:
     parser.add_argument("--max-render-pitch-shift-semitones", type=int, default=MAX_RENDER_PITCH_SHIFT_SEMITONES)
     parser.add_argument("--cached-analysis-only", action="store_true", help="Use only cached DB analysis; missing tracks become explicit cut decisions.")
     parser.add_argument("--horizon-ms", type=int, help="Only rewrite future clips that begin before lock-before plus this horizon.")
+    parser.add_argument(
+        "--target-bpm",
+        type=float,
+        help="Tempo-locked set: clips are authored to one rendered tempo; the planner preserves those shifts and blends on key fit alone.",
+    )
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
 
@@ -567,6 +646,7 @@ def main() -> int:
         max_tempo_shift_pct=args.max_render_tempo_shift_pct,
         max_pitch_shift_semitones=args.max_render_pitch_shift_semitones,
         plan_until_ms=plan_until_ms,
+        target_bpm=args.target_bpm,
     )
     result = {
         "lock_before_ms": lock_before_ms,
