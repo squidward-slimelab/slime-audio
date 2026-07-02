@@ -267,7 +267,7 @@ def collect_master_automation(session: MixSession, param: str) -> list[tuple[int
         windows.append(automation_window(lean_in, param, 0.45 if param == "duck_volume" else 1400.0))
     for automation in session.automations:
         if automation.target == "master" and automation.param == param:
-            windows.append(window_from_automation(automation))
+            windows.extend(window_from_automation(automation))
     return sorted(windows, key=lambda item: item[0])
 
 
@@ -285,8 +285,61 @@ def session_duration_ms(session: MixSession, lean_in_default_ms: int = 5000) -> 
     return max(ends, default=1000)
 
 
-def window_from_automation(automation: Automation) -> tuple[int, int, float]:
-    return automation.points[0].at_ms, automation.points[-1].at_ms, float(automation.points[0].value)
+# Automation ramps render as piecewise-constant filter windows, so subdivide
+# finely enough that steps are inaudible. 120 ms keeps even a fast 24 dB fader
+# throw under ~1 dB per step; the cap bounds filter-graph size on long rides.
+RAMP_STEP_MS = 120
+MAX_RAMP_STEPS = 64
+
+
+def subdivide_ramp(start_ms: int, end_ms: int, start_value: float, end_value: float) -> list[tuple[int, int, float]]:
+    if end_ms <= start_ms:
+        return []
+    if start_value == end_value:
+        return [(start_ms, end_ms, float(start_value))]
+    duration_ms = end_ms - start_ms
+    steps = max(1, min(MAX_RAMP_STEPS, -(-duration_ms // RAMP_STEP_MS)))
+    windows: list[tuple[int, int, float]] = []
+    for index in range(steps):
+        step_start = start_ms + (duration_ms * index) // steps
+        step_end = start_ms + (duration_ms * (index + 1)) // steps
+        if step_end <= step_start:
+            continue
+        ratio = (index + 0.5) / steps
+        windows.append((step_start, step_end, float(start_value + (end_value - start_value) * ratio)))
+    return windows
+
+
+def ramp_windows(points: list[AutomationPoint], *, offset_ms: int, clamp_end_ms: int | None = None) -> list[tuple[int, int, float]]:
+    """Render automation point pairs as (start, end, value) windows in local time.
+
+    Linear-curve segments are subdivided so the ramp is actually audible as
+    motion; any other curve value holds the left point (step). This replaced a
+    collapse-to-first-value behavior that rendered every knob ride as a locked
+    value followed by a cliff.
+    """
+    ordered = sorted(points, key=lambda point: point.at_ms)
+    windows: list[tuple[int, int, float]] = []
+    for left, right in zip(ordered, ordered[1:]):
+        start_ms = left.at_ms - offset_ms
+        end_ms = right.at_ms - offset_ms
+        if clamp_end_ms is not None:
+            end_ms = min(end_ms, clamp_end_ms)
+        start_ms = max(0, start_ms)
+        end_ms = max(0, end_ms)
+        if end_ms <= start_ms:
+            continue
+        if str(left.curve or "linear") == "linear":
+            start_value = interpolate_automation_value(left, right, offset_ms + start_ms)
+            end_value = interpolate_automation_value(left, right, offset_ms + end_ms)
+            windows.extend(subdivide_ramp(start_ms, end_ms, start_value, end_value))
+        else:
+            windows.append((start_ms, end_ms, float(left.value)))
+    return windows
+
+
+def window_from_automation(automation: Automation) -> list[tuple[int, int, float]]:
+    return ramp_windows(automation.points, offset_ms=0)
 
 
 def interpolate_automation_value(left: AutomationPoint, right: AutomationPoint, at_ms: int) -> float:
@@ -305,21 +358,9 @@ def deck_automation_windows(session: MixSession, clip: Clip, param: str) -> list
     for automation in session.deck_automations:
         if automation.target != clip.deck or automation.param != param:
             continue
-        points = sorted(automation.points, key=lambda point: point.at_ms)
-        for left, right in zip(points, points[1:]):
-            if right.at_ms <= left.at_ms:
-                continue
-            overlap_start_ms = max(left.at_ms, clip.start_ms)
-            overlap_end_ms = min(right.at_ms, clip.end_ms)
-            if overlap_end_ms <= overlap_start_ms:
-                continue
-            windows.append(
-                (
-                    max(0, overlap_start_ms - clip.start_ms),
-                    max(0, overlap_end_ms - clip.start_ms),
-                    interpolate_automation_value(left, right, overlap_start_ms),
-                )
-            )
+        windows.extend(
+            ramp_windows(automation.points, offset_ms=clip.start_ms, clamp_end_ms=clip.end_ms - clip.start_ms)
+        )
     return sorted(windows, key=lambda item: item[0])
 
 
@@ -330,21 +371,7 @@ def event_deck_automation_windows(session: MixSession, deck: str, start_ms: int,
     for automation in session.deck_automations:
         if automation.target != deck or automation.param != param:
             continue
-        points = sorted(automation.points, key=lambda point: point.at_ms)
-        for left, right in zip(points, points[1:]):
-            if right.at_ms <= left.at_ms:
-                continue
-            overlap_start_ms = max(left.at_ms, start_ms)
-            overlap_end_ms = min(right.at_ms, end_ms)
-            if overlap_end_ms <= overlap_start_ms:
-                continue
-            windows.append(
-                (
-                    max(0, overlap_start_ms - start_ms),
-                    max(0, overlap_end_ms - start_ms),
-                    interpolate_automation_value(left, right, overlap_start_ms),
-                )
-            )
+        windows.extend(ramp_windows(automation.points, offset_ms=start_ms, clamp_end_ms=end_ms - start_ms))
     return sorted(windows, key=lambda item: item[0])
 
 
@@ -354,14 +381,7 @@ def clip_automation_windows(session: MixSession, clip: Clip, param: str) -> list
     for automation in automations:
         if automation.param != param:
             continue
-        points = sorted(automation.points, key=lambda point: point.at_ms)
-        if len(points) < 2:
-            continue
-        start_ms = max(0, points[0].at_ms - clip.start_ms)
-        end_ms = max(0, points[-1].at_ms - clip.start_ms)
-        if end_ms <= start_ms:
-            continue
-        windows.append((start_ms, end_ms, float(points[0].value)))
+        windows.extend(ramp_windows(automation.points, offset_ms=clip.start_ms))
     windows.extend(deck_automation_windows(session, clip, param))
     return sorted(windows, key=lambda item: item[0])
 
@@ -372,14 +392,7 @@ def group_automation_windows(session: MixSession, group: StemGroup, param: str) 
     for automation in automations:
         if automation.param != param:
             continue
-        points = sorted(automation.points, key=lambda point: point.at_ms)
-        if len(points) < 2:
-            continue
-        start_ms = max(0, points[0].at_ms - group.start_ms)
-        end_ms = max(0, points[-1].at_ms - group.start_ms)
-        if end_ms <= start_ms:
-            continue
-        windows.append((start_ms, end_ms, float(points[0].value)))
+        windows.extend(ramp_windows(automation.points, offset_ms=group.start_ms))
     windows.extend(event_deck_automation_windows(session, group.deck, group.start_ms, group.end_ms, param))
     return sorted(windows, key=lambda item: item[0])
 
@@ -396,16 +409,22 @@ def stem_automation_windows(session: MixSession, group: StemGroup, stem_name: st
     if not points:
         return windows
     group_end_ms = group.end_ms if group.end_ms is not None else points[-1].at_ms
-    for index, point in enumerate(points):
-        next_at_ms = points[index + 1].at_ms if index + 1 < len(points) else group_end_ms
-        start_ms = max(0, point.at_ms - group.start_ms)
-        end_ms = max(0, next_at_ms - group.start_ms)
-        if end_ms <= start_ms:
-            continue
-        value = point.value
-        if param in {"mute", "solo"}:
-            value = 1.0 if bool(value) else 0.0
-        windows.append((start_ms, end_ms, float(value)))
+    if param in {"mute", "solo"}:
+        # Toggles are steps: each point's state holds until the next point.
+        for index, point in enumerate(points):
+            next_at_ms = points[index + 1].at_ms if index + 1 < len(points) else group_end_ms
+            start_ms = max(0, point.at_ms - group.start_ms)
+            end_ms = max(0, next_at_ms - group.start_ms)
+            if end_ms <= start_ms:
+                continue
+            windows.append((start_ms, end_ms, 1.0 if bool(point.value) else 0.0))
+        return sorted(windows, key=lambda item: item[0])
+    windows.extend(ramp_windows(points, offset_ms=group.start_ms))
+    # Hold the final value through the end of the group like a released knob.
+    last_start_ms = max(0, points[-1].at_ms - group.start_ms)
+    last_end_ms = max(0, group_end_ms - group.start_ms)
+    if last_end_ms > last_start_ms:
+        windows.append((last_start_ms, last_end_ms, float(points[-1].value)))
     return sorted(windows, key=lambda item: item[0])
 
 

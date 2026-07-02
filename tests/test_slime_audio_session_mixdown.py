@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import shutil
 import struct
 import subprocess
@@ -927,7 +928,19 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             )
             filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
 
-        self.assertIn("volume=enable='between(t,0.000,28.000)':volume=0.363078", filters)
+        # The -9 -> -6 dB deck ride renders as an actual ramp (subdivided
+        # steps rising across the clip window), not one value locked for the
+        # whole window - the old assertion here pinned exactly that bug.
+        windows = re.findall(r"volume=enable='between\(t,([0-9.]+),([0-9.]+)\)':volume=([0-9.]+)", filters)
+        self.assertGreater(len(windows), 8)
+        self.assertEqual(float(windows[0][0]), 0.0)
+        self.assertEqual(float(windows[-1][1]), 28.0)
+        values = [float(value) for _start, _end, value in windows]
+        self.assertTrue(all(later > earlier for earlier, later in zip(values, values[1:])))
+        # Clip starts 2s into the ride (-9 dB at 8s, -6 dB at 38s), and the
+        # ride ends inside the clip window: first step ~-8.8 dB, last ~-6 dB.
+        self.assertAlmostEqual(values[0], 10 ** (-8.8 / 20), delta=0.01)
+        self.assertAlmostEqual(values[-1], 10 ** (-6.0 / 20), delta=0.01)
 
     def test_mixdown_filter_renders_echo_effect_with_tail(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1560,6 +1573,53 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             return math.sqrt(sum(value * value for value in late) / max(1, len(late)))
 
         self.assertGreater(late_energy(1.0), late_energy(0.1) * 2)
+
+    def test_rendered_deck_gain_ramp_actually_glides(self):
+        """A fader ride must render as motion. The old windowing held the ramp's
+        first value for the whole window and then jumped - a locked knob."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source = temp / "steady.wav"
+            rate = self._write_event_track(source, events=[(0.0, 8.0, 440.0)])
+            session_path = temp / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1"],
+                        "clips": [{"id": "lead", "deck": "deck-1", "path": str(source), "start_ms": 0, "duration_ms": 8_000}],
+                        "deck_automations": [
+                            {
+                                "target": "deck-1",
+                                "param": "gain_db",
+                                "points": [{"at_ms": 2_000, "value": -24}, {"at_ms": 6_000, "value": 0}],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            from slime_audio_session import load_session
+
+            session = load_session(session_path)
+            output = temp / "out.wav"
+            subprocess.run(ffmpeg_command(session, {}, output, rate, 1), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _rate, samples = self.read_wav_samples(output)
+
+            def level_db(t: float) -> float:
+                value = self._segment_rms(samples, rate, t - 0.1, t + 0.1)
+                return 20 * math.log10(max(value, 1e-9))
+
+            baseline = level_db(1.0)
+            quarter = level_db(3.0)
+            middle = level_db(4.0)
+            three_quarter = level_db(5.0)
+            landed = level_db(6.5)
+
+        self.assertAlmostEqual(quarter - baseline, -18.0, delta=2.0)
+        self.assertAlmostEqual(middle - baseline, -12.0, delta=2.0)
+        self.assertAlmostEqual(three_quarter - baseline, -6.0, delta=2.0)
+        self.assertAlmostEqual(landed, baseline, delta=1.0)
 
     def test_reverb_ir_is_deterministic_and_energy_normalized(self):
         from slime_audio_session import EffectEvent
