@@ -128,17 +128,31 @@ def safe_overlay_plan(
     return plan, f"score {plan.score}; {plan.key_relation}; tempo {plan.target_tempo_shift_pct or 0.0:+.2f}%{pitch_note}"
 
 
+class TempoLockedKeyPlan:
+    def __init__(self, pitch_shift_semitones: int):
+        self.pitch_shift_semitones = pitch_shift_semitones
+        self.target_tempo_shift_pct = None
+        self.score = 1.0
+        self.key_relation = "tempo-locked"
+        self.bpm_ratio = 1.0
+        self.phrase_wait_beats = 0
+        self.notes: list[str] = []
+
+
 def tempo_locked_key_plan(
     source: TrackAnalysis | None,
     target: TrackAnalysis | None,
     max_pitch_shift_semitones: int,
-) -> tuple[Any | None, str]:
+    *,
+    source_pitch_shift: int = 0,
+) -> tuple[TempoLockedKeyPlan | None, str]:
     """Key alignment for a tempo-locked pair: tempos are already identical by
-    authored shifts, so only relative-tonic alignment within the pitch limit
-    decides blend vs cut."""
+    authored shifts, so the only decision is the smallest pitch shift that
+    aligns the incoming track's EFFECTIVE key (including the outgoing clip's
+    own authored shift) to the outgoing one. No alignment within the render
+    limit means cut."""
     if source is None or target is None:
         return None, "missing analysis"
-    plan = transition_plan(source, target, max_pitch_shift=max_pitch_shift_semitones)
     if (
         source.tonic is None
         or source.mode not in {"major", "minor"}
@@ -146,14 +160,13 @@ def tempo_locked_key_plan(
         or target.mode not in {"major", "minor"}
     ):
         return None, "missing key metadata"
-    if abs(plan.pitch_shift_semitones) > max_pitch_shift_semitones:
-        return None, f"pitch shift {plan.pitch_shift_semitones:+d} exceeds allowed render shift"
-    source_relative = major_equivalent_tonic(source.tonic % 12, source.mode)
-    target_relative = major_equivalent_tonic((target.tonic + int(plan.pitch_shift_semitones or 0)) % 12, target.mode)
-    if source_relative != target_relative:
-        return None, "keys are not relative-tonic alignable within render limits"
-    pitch_note = f"; pitch {plan.pitch_shift_semitones:+d}" if plan.pitch_shift_semitones else ""
-    return plan, f"key {plan.key_relation}{pitch_note}"
+    source_relative = major_equivalent_tonic((source.tonic + source_pitch_shift) % 12, source.mode)
+    for magnitude in range(0, max_pitch_shift_semitones + 1):
+        for shift in ({0} if magnitude == 0 else {magnitude, -magnitude}):
+            if major_equivalent_tonic((target.tonic + shift) % 12, target.mode) == source_relative:
+                pitch_note = f"; pitch {shift:+d}" if shift else ""
+                return TempoLockedKeyPlan(shift), f"tempo-locked key fit{pitch_note}"
+    return None, "keys are not relative-tonic alignable within render limits"
 
 
 def tempo_locked_overlap_ms(
@@ -161,8 +174,10 @@ def tempo_locked_overlap_ms(
     target: TrackAnalysis | None,
     shorter_ms: int,
     max_pitch_shift_semitones: int,
+    *,
+    source_pitch_shift: int = 0,
 ) -> int:
-    plan, _reason = tempo_locked_key_plan(source, target, max_pitch_shift_semitones)
+    plan, _reason = tempo_locked_key_plan(source, target, max_pitch_shift_semitones, source_pitch_shift=source_pitch_shift)
     if plan is None:
         return 0
     return max(6_000, min(int(phrase_ms(source) or 16_000), shorter_ms // 3))
@@ -445,7 +460,10 @@ def plan_future_mix(
         # In a tempo-locked set every clip is authored to the same rendered
         # tempo, so tempo compatibility is free and only key fit decides.
         if target_bpm is not None:
-            overlap = tempo_locked_overlap_ms(previous_analysis, analysis, shorter, max_pitch_shift_semitones)
+            previous_shift = int(previous.get("pitch_shift_semitones") or 0) if previous else 0
+            overlap = tempo_locked_overlap_ms(
+                previous_analysis, analysis, shorter, max_pitch_shift_semitones, source_pitch_shift=previous_shift
+            )
         else:
             overlap = transition_overlap_ms(
                 previous_analysis,
@@ -469,7 +487,7 @@ def plan_future_mix(
             # Authored tempo locks are the arrangement; the planner only picks
             # the key alignment for overlaps and never rewrites tempo.
             plan, overlay_reason = (None, "tempo-locked cut") if not overlap else tempo_locked_key_plan(
-                previous_analysis, analysis, max_pitch_shift_semitones
+                previous_analysis, analysis, max_pitch_shift_semitones, source_pitch_shift=previous_shift
             )
             if plan is not None:
                 clip["pitch_shift_semitones"] = plan.pitch_shift_semitones

@@ -1007,8 +1007,41 @@ def queue_stem_splits(paths: list[str], args: argparse.Namespace, *, reason: str
             queued.add(path)
 
 
+def key_alignment_cost(left: TrackAnalysis | None, right: TrackAnalysis | None, max_shift: int = 2) -> int:
+    if (
+        left is None or right is None
+        or left.tonic is None or left.mode not in {"major", "minor"}
+        or right.tonic is None or right.mode not in {"major", "minor"}
+    ):
+        return 50
+    base = major_equivalent_tonic(left.tonic % 12, left.mode)
+    for magnitude in range(0, max_shift + 1):
+        for shift in ({0} if magnitude == 0 else {magnitude, -magnitude}):
+            if major_equivalent_tonic((right.tonic + shift) % 12, right.mode) == base:
+                return magnitude
+    return 40
+
+
+def order_by_key_chain(selected: list[SelectedTrack], analyses: dict[str, TrackAnalysis]) -> list[SelectedTrack]:
+    """Harmonic sequencing: greedily chain tracks so adjacent keys are
+    alignable, turning would-be cuts into blends. What a DJ does with the
+    Camelot wheel before touching the decks."""
+    if len(selected) < 3:
+        return selected
+    remaining = list(selected[1:])
+    ordered = [selected[0]]
+    while remaining:
+        current = analyses.get(ordered[-1].path)
+        best = min(remaining, key=lambda track: (key_alignment_cost(current, analyses.get(track.path)), -track.score))
+        ordered.append(best)
+        remaining.remove(best)
+    return ordered
+
+
 def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, analyses: dict[str, TrackAnalysis] | None = None) -> dict[str, Any]:
     analyses = analyses or {}
+    if getattr(args, "target_bpm", None) is not None:
+        selected = order_by_key_chain(selected, analyses)
     rhythm_sources = [track for track in selected if rhythm_bed_score(track) > 0]
     leads = [track for track in selected if track not in rhythm_sources]
     if len(leads) < args.min_tracks:
@@ -1045,11 +1078,10 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
                 "decision": "tempo-locked",
                 "reason": f"lead stretched from {analysis.bpm:g} to target {target_bpm:g} BPM for the set",
             }
-        if previous_track is not None and analyses.get(previous_track.path) is not None and analysis is not None:
+        if previous_track is not None and analyses.get(previous_track.path) is not None and analysis is not None and not (target_bpm is not None and analysis.bpm):
             plan = transition_plan(analyses[previous_track.path], analysis, max_pitch_shift=6)
-            locked_tempo = transform["tempo_shift_pct"] if target_bpm is not None and analysis.bpm else None
             transform = {
-                "tempo_shift_pct": float(plan.target_tempo_shift_pct or 0.0) if locked_tempo is None else locked_tempo,
+                "tempo_shift_pct": float(plan.target_tempo_shift_pct or 0.0),
                 "pitch_shift_semitones": int(plan.pitch_shift_semitones or 0),
             }
             transform["transition_decision"] = {
