@@ -1910,6 +1910,62 @@ class SlimeAudioAutodjTests(unittest.TestCase):
         self.assertIn("vocal overlap guard failed", str(raised.exception))
 
 
+class SlimeAudioAutodjBedMotionTests(unittest.TestCase):
+    def test_bed_plan_snaps_to_phrase_grid_and_opens_into_lead_drop(self):
+        lead = {
+            "id": "lead-000",
+            "deck": "deck-2",
+            "path": "/music/lead.flac",
+            "start_ms": 0,
+            "trim_start_ms": 0,
+            "duration_ms": 160_000,
+            "planner_role": "lead",
+        }
+        plan = autodj.plan_structural_bed_layer(
+            lead,
+            selected_track("/music/bed.flac"),
+            ["drums", "bass", "other"],
+            autodj_args(),
+            lead_analysis=analysis("/music/lead.flac"),
+        )
+
+        self.assertIsNotNone(plan)
+        motion = plan["motion"]
+        self.assertTrue(motion["phrase_snapped"])
+        self.assertEqual(motion["bar_ms"], 2_000)
+        self.assertEqual(motion["drop_aligned_ms"], 64_000)
+        self.assertEqual(plan["start_ms"] % 16_000, 0)
+        lowpass_knots = [point["at_ms"] for point in plan["automation_points"]["lowpass_hz"]]
+        self.assertIn(64_000, lowpass_knots)
+        gain_points = plan["automation_points"]["gain_db"]
+        drop_knots = [point for point in gain_points if point["at_ms"] == 64_000]
+        self.assertEqual(len(drop_knots), 1)
+        hold_value = gain_points[1]["value"]
+        self.assertAlmostEqual(drop_knots[0]["value"], hold_value + 1.0)
+
+    def test_bed_plan_without_analysis_still_produces_motion(self):
+        lead = {
+            "id": "lead-000",
+            "deck": "deck-2",
+            "path": "/music/lead.flac",
+            "start_ms": 0,
+            "duration_ms": 160_000,
+            "planner_role": "lead",
+        }
+        plan = autodj.plan_structural_bed_layer(
+            lead,
+            selected_track("/music/bed.flac"),
+            ["drums"],
+            autodj_args(),
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertFalse(plan["motion"]["phrase_snapped"])
+        self.assertIsNone(plan["motion"]["drop_aligned_ms"])
+        gain_values = [point["value"] for point in plan["automation_points"]["gain_db"]]
+        self.assertGreater(len(set(gain_values)), 1)
+
+
 class SlimeAudioAutodjExtendTests(unittest.TestCase):
     @staticmethod
     def _live_session_payload() -> dict:

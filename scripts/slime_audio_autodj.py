@@ -1223,11 +1223,63 @@ def structural_bed_balance_profile(play_stems: list[str], args: argparse.Namespa
     }
 
 
+def lead_phrase_snapper(lead: dict[str, Any], lead_analysis: TrackAnalysis | None):
+    """Map the lead's source beat grid onto the mix timeline.
+
+    Returns (snap, bar_ms): snap(mix_ms) moves a timestamp to the nearest lead
+    phrase boundary in mix time. Both are None when no usable grid exists.
+    """
+    if lead_analysis is None or lead_analysis.beatgrid is None:
+        return None, None
+    grid = lead_analysis.beatgrid
+    phrase_ms = int(grid.phrase_ms or 0)
+    if phrase_ms <= 0:
+        return None, None
+    lead_start = int(lead.get("start_ms", lead.get("start", 0)) or 0)
+    trim_start = int(lead.get("trim_start_ms", lead.get("trim_start", 0)) or 0)
+    beat_offset = int(grid.beat_offset_ms or 0)
+    phrase_beats = int(grid.phrase_beats or 32) or 32
+    bar_ms = max(1, round(phrase_ms * 4 / phrase_beats))
+
+    def snap(mix_ms: int) -> int:
+        source_ms = trim_start + (mix_ms - lead_start)
+        k = round((source_ms - beat_offset) / phrase_ms)
+        snapped_source = beat_offset + k * phrase_ms
+        return lead_start + (snapped_source - trim_start)
+
+    return snap, bar_ms
+
+
+def lead_drop_anchor_ms(
+    lead: dict[str, Any],
+    lead_analysis: TrackAnalysis | None,
+    window_start_ms: int,
+    window_end_ms: int,
+) -> int | None:
+    """Mix-time start of the first drop/build in the lead inside the window."""
+    if lead_analysis is None:
+        return None
+    lead_start = int(lead.get("start_ms", lead.get("start", 0)) or 0)
+    trim_start = int(lead.get("trim_start_ms", lead.get("trim_start", 0)) or 0)
+    anchors = []
+    for window in coerce_structure(lead_analysis.structure):
+        if window.kind not in {"drop", "build"}:
+            continue
+        mix_ms = lead_start + (window.start_ms - trim_start)
+        if window_start_ms <= mix_ms <= window_end_ms:
+            anchors.append((0 if window.kind == "drop" else 1, mix_ms))
+    if not anchors:
+        return None
+    anchors.sort()
+    return anchors[0][1]
+
+
 def plan_structural_bed_layer(
     lead: dict[str, Any],
     source: SelectedTrack,
     play_stems: list[str],
     args: argparse.Namespace,
+    lead_analysis: TrackAnalysis | None = None,
 ) -> dict[str, Any] | None:
     lead_start = int(lead.get("start_ms", lead.get("start", 0)) or 0)
     lead_duration = int(lead.get("duration_ms", lead.get("duration", 0)) or 0)
@@ -1238,13 +1290,26 @@ def plan_structural_bed_layer(
     latest_start = lead_start + max(0, lead_duration - desired_duration - 24_000)
     entry_offset = min(max(16_000, lead_duration // 4), max(0, latest_start - lead_start))
     bed_start = lead_start + entry_offset
+    snap, bar_ms = lead_phrase_snapper(lead, lead_analysis)
+    phrase_snapped = False
+    if snap is not None:
+        snapped = snap(bed_start)
+        if lead_start <= snapped <= lead_start + max(0, latest_start - lead_start):
+            bed_start = snapped
+            phrase_snapped = True
     bed_duration = min(desired_duration, max(32_000, lead_start + lead_duration - bed_start - 24_000))
     if bed_duration < 32_000:
         return None
     bed_end = bed_start + bed_duration
     trim_start = min(int(args.bed_trim_start_ms), max(0, source_duration - bed_duration - 1_000))
     balance_profile = structural_bed_balance_profile(play_stems, args)
-    midpoint_ms = bed_start + max(1, bed_duration // 2)
+    ramp_ms = (bar_ms or 4_000) * 2
+    entrance_ms = bed_start + min(max(ramp_ms, 4_000), bed_duration // 4)
+    # Open the bed filter into the lead's next drop/build when one lands inside
+    # the bed window; otherwise open at the midpoint. This is what makes the
+    # move read as intentional instead of a static carve.
+    drop_anchor = lead_drop_anchor_ms(lead, lead_analysis, entrance_ms + 1, bed_end - 8_000)
+    midpoint_ms = drop_anchor if drop_anchor is not None else bed_start + max(1, bed_duration // 2)
     end_ms = bed_end
     gain_offsets = balance_profile["gain_offsets"]
     lowpass_points = balance_profile["lowpass_points"]
@@ -1277,10 +1342,20 @@ def plan_structural_bed_layer(
             "lowpass_hz": "open enough for the selected stems to read, then soften the exit",
             "highpass_hz": "carve mud without deleting kick/snare identity",
         },
+        "motion": {
+            "phrase_snapped": phrase_snapped,
+            "bar_ms": bar_ms,
+            "drop_aligned_ms": drop_anchor,
+        },
         "automation_points": {
             "gain_db": [
                 {"at_ms": bed_start, "value": balance_profile["gain_db"] + gain_offsets[0]},
-                {"at_ms": bed_start + min(8_000, bed_duration // 4), "value": balance_profile["gain_db"] + gain_offsets[1]},
+                {"at_ms": entrance_ms, "value": balance_profile["gain_db"] + gain_offsets[1]},
+                *(
+                    [{"at_ms": drop_anchor, "value": balance_profile["gain_db"] + gain_offsets[1] + 1.0}]
+                    if drop_anchor is not None and entrance_ms < drop_anchor < end_ms - 8_000
+                    else []
+                ),
                 {"at_ms": max(bed_start, end_ms - 8_000), "value": balance_profile["gain_db"] + gain_offsets[2]},
                 {"at_ms": end_ms, "value": balance_profile["gain_db"] + gain_offsets[3]},
             ],
@@ -1508,7 +1583,7 @@ def add_structural_beds(
                 "decision": "drums-only fallback",
                 "reason": "missing local analysis for full beat/key plan; restrict to drums-only layer and require proof-listening before launch",
             }
-        plan = plan_structural_bed_layer(lead, source, play_stems, args)
+        plan = plan_structural_bed_layer(lead, source, play_stems, args, lead_analysis=lead_analysis)
         if plan is None:
             continue
         if isinstance(bed_event.get("transition_decision"), dict):
@@ -1590,6 +1665,27 @@ def add_structural_beds(
                 },
             ]
         )
+        # Bass ownership handoff: when the bed brings bass, the lead's low end
+        # steps aside at the bed entrance and returns as the bed exits, ramped
+        # over roughly a bar so the move is audible but not a volume cliff.
+        lead_deck = str(lead.get("deck") or "")
+        if "bass" in set(play_stems) and lead_deck:
+            handoff_ramp_ms = int((plan.get("motion") or {}).get("bar_ms") or 2_000)
+            payload.setdefault("deck_automations", []).append(
+                {
+                    "target": lead_deck,
+                    "param": "eq_low_db",
+                    "source_clip_id": bed_id,
+                    "planner_role": "planned-bed-bass-handoff",
+                    "stem_layer_plan_ref": bed_id,
+                    "points": [
+                        {"at_ms": max(0, bed_start - handoff_ramp_ms), "value": 0.0},
+                        {"at_ms": bed_start, "value": -3.5},
+                        {"at_ms": max(bed_start, bed_end - handoff_ramp_ms), "value": -3.5},
+                        {"at_ms": bed_end, "value": 0.0},
+                    ],
+                }
+            )
         added.append({"id": bed_id, "source": source.path, "under": lead.get("id"), "start_ms": bed_start, "duration_ms": bed_duration})
 
     payload["clips"] = sorted(
@@ -2740,7 +2836,13 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace, *, min_sta
             plays_seen=0,
             reasons=[],
         )
-        plan = plan_structural_bed_layer(target, bed_source_track, ["drums", "bass", "other"], args)
+        plan = plan_structural_bed_layer(
+            target,
+            bed_source_track,
+            ["drums", "bass", "other"],
+            args,
+            lead_analysis=load_analysis_from_db(args.db, Path(event_source(target))),
+        )
         if plan is None:
             failures.append({"kind": "rhythm-bed", "source": bed_source["id"], "target": target["id"], "error": "no viable planned stem layer"})
         else:
@@ -2788,7 +2890,7 @@ def apply_creative_pass(session_path: Path, args: argparse.Namespace, *, min_sta
                         "at_ms": bed_start,
                         "duration_ms": bed_duration,
                         "from": automation_points["gain_db"][0]["value"],
-                        "to": automation_points["gain_db"][2]["value"],
+                        "to": automation_points["gain_db"][-2]["value"],
                         "planner_role": "planned-stem-layer-automation",
                         "stem_layer_plan_ref": bed_id,
                     },
