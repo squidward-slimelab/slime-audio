@@ -6,6 +6,7 @@ import sqlite3
 import json
 import os
 import random
+import signal
 import socket
 import subprocess
 import sys
@@ -356,6 +357,11 @@ def playback_healthy() -> bool:
     status = transport.get("status") or health.get("runner_status") or ""
     stale = bool(transport.get("stale"))
     return audio_process_alive() and not stale and status not in {"completed", "stopped"}
+
+
+def live_session_runner_pids() -> list[int]:
+    result = subprocess.run(["pgrep", "-f", "slime_audio_session_runner.py"], capture_output=True, text=True, check=False)
+    return [int(pid) for pid in result.stdout.split() if pid.strip().isdigit()]
 
 
 def acquire_lock() -> int:
@@ -2522,6 +2528,21 @@ def run_session_edit(command_args: list[str]) -> dict[str, Any]:
 
 
 def launch_runner(session_path: Path, state_path: Path, args: argparse.Namespace) -> int:
+    if getattr(args, "force", False):
+        # A forced takeover must actually take over: the incumbent runner holds
+        # the FIFO writer lock until it exits, and two writers interleave PCM.
+        incumbents = live_session_runner_pids()
+        for pid in incumbents:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                continue
+        deadline = time.time() + 10.0
+        while live_session_runner_pids() and time.time() < deadline:
+            time.sleep(0.3)
+        remaining = live_session_runner_pids()
+        if remaining:
+            raise SystemExit(f"forced takeover could not stop live runners (pids {remaining}); stop them manually")
     log_path = args.runtime / f"{args.slug}-runner.log"
     pid_path = args.runtime / f"{args.slug}-runner.pid"
     command = [
@@ -2882,6 +2903,14 @@ def continue_set(args: argparse.Namespace) -> int:
         if not args.force and playback_healthy():
             print(json.dumps({"status": "ok", "reason": "playback healthy; not stomping"}))
             return 0
+        if not args.force and (runner_pids := live_session_runner_pids()):
+            # Fail closed: a transient stale/unreadable dashboard state must
+            # never read as permission to stomp a live runner. Two runners
+            # interleave FIFO writes into audible jumps (heard 2026-07-03).
+            raise SystemExit(
+                f"live session runner present (pids {runner_pids}) but dashboard state looks unhealthy/stale; "
+                "refusing to stomp the stream. Investigate the runner, or pass --force to replace it deliberately."
+            )
 
         session_path = args.runtime / f"{args.slug}.json"
         state_path = args.runtime / f"{args.slug}-state.json"

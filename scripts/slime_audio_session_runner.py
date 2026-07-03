@@ -235,10 +235,39 @@ class FifoHold:
         self.fifo_path = fifo_path
         self.fd: int | None = None
         self.holder: subprocess.Popen[bytes] | None = None
+        self.lock_fd: int | None = None
 
     @property
     def active(self) -> bool:
         return self.fd is not None or (self.holder is not None and self.holder.poll() is None)
+
+    def writer_lock_path(self) -> Path:
+        return self.fifo_path.parent / (self.fifo_path.name + ".slime-writer-lock")
+
+    def lock_writer(self) -> bool:
+        """Exclusive claim on this FIFO's stream — one live runner per FIFO.
+
+        The keepalive handle below is not a mutex: any number of processes can
+        open a FIFO for writing, and two runners interleave PCM into audible
+        jumps (heard live 2026-07-03 16:54Z). The flock dies with the process,
+        so a crashed runner never wedges the next one.
+        """
+        if self.lock_fd is not None:
+            return True
+        import fcntl
+
+        try:
+            fd = os.open(self.writer_lock_path(), os.O_CREAT | os.O_RDWR, 0o666)
+        except OSError:
+            # Bookkeeping must never brick playback: no lock file, no exclusion.
+            return True
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return False
+        self.lock_fd = fd
+        return True
 
     def acquire(self, *, retries: int = 10, retry_delay_s: float = 0.5) -> bool:
         if not stat_is_fifo(self.fifo_path):
@@ -295,6 +324,12 @@ class FifoHold:
             except (ProcessLookupError, PermissionError):
                 pass
             self.holder = None
+        if self.lock_fd is not None:
+            try:
+                os.close(self.lock_fd)
+            except OSError:
+                pass
+            self.lock_fd = None
 
 
 def stream_command(args: argparse.Namespace, audio_path: Path, *, continuation: bool = False) -> list[str]:
@@ -570,6 +605,22 @@ def run_session(args: argparse.Namespace) -> int:
     fifo_hold = FifoHold(args.snapcast_fifo) if args.mode == "snapcast" and not args.dry_run else None
     windows_streamed = 0
     if fifo_hold is not None:
+        if not fifo_hold.lock_writer():
+            append_history(
+                args.history_log,
+                {
+                    "event": "session_runner_blocked",
+                    "reason": "another session runner owns the snapcast stream (writer lock held)",
+                    "fifo": str(args.snapcast_fifo),
+                    "session": str(args.session),
+                    "timestamp": iso_now(),
+                },
+            )
+            write_runner_status(args, "stopped")
+            raise SystemExit(
+                "another session runner owns the snapcast stream (writer lock held); "
+                "refusing to interleave audio — stop the live runner first or use a different FIFO"
+            )
         if fifo_hold.acquire():
             append_history(
                 args.history_log,

@@ -617,6 +617,21 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
             self.assertFalse(hold.acquire(retries=1, retry_delay_s=0))
             self.assertFalse(hold.active)
 
+    def test_fifo_writer_lock_is_exclusive_until_release(self):
+        # One live runner per FIFO: two writers interleave PCM into audible
+        # jumps. flock is per open-file-description, so a second hold in the
+        # same process conflicts exactly like a second runner process would.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fifo_path = Path(temp_dir) / "snapfifo"
+            first = runner.FifoHold(fifo_path)
+            second = runner.FifoHold(fifo_path)
+            self.assertTrue(first.lock_writer())
+            self.assertTrue(first.lock_writer())  # re-entrant for the owner
+            self.assertFalse(second.lock_writer())
+            first.release()
+            self.assertTrue(second.lock_writer())
+            second.release()
+
     def test_stream_command_continuation_flag(self):
         args = runner.parse_args_from(["--target", "SPONGEBOT", "--mode", "snapcast"])
 
