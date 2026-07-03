@@ -21,7 +21,15 @@ from slime_audio_dj import (
     select_cue,
     transition_plan,
 )
-from slime_audio_session import load_payload, parse_session, playhead_ms_from_state, write_payload
+from slime_audio_session import (
+    DEFAULT_MAX_WARP_STRETCH_PCT,
+    load_payload,
+    master_bpm_at,
+    master_tempo_shift_pct,
+    parse_session,
+    playhead_ms_from_state,
+    write_payload,
+)
 
 DECK_ORDER = ["deck-2", "deck-3", "deck-1", "deck-4"]
 DEFAULT_LOCK_LEAD_MS = 20_000
@@ -84,6 +92,37 @@ def sync_placeholder_duration_to_analysis(clip: dict[str, Any], analysis: TrackA
         return False
     clip["duration_ms"] = remaining_ms
     return True
+
+
+def warp_aware_duration_ms(payload: dict[str, Any], clip: dict[str, Any], duration_ms: int, at_ms_estimate: int) -> int:
+    """Timeline length of a full-track lead under the master tempo knob.
+
+    The renderer maps timeline time to source time as elapsed * tempo_factor,
+    so a lead whose duration_ms is its source length plays wrong once warped:
+    sped-up clips exhaust their file early into scheduled dead air, slowed
+    clips chop mid-note at their end. Author the warped timeline length into
+    duration_ms instead, keeping the source-domain length in
+    source_duration_ms so the derivation stays idempotent across replans.
+    Only planner leads are converted: short authored windows (beds, doubles,
+    cue gestures) declare timeline intent, not source length.
+    """
+    if str(clip.get("planner_role") or "") != "lead":
+        return duration_ms
+    source_ms = int(clip.get("source_duration_ms") or 0)
+    if source_ms <= 0:
+        source_ms = duration_ms
+        clip["source_duration_ms"] = source_ms
+    if not clip.get("warp", True) or not clip.get("source_bpm"):
+        return source_ms
+    master = master_bpm_at(payload, max(0, int(at_ms_estimate)))
+    if master is None:
+        return source_ms
+    max_stretch = abs(float(payload.get("max_tempo_stretch_pct", DEFAULT_MAX_WARP_STRETCH_PCT)))
+    shift = master_tempo_shift_pct(float(clip["source_bpm"]), master, max_stretch)
+    factor = 1 + (shift or 0.0) / 100
+    if factor <= 0:
+        return source_ms
+    return max(1, int(round(source_ms / factor)))
 
 
 def phrase_ms(analysis: TrackAnalysis | None) -> int:
@@ -457,6 +496,10 @@ def plan_future_mix(
         analysis = analyses.get(str(clip.get("path")))
         if sync_placeholder_duration_to_analysis(clip, analysis):
             duration_ms = int(clip.get("duration_ms") or 0)
+        duration_ms = warp_aware_duration_ms(
+            next_payload, clip, duration_ms, clip_end(previous) if previous is not None else cursor
+        )
+        clip["duration_ms"] = duration_ms
         shorter = min(duration_ms, int(previous.get("duration_ms") or duration_ms) if previous else duration_ms)
         # Blend vs cut is decided per pair: transition_overlap_ms returns 0
         # whenever analysis is missing or the pair cannot be made compatible

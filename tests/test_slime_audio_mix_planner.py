@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from slime_audio_dj import BeatGrid, CuePoint, StructureWindow, TrackAnalysis
-from slime_audio_mix_planner import plan_future_mix
+from slime_audio_mix_planner import plan_future_mix, warp_aware_duration_ms
 
 
 def analysis(
@@ -378,6 +378,63 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         no_pitch_clips = {clip["id"]: clip for clip in no_pitch["clips"]}
         self.assertEqual(no_pitch_clips["next"]["start_ms"], no_pitch_clips["current"]["start_ms"] + no_pitch_clips["current"]["duration_ms"])
         self.assertIn("cut", no_pitch_moves[-1].reason)
+
+class WarpAwareDurationTests(unittest.TestCase):
+    """Warped leads must schedule their timeline length, not their source length.
+
+    The renderer consumes source audio at elapsed * tempo_factor, so a lead
+    scheduled at source length plays dead air when sped up and chops mid-note
+    when slowed. Found live on 2026-07-03 (39s of silence at a +11.5% lead's
+    tail); fixed by authoring duration_ms in the timeline domain.
+    """
+
+    @staticmethod
+    def lead(source_bpm=80.0, **overrides):
+        clip = {
+            "id": "lead-001",
+            "planner_role": "lead",
+            "source_bpm": source_bpm,
+            "duration_ms": 240_000,
+        }
+        clip.update(overrides)
+        return clip
+
+    def test_sped_up_lead_schedules_shorter_timeline(self):
+        payload = {"master_bpm": 86.0}
+        clip = self.lead(source_bpm=80.0)  # +7.5% -> factor 1.075
+        duration = warp_aware_duration_ms(payload, clip, 240_000, 0)
+        self.assertEqual(duration, round(240_000 / 1.075))
+        self.assertEqual(clip["source_duration_ms"], 240_000)
+
+    def test_slowed_lead_schedules_longer_timeline(self):
+        payload = {"master_bpm": 86.0}
+        clip = self.lead(source_bpm=90.0)  # -4.444% -> factor ~0.9556
+        duration = warp_aware_duration_ms(payload, clip, 240_000, 0)
+        self.assertGreater(duration, 240_000)
+
+    def test_replans_are_idempotent_via_source_duration(self):
+        payload = {"master_bpm": 86.0}
+        clip = self.lead(source_bpm=80.0)
+        first = warp_aware_duration_ms(payload, clip, 240_000, 0)
+        second = warp_aware_duration_ms(payload, clip, first, 0)
+        self.assertEqual(first, second)
+
+    def test_follows_the_tempo_knob_at_clip_position(self):
+        payload = {"master_bpm": 86.0, "master_bpm_automation": [{"at_ms": 3_600_000, "value": 76.0}]}
+        early = warp_aware_duration_ms(payload, self.lead(source_bpm=80.0), 240_000, 0)
+        late = warp_aware_duration_ms(payload, self.lead(source_bpm=80.0), 240_000, 3_600_000)
+        self.assertLess(early, 240_000)  # sped toward 86
+        self.assertGreater(late, 240_000)  # slowed toward 76
+
+    def test_non_leads_and_optouts_untouched(self):
+        payload = {"master_bpm": 86.0}
+        bed = {"id": "bed-001", "planner_role": "bed", "source_bpm": 80.0, "duration_ms": 30_000}
+        self.assertEqual(warp_aware_duration_ms(payload, bed, 30_000, 0), 30_000)
+        free = self.lead(source_bpm=80.0, warp=False)
+        self.assertEqual(warp_aware_duration_ms(payload, free, 240_000, 0), 240_000)
+        out_of_reach = self.lead(source_bpm=130.0)  # no interpretation within 16%
+        self.assertEqual(warp_aware_duration_ms(payload, out_of_reach, 240_000, 0), 240_000)
+
 
 if __name__ == "__main__":
     unittest.main()
