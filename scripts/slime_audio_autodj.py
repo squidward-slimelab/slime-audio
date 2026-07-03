@@ -1974,6 +1974,10 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
     ]
     events = [event for event in [*clips, *stem_groups] if is_harmonic_layer(event)]
     min_overlap_ms = int(getattr(args, "min_harmonic_overlap_ms", DEFAULT_MIN_HARMONIC_OVERLAP_MS))
+    # Already-played music cannot be unplayed: an extend must not fail over an
+    # overlap that ended behind the live playhead (found 2026-07-03 when a
+    # keyless bed pair from hour one blocked an hour-three extension).
+    guard_after_ms = int(getattr(args, "harmonic_guard_after_ms", 0) or 0)
     db_path = Path(getattr(args, "db", DEFAULT_DB))
     key_cache: dict[str, TrackAnalysis | None] = {}
     failures: list[dict[str, Any]] = []
@@ -1987,6 +1991,8 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
             right_end = clip_end_ms(right)
             overlap_ms = min(left_end, right_end) - max(left_start, right_start)
             if overlap_ms < min_overlap_ms:
+                continue
+            if min(left_end, right_end) <= guard_after_ms:
                 continue
             if str(left.get("source_path") or left.get("path") or "") == str(right.get("source_path") or right.get("path") or ""):
                 continue
@@ -2788,6 +2794,8 @@ def extend_set(args: argparse.Namespace) -> int:
             stage = "structural_beds"
             structural = add_structural_beds(work_path, selected, args, min_start_ms=total_ms)
             stage = "harmonic_guard"
+            # Overlaps that already played are history, not defects to block on.
+            args.harmonic_guard_after_ms = playhead_ms
             harmonic_guard = validate_harmonic_overlaps(work_path, args)
             advisories: list[dict[str, Any]] = []
             args.require_stem_loads = bool(args.stem_aware_remix) and not (block.get("notes") or {}).get("stem_split_queued")

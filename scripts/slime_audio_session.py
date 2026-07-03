@@ -2081,7 +2081,10 @@ def find_event(payload: dict[str, Any], event_id: str) -> tuple[str, int] | None
 
 
 def event_start_ms(item: dict[str, Any]) -> int:
-    return parse_ms(item.get("start_ms", item.get("start", 0)), "event start")
+    # Actions author their time as at/at_ms; clips as start/start_ms. Missing
+    # either made the live-edit lock read actions as t=0 and refuse valid
+    # future edits (or worse, permit past ones).
+    return parse_ms(item.get("start_ms", item.get("start", item.get("at_ms", item.get("at", 0)))), "event start")
 
 
 def event_end_ms(item: dict[str, Any]) -> int | None:
