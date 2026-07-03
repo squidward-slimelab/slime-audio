@@ -310,6 +310,9 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             args = runner.parse_args_from(["--target", "all", "--state", str(state_path), "--session", str(session_path)])
+            # Isolated FIFO: tests must never contend with the production
+            # stream's writer lock on /tmp/snapfifo.
+            args.snapcast_fifo = temp / "snapfifo"
 
             with patch.object(runner, "append_history"):
                 with patch.object(runner, "session_duration_ms", return_value=20_000):
@@ -356,6 +359,9 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                     "10000",
                 ]
             )
+            # Isolated FIFO: tests must never contend with the production
+            # stream's writer lock on /tmp/snapfifo.
+            args.snapcast_fifo = temp / "snapfifo"
 
             with patch.object(runner, "render_window", return_value=["render"]):
                 with patch.object(runner, "start_stream") as start_stream:
@@ -412,6 +418,9 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                     "10000",
                 ]
             )
+            # Isolated FIFO: tests must never contend with the production
+            # stream's writer lock on /tmp/snapfifo.
+            args.snapcast_fifo = temp / "snapfifo"
             process = Mock()
             process.poll.side_effect = [0]
             order = []
@@ -465,6 +474,9 @@ class SlimeAudioSessionRunnerTests(unittest.TestCase):
                     "--dry-run",
                 ]
             )
+            # Isolated FIFO: tests must never contend with the production
+            # stream's writer lock on /tmp/snapfifo.
+            args.snapcast_fifo = temp / "snapfifo"
 
             with redirect_stdout(StringIO()):
                 self.assertEqual(runner.run_session(args), 0)

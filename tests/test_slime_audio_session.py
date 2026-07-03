@@ -741,6 +741,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
                 "source_path": str(source),
                 "at_ms": 0,
                 "duration_ms": 1000,
+                # Stems are an explicit request; a bare load plays the record whole.
+                "play_stems": ["vocals", "drums", "bass", "other"],
             }
 
             self.assertEqual(
@@ -756,7 +758,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertTrue(all(stored["stems"][stem]["path"].endswith(f"{stem}.wav") for stem in stored["stems"]))
 
     def test_prepare_load_track_runs_split_when_ready_stems_missing(self):
-        action = {"type": "load_track", "id": "lead-load", "deck": "deck-1", "source_path": "/music/lead.flac"}
+        action = {"type": "load_track", "id": "lead-load", "deck": "deck-1", "source_path": "/music/lead.flac", "play_stems": ["drums", "bass"]}
         artifacts = {
             "stem_set_id": "set-b",
             "manifest_path": "/stems/set-b/manifest.json",

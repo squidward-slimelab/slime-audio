@@ -18,12 +18,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from slime_audio_session import apply_master_tempo, master_bpm_at
+from slime_audio_session import apply_master_tempo, compile_actions_payload, master_bpm_at
 
 
 def load_session(path: Path) -> dict:
+    """Report on the compiled deck clock: loads are how songs play, so the
+    raw payload's clips list may be empty while actions carry the set."""
     with path.open() as handle:
-        return apply_master_tempo(json.load(handle))
+        return apply_master_tempo(compile_actions_payload(json.load(handle)))
 
 
 def lead_clips(session: dict) -> list[dict]:

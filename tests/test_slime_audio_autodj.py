@@ -117,7 +117,19 @@ def create_ready_stem_db(temp: Path, sources: list[str]) -> Path:
     return db_path
 
 
+def compiled_lead_clips(payload):
+    """Leads are authored as load_track actions; assertions read the compiled deck clock."""
+    from slime_audio_session import compile_actions_payload
+
+    compiled = compile_actions_payload(json.loads(json.dumps(payload)))
+    return sorted(
+        [clip for clip in compiled.get("clips", []) if clip.get("planner_role") == "lead"],
+        key=lambda clip: int(clip.get("start_ms") or 0),
+    )
+
+
 def selected_track(path="/music/lead.flac"):
+
     return SelectedTrack(
         path=path,
         artist="Artist",
@@ -1030,9 +1042,10 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         payload = session_payload([track], args, {track.path: analysis()})
 
-        self.assertEqual(payload["clips"][0]["trim_start_ms"], 0)
-        self.assertEqual(payload["clips"][0]["duration_ms"], 240_000)
-        self.assertEqual(payload["clips"][0]["source_window_reason"], "full-track")
+        leads = compiled_lead_clips(payload)
+        self.assertEqual(leads[0]["trim_start_ms"], 0)
+        self.assertEqual(leads[0]["duration_ms"], 240_000)
+        self.assertEqual(leads[0]["source_window_reason"], "full-track")
 
     def test_full_arrangement_skips_structure_rejection(self):
         good = selected_track("/music/good.flac")
@@ -1050,7 +1063,7 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         payload = session_payload([track], args, {track.path: analysis()})
 
-        self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
+        self.assertEqual(compiled_lead_clips(payload)[0]["duration_ms"], 90_000)
         self.assertEqual(payload["notes"]["max_lead_clip_ms"], 90_000)
 
     def test_session_payload_prefers_detected_structure_window(self):
@@ -1059,9 +1072,10 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         payload = session_payload([track], args, {track.path: analysis()})
 
-        self.assertEqual(payload["clips"][0]["trim_start_ms"], 64_000)
-        self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
-        self.assertEqual(payload["clips"][0]["source_window_reason"], "structure:drop")
+        leads = compiled_lead_clips(payload)
+        self.assertEqual(leads[0]["trim_start_ms"], 64_000)
+        self.assertEqual(leads[0]["duration_ms"], 90_000)
+        self.assertEqual(leads[0]["source_window_reason"], "structure:drop")
 
     def test_session_payload_extends_short_drop_anchor_to_phrase_window(self):
         track = selected_track()
@@ -1076,9 +1090,10 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         payload = session_payload([track], args, {track.path: short_drop})
 
-        self.assertEqual(payload["clips"][0]["trim_start_ms"], 80_000)
-        self.assertEqual(payload["clips"][0]["duration_ms"], 90_000)
-        self.assertEqual(payload["clips"][0]["source_window_reason"], "structure:drop")
+        leads = compiled_lead_clips(payload)
+        self.assertEqual(leads[0]["trim_start_ms"], 80_000)
+        self.assertEqual(leads[0]["duration_ms"], 90_000)
+        self.assertEqual(leads[0]["source_window_reason"], "structure:drop")
 
     def test_session_payload_records_remix_focus_policy(self):
         track = selected_track()
@@ -1786,12 +1801,14 @@ class SlimeAudioAutodjStemMixedModeTests(unittest.TestCase):
             ]
 
         actions = [action for action in payload["actions"] if action.get("type") == "load_track"]
-        self.assertEqual(len(actions), 1)
-        self.assertEqual(actions[0]["source_path"], ready_path)
-        self.assertEqual(set(actions[0]["stems"]), {"vocals", "drums", "bass", "other"})
-        clips = payload["clips"]
-        self.assertEqual(len(clips), 1)
-        self.assertEqual(clips[0]["path"], missing_path)
+        self.assertEqual(len(actions), 2)
+        by_path = {action["source_path"]: action for action in actions}
+        # Ready track loads with explicit stems; the other is a PLAIN load —
+        # the record plays whole, no raw fallback clips.
+        self.assertEqual(set(by_path[ready_path]["stems"]), {"vocals", "drums", "bass", "other"})
+        self.assertNotIn("play_stems", by_path[missing_path])
+        self.assertNotIn("stems", by_path[missing_path])
+        self.assertEqual(payload.get("clips", []), [])
         self.assertEqual(payload["notes"]["stem_split_queued"], [missing_path])
         self.assertEqual([entry["path"] for entry in queue_lines], [missing_path])
 
@@ -1989,10 +2006,14 @@ class SlimeAudioAutodjExtendTests(unittest.TestCase):
 
             self.assertEqual(captured["exclude_paths"], {"/music/a.flac", "/music/b.flac"})
             published = json.loads(session_path.read_text(encoding="utf-8"))
-            new_clips = [clip for clip in published["clips"] if clip["path"] == "/music/c.flac"]
-            self.assertEqual(len(new_clips), 1)
-            self.assertEqual(new_clips[0]["start_ms"], 120_000)
-            self.assertTrue(str(new_clips[0]["id"]).startswith("ext-"))
+            new_loads = [
+                action
+                for action in published.get("actions", [])
+                if action.get("type") == "load_track" and action.get("source_path") == "/music/c.flac"
+            ]
+            self.assertEqual(len(new_loads), 1)
+            self.assertEqual(new_loads[0]["at_ms"], 120_000)
+            self.assertTrue(str(new_loads[0]["id"]).startswith("ext-"))
             self.assertEqual(len(published["notes"]["extensions"]), 1)
             history_lines = [json.loads(line) for line in (temp / "history.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertIn("autodj_set_extended", {line.get("event") for line in history_lines})
@@ -2096,7 +2117,7 @@ class MasterTempoPayloadTests(unittest.TestCase):
         payload = session_payload(tracks, args, analyses={track.path: analysis(track.path) for track in tracks})
         self.assertEqual(payload["master_bpm"], 90.0)
         self.assertEqual(payload["max_tempo_stretch_pct"], 30.0)
-        leads = [clip for clip in payload["clips"] if clip.get("planner_role") == "lead"]
+        leads = compiled_lead_clips(payload)
         self.assertTrue(leads)
         for clip in leads:
             self.assertEqual(clip["source_bpm"], 120.0)
@@ -2110,7 +2131,7 @@ class MasterTempoPayloadTests(unittest.TestCase):
         args = autodj_args(min_tracks=1, max_tracks=1)
         payload = session_payload(tracks, args, analyses={tracks[0].path: analysis(tracks[0].path)})
         self.assertNotIn("master_bpm", payload)
-        lead = next(clip for clip in payload["clips"] if clip.get("planner_role") == "lead")
+        lead = compiled_lead_clips(payload)[0]
         self.assertEqual(lead["tempo_shift_pct"], 0.0)
         self.assertEqual(lead["source_bpm"], 120.0)
 

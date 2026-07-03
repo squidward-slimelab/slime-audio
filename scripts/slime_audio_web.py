@@ -740,7 +740,10 @@ def build_dashboard_view(state: dict[str, Any], state_path: Path, session_path: 
     upcoming = [
         event
         for event in events
-        if event.get("status") == "planned" and event.get("kind") not in {"automation"}
+        # Raw actions stay on the timeline's action lane (the visible "load"
+        # cues); Up Next lists what the room will hear — their compiled
+        # songs/stem-groups — once, not twice.
+        if event.get("status") == "planned" and event.get("kind") not in {"automation", "action"}
     ][:8]
     commentary = [
         event

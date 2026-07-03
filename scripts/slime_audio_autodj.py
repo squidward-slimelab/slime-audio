@@ -1173,29 +1173,27 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
                 value = getattr(analysis, key, None)
                 if value is not None:
                     base_event[key] = value
+        # Loading is how songs get onto decks: every lead is a load_track
+        # action on the deck clock. A plain load plays the record whole; stem
+        # selection is the explicit opt-in on top. Raw session clips are the
+        # fallback representation (imports, legacy sets), never the product.
+        action = {
+            "type": "load_track",
+            **{key: value for key, value in base_event.items() if key != "start_ms"},
+            "source_path": track.path,
+            "at_ms": cursor_ms,
+        }
         if bool(getattr(args, "stem_aware_remix", False)) and track.path in stem_ready_paths:
-            action = {
-                "type": "load_track",
-                **base_event,
-                "source_path": track.path,
-                "at_ms": cursor_ms,
-                "play_stems": ["vocals", "drums", "bass", "other"],
-            }
+            action["play_stems"] = ["vocals", "drums", "bass", "other"]
             # prepare_stems=False: readiness was checked above, and generation
-            # must never block on Demucs. Missing stems load as plain clips and
-            # get queued for background splitting instead.
+            # must never block on Demucs. Missing stems load as plain records
+            # and get queued for background splitting instead.
             action = prepare_load_track_action_stems(
                 action, db_path=Path(getattr(args, "db", DEFAULT_DB)), prepare_stems=False
             )
-            lead_actions.append(action)
-        else:
-            if bool(getattr(args, "stem_aware_remix", False)):
-                stem_split_queued.append(track.path)
-            clip = {
-                **base_event,
-                "path": track.path,
-            }
-            lead_clips.append(clip)
+        elif bool(getattr(args, "stem_aware_remix", False)):
+            stem_split_queued.append(track.path)
+        lead_actions.append(action)
         cursor_ms += max(16_000, source_window.duration_ms - args.base_overlap_ms)
         previous_track = track
 

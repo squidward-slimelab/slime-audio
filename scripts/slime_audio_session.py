@@ -812,6 +812,62 @@ def stem_group_source_position(group: dict[str, Any], mix_ms: int) -> int:
     return trim_start_ms + int(round((mix_ms - start_ms) * factor))
 
 
+def action_requests_stems(action: dict[str, Any]) -> bool:
+    return bool(action.get("play_stems") or action.get("enabled_stems") or action.get("stems"))
+
+
+PLAIN_LOAD_CLIP_FIELDS = (
+    "gain_db",
+    "tempo_shift_pct",
+    "pitch_shift_semitones",
+    "fade_in_ms",
+    "fade_out_ms",
+    "source_bpm",
+    "warp",
+    "kind",
+    "planner_role",
+    "source_window_reason",
+    "source_structure_kind",
+    "source_duration_ms",
+    "key",
+    "tonic",
+    "mode",
+    "camelot",
+    "transition_decision",
+)
+
+
+def plain_clip_from_load_action(
+    load_action: dict[str, Any],
+    *,
+    clip_id: str,
+    start_ms: int,
+    trim_start_ms: int,
+    duration_ms: int | None,
+) -> dict[str, Any]:
+    """A stem-less load_track plays the record itself, as a plain clip segment.
+
+    Loading is how songs get onto decks; raw session clips are the fallback
+    representation, not the product. Stem selection stays the opt-in that
+    requires split artifacts.
+    """
+    clip: dict[str, Any] = {
+        "id": clip_id,
+        "deck": str(load_action.get("deck") or ""),
+        "path": str(load_action.get("source_path") or load_action.get("path") or ""),
+        "start_ms": int(start_ms),
+        "trim_start_ms": int(trim_start_ms),
+        "source_action_id": action_id(load_action),
+        "deck_clock_segment": True,
+    }
+    if duration_ms is not None:
+        clip["duration_ms"] = int(duration_ms)
+    for field in PLAIN_LOAD_CLIP_FIELDS:
+        if load_action.get(field) is not None:
+            clip[field] = load_action[field]
+    return clip
+
+
 def append_deck_clock_segment(
     stem_groups: list[dict[str, Any]],
     group_payloads: dict[str, dict[str, Any]],
@@ -822,9 +878,20 @@ def append_deck_clock_segment(
     trim_start_ms: int,
     duration_ms: int,
     pending_stem_automations: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
+    clips: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     if duration_ms <= 0:
         return None
+    if clips is not None and not action_requests_stems(load_action):
+        clip = plain_clip_from_load_action(
+            load_action,
+            clip_id=segment_id,
+            start_ms=start_ms,
+            trim_start_ms=trim_start_ms,
+            duration_ms=duration_ms,
+        )
+        clips.append(clip)
+        return clip
     group, _deck = load_track_group_from_action(
         load_action,
         group_id=segment_id,
@@ -905,6 +972,9 @@ def prepare_load_track_action_stems(
     load_id = action_id(prepared) or "<unnamed>"
     if not source_path:
         raise ValueError(f"load_track {load_id} source_path is required")
+    if not action_requests_stems(prepared):
+        # Plain load: the record plays whole; no split artifacts involved.
+        return prepared
     if action_has_all_stem_paths(prepared):
         return prepared
 
@@ -1098,6 +1168,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
     compiled = copy.deepcopy(payload)
     compiled["stem_groups"] = list(compiled.get("stem_groups", compiled.get("stemGroups", [])))
     stem_groups = compiled["stem_groups"]
+    clips = compiled.setdefault("clips", [])
     deck_automations = compiled.setdefault("deck_automations", [])
     automations = compiled.setdefault("automations", [])
     decks = [str(deck) for deck in compiled.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
@@ -1149,6 +1220,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             trim_start_ms=int(active["trim_start_ms"]),
             duration_ms=end_ms - start_ms,
             pending_stem_automations=pending_stem_automations,
+            clips=clips,
         )
         deck_active.pop(deck, None)
 
@@ -1192,17 +1264,34 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         at_ms = action_at_ms(action)
 
         if kind == "load_track":
-            group, deck = load_track_group_from_action(action)
-            load_id = str(group["id"])
+            if action_requests_stems(action):
+                group, deck = load_track_group_from_action(action)
+                load_id = str(group["id"])
+                trim_ms = int(group["trim_start_ms"])
+                group_payloads[load_id] = group
+            else:
+                # Plain load: the record itself goes on the deck clock; its
+                # segments compile to clips (see plain_clip_from_load_action).
+                load_id = action_id(action)
+                deck = str(action.get("deck") or "").strip()
+                if not load_id:
+                    raise ValueError("load_track action id is required")
+                if not deck:
+                    raise ValueError(f"load_track {load_id} deck is required")
+                if not str(action.get("source_path") or action.get("path") or "").strip():
+                    raise ValueError(f"load_track {load_id} source_path is required")
+                trim_ms = parse_ms(
+                    action.get("trim_start_ms", action.get("trim_start", action.get("cue_ms", action.get("cue", 0)))),
+                    f"load_track {load_id} trim",
+                )
             close_active(deck, at_ms)
             loaded_actions[load_id] = action
-            group_payloads[load_id] = group
             add_deck(deck)
             deck_active[deck] = {
                 "action": action,
                 "load_id": load_id,
                 "start_ms": at_ms,
-                "trim_start_ms": int(group["trim_start_ms"]),
+                "trim_start_ms": trim_ms,
             }
             deck_paused.pop(deck, None)
         elif kind == "set_cue":
@@ -1265,6 +1354,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     trim_start_ms=source_start_ms,
                     duration_ms=duration_ms,
                     pending_stem_automations=pending_stem_automations,
+                    clips=clips,
                 )
                 cursor += duration_ms
                 loop_index += 1
@@ -1432,6 +1522,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             trim_start_ms=int(active["trim_start_ms"]),
             duration_ms=remaining_ms,
             pending_stem_automations=pending_stem_automations,
+            clips=clips,
         )
     compiled["decks"] = decks
     return compiled

@@ -23,6 +23,8 @@ from slime_audio_dj import (
 )
 from slime_audio_session import (
     DEFAULT_MAX_WARP_STRETCH_PCT,
+    action_type,
+    compile_actions_payload,
     load_payload,
     master_bpm_at,
     master_tempo_shift_pct,
@@ -439,6 +441,17 @@ def plan_future_mix(
     plan_until_ms: int | None = None,
     target_bpm: float | None = None,
 ) -> tuple[dict[str, Any], list[PlannedMove]]:
+    original_payload = payload
+    has_deck_loads = any(action_type(action) == "load_track" for action in payload.get("actions", []) or [])
+    if has_deck_loads:
+        # Loading is how songs play: the planner works on the compiled deck
+        # clock, and its corrections flow back into the load_track actions
+        # afterwards (write_back_deck_loads). The actions are consumed by the
+        # compile — leaving them in the working copy would compile them a
+        # second time at validation and duplicate every lead.
+        payload = compile_actions_payload(copy.deepcopy(payload))
+        payload.pop("actions", None)
+        payload.pop("performance_actions", None)
     next_payload = copy.deepcopy(payload)
     if target_bpm is None and next_payload.get("master_bpm"):
         # The session owns tempo: a master_bpm session is tempo-locked whether
@@ -476,6 +489,8 @@ def plan_future_mix(
         and clip.get("kind") != "planner-double"
     ]
     if not future:
+        if has_deck_loads:
+            return write_back_deck_loads(original_payload, next_payload), []
         return next_payload, []
     declared_decks = [str(deck) for deck in next_payload.get("decks", [])]
     deck_order = [deck for deck in DECK_ORDER if deck in declared_decks] + [deck for deck in declared_decks if deck not in DECK_ORDER]
@@ -615,7 +630,74 @@ def plan_future_mix(
         if not (automation.get("target") == "master" and automation.get("param") == "duck_volume" and automation.get("planner_role") == "mix-planner")
     ]
     parse_session(next_payload)
+    if has_deck_loads:
+        return write_back_deck_loads(original_payload, next_payload), planned
     return next_payload, planned
+
+
+PLANNED_LOAD_WRITEBACK_FIELDS = (
+    "deck",
+    "duration_ms",
+    "trim_start_ms",
+    "fade_in_ms",
+    "fade_out_ms",
+    "pitch_shift_semitones",
+    "tempo_shift_pct",
+    "source_duration_ms",
+)
+
+
+def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any]) -> dict[str, Any]:
+    """Planned corrections flow back into the load_track actions owning the leads.
+
+    The planner computes on the compiled deck clock; the session's canonical
+    authoring stays "loads on decks". Single-segment loads take the planned
+    clip's fields verbatim; multi-segment loads (live performance moves) keep
+    their actions authoritative and drop planner edits to their segments.
+    Only the planner's own mix-planner-* transition plans and carves merge
+    back — compiled materializations (knob rides, stem segments) must not
+    duplicate into the stored session.
+    """
+    result = copy.deepcopy(original)
+    actions_by_id: dict[str, dict[str, Any]] = {}
+    for action in result.get("actions", []) or []:
+        aid = str(action.get("id") or "")
+        if aid and action_type(action) == "load_track":
+            actions_by_id[aid] = action
+    segment_counts: dict[str, int] = {}
+    for event in list(planned.get("clips", []) or []) + list(planned.get("stem_groups", []) or []):
+        source = str(event.get("source_action_id") or "")
+        if source:
+            segment_counts[source] = segment_counts.get(source, 0) + 1
+    kept_clips: list[dict[str, Any]] = []
+    for clip in planned.get("clips", []) or []:
+        source = str(clip.get("source_action_id") or "")
+        if clip.get("deck_clock_segment") and source in actions_by_id:
+            if segment_counts.get(source, 0) == 1:
+                action = actions_by_id[source]
+                action["at_ms"] = int(clip.get("start_ms") or 0)
+                action.pop("at", None)
+                action.pop("duration", None)
+                for field in PLANNED_LOAD_WRITEBACK_FIELDS:
+                    if clip.get(field) is not None:
+                        action[field] = clip[field]
+            continue
+        kept_clips.append(clip)
+    result["clips"] = kept_clips
+    for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner")):
+        original_entries = [
+            entry
+            for entry in result.get(key, []) or []
+            if not str(entry.get("planner_role") or "").startswith(role_prefix)
+        ]
+        planner_entries = [
+            entry
+            for entry in planned.get(key, []) or []
+            if str(entry.get("planner_role") or "").startswith(role_prefix)
+        ]
+        result[key] = original_entries + planner_entries
+    parse_session(result)
+    return result
 
 
 def analyze_session_paths(
@@ -630,6 +712,10 @@ def analyze_session_paths(
     analyze_missing: bool = True,
     plan_until_ms: int | None = None,
 ) -> dict[str, TrackAnalysis]:
+    # Loading is how songs play: analyze the compiled deck clock so
+    # action-authored leads get their analyses too.
+    if any(action_type(action) == "load_track" for action in payload.get("actions", []) or []):
+        payload = compile_actions_payload(copy.deepcopy(payload))
     paths = []
     seen = set()
     for clip in payload.get("clips", []):
