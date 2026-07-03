@@ -72,6 +72,15 @@ def atempo_filters(factor: float) -> list[str]:
 
 def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
     filters: list[str] = []
+    if clip.playback_rate != 1.0 or clip.pitch_shift_semitones:
+        # The asetrate math below assumes the stream is already at the render
+        # sample rate, but clip inputs enter the filter chain at their source
+        # rate (typically 44.1k) — aformat only resamples AFTER these filters.
+        # Without normalizing first, a +1 st shift at a 48k render lands
+        # ~+2.5 st sharp and runs ~8% short, so the window WAV comes out
+        # shorter than its timeline span and the playhead drifts ahead of
+        # the room.
+        filters.append(f"aresample={sample_rate}")
     if clip.playback_rate != 1.0:
         filters.append(f"asetrate={max(1, int(round(sample_rate * clip.playback_rate)))}")
         filters.append(f"aresample={sample_rate}")

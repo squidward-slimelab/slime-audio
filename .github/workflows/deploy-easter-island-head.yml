@@ -42,14 +42,14 @@ jobs:
             git -C "$DEPLOY_PATH" remote add origin \
             "git@github.com:${GITHUB_REPOSITORY}.git"
           git config --global --add safe.directory "$DEPLOY_PATH"
-          # Fetching the bare push SHA can race GitHub's replication right
-          # after a push ("not our ref") — fall back to the branch, which
-          # contains the commit by the time the job runs.
-          git -C "$DEPLOY_PATH" fetch --prune --tags origin "$GITHUB_SHA" || {
-            sleep 5
+          # GitHub refuses fetch-by-SHA for this repo ("not our ref", even for
+          # the branch tip) — fetch the branch, which contains the commit.
+          git -C "$DEPLOY_PATH" fetch --prune --tags origin "$GITHUB_SHA" || \
             git -C "$DEPLOY_PATH" fetch --prune --tags origin "$GITHUB_REF_NAME"
-          }
-          git -C "$DEPLOY_PATH" checkout -B deploy "$GITHUB_SHA"
+          # --force: hotfixes applied directly to the deployment tree must
+          # never block the deploy that supersedes them (a dirty tracked file
+          # fails a plain checkout -B and the room silently stops shipping).
+          git -C "$DEPLOY_PATH" checkout --force -B deploy "$GITHUB_SHA"
           git -C "$DEPLOY_PATH" reset --hard "$GITHUB_SHA"
           git -C "$DEPLOY_PATH" clean -fd -e .venv/ -e runtime/
 

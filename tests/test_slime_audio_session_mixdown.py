@@ -513,7 +513,8 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
             filters = build_filter_complex(load_session(session_path), {}, 48_000, 2)
 
-        self.assertIn("atrim=start=2.000:duration=0.750,asetpts=PTS-STARTPTS,areverse,asetrate=72000,aresample=48000", filters)
+        # aresample before asetrate: rate/pitch math runs at the render rate.
+        self.assertIn("atrim=start=2.000:duration=0.750,asetpts=PTS-STARTPTS,areverse,aresample=48000,asetrate=72000,aresample=48000", filters)
         self.assertIn("adelay=1000:all=1", filters)
 
     def test_long_filter_complex_can_spill_to_script_file(self):
@@ -1853,6 +1854,41 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
             materialized = materialize_clip_stem_mixes(session, temp / "missing.sqlite3", temp, 48_000, 1)
 
         self.assertIs(materialized, session)
+
+
+class TimePitchFilterTests(unittest.TestCase):
+    """Pitch/rate math must run at the render sample rate, not the source's.
+
+    asetrate relabels whatever rate the stream actually has: a 44.1k source
+    against 48k math renders sharp and short (a +1 st clip landed ~+2.5 st and
+    ~8% short live on 2026-07-03, skipping the playhead forward every window).
+    Normalizing with aresample first makes the ratios exact.
+    """
+
+    @staticmethod
+    def clip(**overrides):
+        from slime_audio_session import Clip
+
+        values = {"id": "lead", "deck": "deck-2", "path": "/music/a.flac", "start_ms": 0}
+        values.update(overrides)
+        return Clip(**values)
+
+    def test_pitch_shift_normalizes_to_render_rate_first(self):
+        from slime_audio_session_mixdown import time_pitch_filters
+
+        filters = time_pitch_filters(self.clip(pitch_shift_semitones=1), 48_000)
+        self.assertEqual(filters[0], "aresample=48000")
+        self.assertTrue(filters[1].startswith("asetrate="))
+
+    def test_playback_rate_also_normalized_and_neutral_clip_untouched(self):
+        from slime_audio_session_mixdown import time_pitch_filters
+
+        filters = time_pitch_filters(self.clip(playback_rate=1.25), 48_000)
+        self.assertEqual(filters[0], "aresample=48000")
+        self.assertEqual(time_pitch_filters(self.clip(), 48_000), [])
+        # Pure tempo shifts use atempo (time-domain) and need no normalization.
+        tempo_only = time_pitch_filters(self.clip(tempo_shift_pct=5.0), 48_000)
+        self.assertTrue(all(f.startswith("atempo=") for f in tempo_only))
 
 
 if __name__ == "__main__":
