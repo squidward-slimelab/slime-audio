@@ -111,8 +111,15 @@ Craft notes that consistently separate good sets from canned ones:
 
 1. `cat runtime/operator-notes.md` for the download tool and share layout.
 2. Pick the mounted `Music` share with the most free space (`df -h /mnt/*`).
-3. Download into a labeled `_Slime Incoming/<purpose>` folder there.
-4. `slime_music_library.py scan`, confirm with `browse`, analyze (`analyze-tunebat-local`) before mixing.
+3. Download into a labeled `_Slime Incoming/<purpose>` folder there. If the tool
+   crashes on its interactive "press key" prompt when run non-interactively, give
+   it a pty: `script -qec "sldl ..." /dev/null`.
+4. **Promote before registering**: move finished albums to `Music/<Artist>/<Album>/`
+   first — artist/title guesses and analysis keys derive from that path layout, so
+   anything scanned inside `_Slime Incoming` gets junk artists, is invisible to
+   `browse --artist`, and its analysis is wasted when the files move.
+5. Then `slime_music_library.py scan --prune`, confirm with `browse`, analyze
+   (`analyze-tunebat-local`) before mixing.
 
 A couple of well-chosen downloads while the first tracks play is normal DJ behavior; never build a set from temp folders, and never let acquisition delay starting whatever decent material already exists. While `slime_music_library.py stats` shows a thin EDM share, weight new acquisition toward club rhythm material — the remix workflow always needs a deep bed pool. Rotate bed crates too: a fresh alternative in a lane you keep reaching for beats another lead.
 
