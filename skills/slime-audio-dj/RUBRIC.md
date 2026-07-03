@@ -57,14 +57,15 @@ the most interesting mixes.
 
 - Tempo stretches and small key nudges are actually used — a set of all-neutral
   transforms means the material was accepted as-is, which is a playlist symptom.
-- Stem and bed work appears where the vibe allows: a rhythm bed under a sparse lead, a
-  vocal isolated over an outro, drums-only under a handoff. Each layer has a musical
-  job the grader can name.
+- Stem and bed work appears at every energy — the vibe sets the register, not the
+  presence: a quiet drums+bass pulse at −9 dB under a slow lead, a lone piano stem
+  floating free-time under a vocal, drums-only under a handoff. Each layer has a
+  musical job the grader can name.
 - Objective signals: % of clips with non-neutral `tempo_shift_pct`/`pitch_shift_semitones`,
   clips with `play_stems`, routine/action counts.
-- Calibrate to vibe: an ambient sleep set may earn full marks with few stems if the
-  reshaping (tempo, arc) is doing the work; an energetic set with zero stem/remix work
-  caps at half.
+- Calibrate to vibe: a sleep set earns with *few, quiet* layers if the reshaping
+  (tempo, arc) is doing the work — zero layers is a deduction unless the operator
+  asked for it; an energetic set with zero stem/remix work caps at half.
 
 ### 4. Curation — 20
 
@@ -85,15 +86,18 @@ the most interesting mixes.
   across a set is an arc move; an arbitrary wobble is noise).
 - Effects are punctuation — beat-synced throws on phrase exits, a wash into a
   breakdown — one gesture per phrase, each with a job.
-- **Mic drops are hosting, and hosting is craft.** When the vibe calls for a
-  voice, good drops score: authored in the DJ's own words for *this* moment,
-  short, spaced well apart, timed into gaps (never over a vocal), and about the
-  music — naming an incoming record when it earns it, calling the energy move,
-  teasing a drop. A great set with a dead mic in a room that wanted hosting
-  leaves these points on the table.
-- Restraint is graded as motion when the vibe demands it: for a sleep set, the
-  discipline *not* to decorate — and total mic silence — scores here. More
-  moves ≠ more points, ever.
+- **Mic drops are hosting, and hosting is craft.** Good drops score: authored in
+  the DJ's own words for *this* moment, short, spaced well apart, timed into
+  gaps (never over a vocal), and about the music — naming an incoming record
+  when it earns it, calling the energy move, teasing a drop. A great set with a
+  dead mic leaves these points on the table.
+- **Low energy changes the register, not the presence, of craft.** A sleep set
+  wants hushed, sparse hosting and quiet beds (−9 dB, a stem floating under a
+  lead), not a dead mic and zero layers. Total silence and an unlayered set are
+  valid only as an explicit operator request, never a vibe-derived default.
+- Restraint is still graded as motion: every gesture needs a job, and more
+  moves ≠ more points, ever. The discipline is choosing the *right* few, at the
+  right volume, not choosing none.
 - Objective signals: `deck_automations` shape (multi-point ramps vs flat),
   `master_bpm_automation`, effect actions and their placement relative to
   transitions, `mic_lean_ins` timing against vocal windows.
