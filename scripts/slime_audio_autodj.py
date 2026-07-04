@@ -3369,6 +3369,19 @@ def continue_set(args: argparse.Namespace) -> int:
                 "advisories": advisories,
                 "stem_readiness": stem_readiness,
                 "mic_drops_placed": placed_mic_drops,
+                # The DJ's performance-pass coordinates: never reconstruct
+                # junction timings from raw plan JSON (two cold agents burned
+                # their edit window doing exactly that). Vocal collisions are
+                # already mitigated mechanically at every blend; these spans
+                # are where TASTE goes.
+                "junctions": [
+                    {
+                        key: plan_record.get(key)
+                        for key in ("from_clip_id", "to_clip_id", "start_ms", "end_ms", "overlap_ms", "decision", "reason")
+                    }
+                    for plan_record in payload.get("transition_plans") or []
+                    if str(plan_record.get("planner_role") or "") == "mix-planner-transition-plan"
+                ],
                 "commentary_slots": (payload.get("notes") or {}).get("commentary_slots", []),
                 "tracks": [asdict(track) for track in selected],
                 "structure_rejections": structure_rejections,
