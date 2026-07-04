@@ -1264,8 +1264,6 @@ def weave_arrangement(
                 "duration_ms": min(tease_ms, current_end - tease_at),
                 "gain_db": -3.0,
                 "play_stems": ["vocals"],
-                "fade_in_ms": 1_500,
-                "fade_out_ms": 1_500,
                 "planner_role": "arrangement-tease",
                 "kind": "tease",
                 "pitch_shift_semitones": tease_delta,

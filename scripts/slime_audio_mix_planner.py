@@ -668,8 +668,10 @@ def plan_future_mix(
         # Keep clip fades as click/entry protection. Long automatic fade-outs
         # make the lead record audibly sag even when no replacement move is
         # obvious; transition shape belongs in EQ/filter/crossfader automation.
-        clip["fade_in_ms"] = min(overlap, 8_000) if overlap else 0
-        clip["fade_out_ms"] = 0
+        # No automatic fades, ever: the planner injecting fades on blends made
+        # every boundary a surprise for the DJ (operator order 2026-07-04).
+        # Blends are carried by the stem runway choreography and EQ carves;
+        # fades are a deliberate DJ move on specific clips only.
         if target_bpm is not None:
             # Authored tempo locks are the arrangement; the planner only picks
             # the key alignment for overlaps and never rewrites tempo.

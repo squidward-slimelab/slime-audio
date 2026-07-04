@@ -103,9 +103,9 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
         self.assertEqual(clips["short"]["duration_ms"], 173_800)
-        self.assertEqual(clips["short"]["fade_out_ms"], 0)
+        self.assertEqual(clips["short"].get("fade_out_ms", 0), 0)
         self.assertEqual(clips["long"]["duration_ms"], 276_898)
-        self.assertEqual(clips["long"]["fade_out_ms"], 0)
+        self.assertEqual(clips["long"].get("fade_out_ms", 0), 0)
 
     def test_future_mix_planner_adds_blends_doubles_and_automation(self):
         payload = {
@@ -133,9 +133,10 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
         self.assertLess(clips["after"]["start_ms"], clips["next"]["start_ms"] + clips["next"]["duration_ms"])
-        self.assertGreater(clips["after"]["fade_in_ms"], 0)
-        self.assertLessEqual(clips["after"]["fade_in_ms"], 8_000)
-        self.assertEqual(clips["after"]["fade_out_ms"], 0)
+        # No automatic fades: the planner never authors fade_in on blends
+        # (operator order — fades are a deliberate DJ move only).
+        self.assertEqual(clips["after"].get("fade_in_ms", 0), 0)
+        self.assertEqual(clips["after"].get("fade_out_ms", 0), 0)
         self.assertIn("double-after", clips)
         self.assertEqual(clips["double-after"]["planner_role"], "drop-double")
         self.assertEqual(clips["double-after"]["trim_start_ms"], 64_000)
@@ -194,7 +195,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
         self.assertEqual(clips["after"]["start_ms"], clips["next"]["start_ms"] + clips["next"]["duration_ms"])
-        self.assertEqual(clips["after"]["fade_in_ms"], 0)
+        self.assertEqual(clips["after"].get("fade_in_ms", 0), 0)
         self.assertNotIn("double-after", clips)
         transition_plans = {item["to_clip_id"]: item for item in planned["transition_plans"]}
         self.assertEqual(transition_plans["after"]["decision"], "cut")
@@ -289,7 +290,7 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
 
         clips = {clip["id"]: clip for clip in planned["clips"]}
         self.assertEqual(clips["bad"]["start_ms"], clips["current"]["start_ms"] + clips["current"]["duration_ms"])
-        self.assertEqual(clips["bad"]["fade_in_ms"], 0)
+        self.assertEqual(clips["bad"].get("fade_in_ms", 0), 0)
         self.assertFalse(any(clip.get("planner_role") == "drop-double" for clip in planned["clips"]))
         self.assertEqual(planned.get("deck_automations", []), [])
         self.assertIn("cut", moves[-1].reason)
