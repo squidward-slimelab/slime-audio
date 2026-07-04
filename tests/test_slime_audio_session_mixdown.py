@@ -1856,6 +1856,61 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
         self.assertIs(materialized, session)
 
 
+class WindowFadeTests(unittest.TestCase):
+    """Authored fades belong to a clip's real ends, not to window cuts.
+
+    A render-window boundary landing inside a blended clip must not re-apply
+    the clip's fade_in at the window start or its fade_out at the window end —
+    that rendered as a dip to silence over seconds at seemingly random moments
+    (heard live across 2026-07-03's sets).
+    """
+
+    @staticmethod
+    def session_with_faded_clip():
+        payload = {
+            "version": 1,
+            "decks": ["deck-1"],
+            "clips": [
+                {
+                    "id": "lead",
+                    "deck": "deck-1",
+                    "path": "/music/a.flac",
+                    "start_ms": 0,
+                    "duration_ms": 300_000,
+                    "fade_in_ms": 8_000,
+                    "fade_out_ms": 8_000,
+                }
+            ],
+        }
+        from slime_audio_session import parse_session
+
+        return parse_session(payload)
+
+    def test_mid_clip_window_strips_both_fades(self):
+        window = shift_session_window(self.session_with_faded_clip(), 100_000, 100_000)
+        clip = window.clips[0]
+        self.assertEqual(clip.fade_in_ms, 0)
+        self.assertEqual(clip.fade_out_ms, 0)
+
+    def test_window_containing_clip_ends_keeps_fades(self):
+        window = shift_session_window(self.session_with_faded_clip(), 0, 300_000)
+        clip = window.clips[0]
+        self.assertEqual(clip.fade_in_ms, 8_000)
+        self.assertEqual(clip.fade_out_ms, 8_000)
+
+    def test_head_window_keeps_fade_in_strips_fade_out(self):
+        window = shift_session_window(self.session_with_faded_clip(), 0, 100_000)
+        clip = window.clips[0]
+        self.assertEqual(clip.fade_in_ms, 8_000)
+        self.assertEqual(clip.fade_out_ms, 0)
+
+    def test_tail_window_strips_fade_in_keeps_fade_out(self):
+        window = shift_session_window(self.session_with_faded_clip(), 200_000, 100_000)
+        clip = window.clips[0]
+        self.assertEqual(clip.fade_in_ms, 0)
+        self.assertEqual(clip.fade_out_ms, 8_000)
+
+
 class TimePitchFilterTests(unittest.TestCase):
     """Pitch/rate math must run at the render sample rate, not the source's.
 

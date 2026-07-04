@@ -138,12 +138,24 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         shifted_automations = [
             shifted for automation in clip.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
         ]
+        # Authored fades belong to the clip's real ends, not to render-window
+        # cuts through its middle: keeping them on a mid-clip trim made every
+        # boundary inside a blended clip render a fade-out into the window end
+        # and a fade-in out of the next — an audible dip to silence over
+        # seconds at boundary-dependent (seemingly random) moments.
+        continues_past_window = (
+            window_end_ms is not None
+            and clip.duration_ms is not None
+            and clip.start_ms + clip.duration_ms > window_end_ms
+        )
         clips.append(
             replace(
                 clip,
                 start_ms=max(0, clip.start_ms - from_ms),
                 trim_start_ms=clip.trim_start_ms + int(round(overlap_ms * tempo_factor(clip))),
                 duration_ms=duration_ms,
+                fade_in_ms=0 if overlap_ms > 0 else clip.fade_in_ms,
+                fade_out_ms=0 if continues_past_window else clip.fade_out_ms,
                 automations=shifted_automations,
             )
         )
@@ -165,12 +177,19 @@ def shift_session_window(session: MixSession, from_ms: int, duration_ms: int | N
         shifted_automations = [
             shifted for automation in group.automations if (shifted := shift_automation_window(automation, from_ms)) is not None
         ]
+        group_continues_past_window = (
+            window_end_ms is not None
+            and group.duration_ms is not None
+            and group.start_ms + group.duration_ms > window_end_ms
+        )
         stem_groups.append(
             replace(
                 group,
                 start_ms=max(0, group.start_ms - from_ms),
                 trim_start_ms=group.trim_start_ms + int(round(overlap_ms * tempo_factor(group))),
                 duration_ms=group_duration_ms,
+                fade_in_ms=0 if overlap_ms > 0 else group.fade_in_ms,
+                fade_out_ms=0 if group_continues_past_window else group.fade_out_ms,
                 automations=shifted_automations,
             )
         )
