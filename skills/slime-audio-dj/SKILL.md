@@ -15,6 +15,21 @@ A set is **records woven together over a persistent groove** — the body of the
 
 **The one rule that outranks everything else: get music playing first.** Start audio within a couple of minutes of being asked, then keep improving the future timeline while the room listens. A decent first track now beats a perfect plan later, every time. If you notice yourself planning, validating, or re-generating for more than a few minutes with no audio out, stop and start something.
 
+## QUICKSTART: bounded short set (a "15 minute set"-type request)
+
+The live-edit lock advances with rendered audio, so on a short set **minutes spent reading are minutes of your set you can never edit**. Run this NOW, deep-read the rest of this file while the room listens:
+
+```bash
+cat runtime/operator-notes.md 2>/dev/null                      # env specifics
+python3 scripts/slime_audio_autodj.py stop --reason "new request" 2>/dev/null  # only if a stale set is playing
+python3 scripts/slime_music_library.py browse --stems-ready-only --query "<vibe words>" | head -40   # pick 5-6 from the S crate
+python3 scripts/slime_audio_autodj.py set-constraints --vibe "..." --direction "..."
+python3 scripts/slime_audio_autodj.py continue --track ... --track ... \
+  --target-bpm N --target-key "X minor" --set-length-ms 900000 --title "..."
+```
+
+The instant `continue` returns: author your mic lines, stem moves, and the ending — the WHOLE timeline, front first (`scripts/slime_audio_live_edit.py`, see Live work below). Only after that pass lands do you verify receivers, run reports, or write anything down. Then read the rest of this manual and keep performing.
+
 ## Privacy
 
 Keep this skill generic and portable. No private hostnames, room names, people, playback habits, credentials, or specific song/artist examples in this file. Environment-specific defaults live in local notes or ignored runtime config.
