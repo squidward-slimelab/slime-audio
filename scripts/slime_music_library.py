@@ -966,6 +966,21 @@ def store_tunebat_local_payload(conn: sqlite3.Connection, duplicate_key_value: s
 
 def command_analyze_tunebat_local(conn: sqlite3.Connection, duplicate_key_value: str, analyzer: Path, path: Path | None) -> None:
     target_path = path
+    if not duplicate_key_value:
+        # The analysis upserts keyed by duplicate_key; an empty key silently
+        # funnels every result onto one phantom row (a whole 82-track batch
+        # once "analyzed ok" and persisted nothing). Resolve it from the path
+        # or refuse.
+        if target_path is None:
+            raise SystemExit("duplicate_key or --path required")
+        row = conn.execute(
+            "SELECT duplicate_key FROM tracks WHERE preferred_path = ?", (str(target_path),)
+        ).fetchone()
+        if row is None:
+            raise SystemExit(
+                f"no library track resolves to {target_path}; scan first, or pass the duplicate_key explicitly"
+            )
+        duplicate_key_value = str(row["duplicate_key"])
     if target_path is None:
         row = conn.execute("SELECT preferred_path FROM tracks WHERE duplicate_key = ?", (duplicate_key_value,)).fetchone()
         if row is None:
@@ -1103,7 +1118,7 @@ def parse_args() -> argparse.Namespace:
     import_parser.add_argument("path", type=Path)
 
     analyze_parser = sub.add_parser("analyze-tunebat-local")
-    analyze_parser.add_argument("duplicate_key")
+    analyze_parser.add_argument("duplicate_key", nargs="?", default="", help="Track to analyze; resolved from --path when omitted.")
     analyze_parser.add_argument("--analyzer", type=Path, default=DEFAULT_TUNEBAT_LOCAL_ANALYZER)
     analyze_parser.add_argument("--path", type=Path)
 
