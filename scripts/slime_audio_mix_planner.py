@@ -22,6 +22,7 @@ from slime_audio_dj import (
     transition_plan,
 )
 from slime_audio_session import (
+    DEFAULT_LIBRARY_DB as SESSION_LIBRARY_DB,
     DEFAULT_MAX_WARP_STRETCH_PCT,
     action_type,
     compile_actions_payload,
@@ -30,6 +31,7 @@ from slime_audio_session import (
     master_tempo_shift_pct,
     parse_session,
     playhead_ms_from_state,
+    ready_stem_artifacts,
     write_payload,
 )
 
@@ -430,6 +432,57 @@ def transition_plan_record(
     return record
 
 
+def author_stem_handoff(
+    planner_actions: list[dict[str, Any]],
+    *,
+    outgoing: dict[str, Any],
+    incoming: dict[str, Any],
+    overlap_start_ms: int,
+    overlap_end_ms: int,
+) -> list[str]:
+    """The remix handoff, authored by default on every blend with split material.
+
+    The outgoing record's vocal steps out as the overlap begins (no stacked
+    choruses, ever) and the incoming record enters drums+bass, opening to the
+    full song at the end of the overlap — the classic bring-it-in-on-the-drums
+    move. Toggles segment the loads, so everything outside the handoff still
+    renders from the original files. Only deck loads with ready stem artifacts
+    participate; everything else keeps the plain blend.
+    """
+    notes: list[str] = []
+
+    def ready(clip: dict[str, Any]) -> bool:
+        if not clip.get("source_action_id") or not clip.get("deck_clock_segment"):
+            return False
+        return ready_stem_artifacts(SESSION_LIBRARY_DB, str(clip.get("path") or "")) is not None
+
+    def toggle(load_id: str, stem: str, enabled: bool, at_ms: int, suffix: str) -> None:
+        planner_actions.append(
+            {
+                "type": "stem_toggle",
+                "id": f"mix-{load_id}-{stem}-{suffix}",
+                "target": load_id,
+                "stem": stem,
+                "enabled": enabled,
+                "at_ms": int(at_ms),
+                "planner_role": "mix-planner-stem-handoff",
+            }
+        )
+
+    if ready(outgoing):
+        out_id = str(outgoing["source_action_id"])
+        toggle(out_id, "vocals", False, overlap_start_ms, "out")
+        notes.append("outgoing vocal steps out for the overlap")
+    if ready(incoming):
+        in_id = str(incoming["source_action_id"])
+        toggle(in_id, "vocals", False, overlap_start_ms, "intro")
+        toggle(in_id, "other", False, overlap_start_ms, "intro")
+        toggle(in_id, "vocals", True, overlap_end_ms, "open")
+        toggle(in_id, "other", True, overlap_end_ms, "open")
+        notes.append("incoming enters drums+bass, opens at the phrase")
+    return notes
+
+
 def plan_future_mix(
     payload: dict[str, Any],
     analyses_by_path: dict[str, TrackAnalysis | dict],
@@ -499,6 +552,7 @@ def plan_future_mix(
 
     planned: list[PlannedMove] = []
     rebuilt: list[dict[str, Any]] = protected[:]
+    planner_actions: list[dict[str, Any]] = []
     previous = max(locked, key=clip_end, default=None)
     cursor = max(lock_before_ms, clip_end(previous) - 12_000 if previous else lock_before_ms)
     previous_analysis = analyses.get(str(previous.get("path"))) if previous else None
@@ -588,6 +642,14 @@ def plan_future_mix(
         if previous is not None and overlap and plan is not None:
             actual_overlap_ms = max(0, min(overlap, clip_end(previous) - start_ms))
             add_transition_filter_automation(next_payload, previous, clip, actual_overlap_ms, analysis)
+            if actual_overlap_ms >= 8_000:
+                author_stem_handoff(
+                    planner_actions,
+                    outgoing=previous,
+                    incoming=clip,
+                    overlap_start_ms=start_ms,
+                    overlap_end_ms=start_ms + actual_overlap_ms,
+                )
 
         if double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
             cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=150_000, after_ms=8_000)
@@ -629,7 +691,9 @@ def plan_future_mix(
         for automation in next_payload.get("automations", [])
         if not (automation.get("target") == "master" and automation.get("param") == "duck_volume" and automation.get("planner_role") == "mix-planner")
     ]
-    parse_session(next_payload)
+    if planner_actions and has_deck_loads:
+        next_payload["actions"] = planner_actions
+    parse_session(copy.deepcopy(next_payload))
     if has_deck_loads:
         return write_back_deck_loads(original_payload, next_payload), planned
     return next_payload, planned
@@ -684,7 +748,7 @@ def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any]) -> 
             continue
         kept_clips.append(clip)
     result["clips"] = kept_clips
-    for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner")):
+    for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner"), ("actions", "mix-planner")):
         original_entries = [
             entry
             for entry in result.get(key, []) or []

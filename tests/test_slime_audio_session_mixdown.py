@@ -174,11 +174,17 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
                 encoding="utf-8",
             )
             session = load_session(session_path)
-            group = session.stem_groups[0]
-            stem = group.stems["bass"]
 
-        self.assertEqual([(name, path) for name, _stem, path in stem_group_inputs(group)], [("bass", "/stems/bass.wav")])
-        self.assertEqual(stem_automation_windows(session, group, "bass", stem, "mute"), [(0, 2_000, 1.0), (2_000, 8_000, 0.0), (8_000, 10_000, 1.0)])
+        # Toggles segment the deck clock: silent preload, bass punched in for
+        # 2s-8s, silent tail — the same audible result the old persistent mute
+        # windows produced, expressed as segments.
+        segments = [
+            (group.start_ms, group.duration_ms, [name for name, stem in sorted(group.stems.items()) if stem.enabled])
+            for group in sorted(session.stem_groups, key=lambda g: g.start_ms)
+        ]
+        self.assertEqual(segments, [(0, 2_000, []), (2_000, 6_000, ["bass"]), (8_000, 2_000, [])])
+        live = next(group for group in session.stem_groups if group.start_ms == 2_000)
+        self.assertEqual([(name, path) for name, _stem, path in stem_group_inputs(live)], [("bass", "/stems/bass.wav")])
 
     def beep_centers_seconds(self, samples: list[float], sample_rate: int) -> list[float]:
         frame_size = sample_rate // 100

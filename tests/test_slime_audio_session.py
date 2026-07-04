@@ -404,15 +404,18 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(session_path)
             group = session.stem_groups[0]
 
+        # The vocals-in toggle SEGMENTS the load: stems render only while the
+        # subset plays; the all-four-on remainder plays the original file.
         self.assertEqual(group.id, "lead-load")
         self.assertEqual(group.start_ms, 8_000)
         self.assertEqual(group.trim_start_ms, 16_000)
-        self.assertEqual(group.duration_ms, 32_000)
+        self.assertEqual(group.duration_ms, 16_000)
         self.assertEqual(group.tempo_shift_pct, 2.5)
         self.assertEqual(group.pitch_shift_semitones, -1)
         self.assertFalse(group.stems["vocals"].enabled)
-        self.assertEqual(group.stems["vocals"].automations[0].param, "mute")
-        self.assertEqual(group.stems["vocals"].automations[0].points[0].value, False)
+        tail = next(clip for clip in session.clips if clip.deck_clock_segment)
+        self.assertEqual((tail.id, tail.start_ms, tail.trim_start_ms, tail.duration_ms), ("lead-load-segment-02", 24_000, 32_400, 15_600))
+        self.assertEqual(tail.path, "/music/lead.flac")
         self.assertEqual(session.deck_automations[0].target, "deck-1")
         self.assertEqual(session.deck_automations[0].param, "lowpass_hz")
 
@@ -583,8 +586,17 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(session_path)
 
-        self.assertEqual([seg.id for seg in deck_segments(session)], ["lead-load", "lead-load-loop-01", "lead-load-loop-02", "lead-load-segment-02"])
-        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 0, 8_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)])
+        # The vocals-off toggle at 4s segments the load (original file before,
+        # stems after) and the muted state survives the loop and its exit.
+        self.assertEqual(
+            [seg.id for seg in deck_segments(session)],
+            ["lead-load", "lead-load-segment-02", "lead-load-loop-01", "lead-load-loop-02", "lead-load-segment-03"],
+        )
+        self.assertEqual(
+            [(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)],
+            [(0, 0, 4_000), (4_000, 4_000, 4_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)],
+        )
+        self.assertTrue(all(not group.stems["vocals"].enabled for group in session.stem_groups))
 
     def test_session_covers_cues_beat_jumps_play_pause_and_loops_together(self):
         stems = {
@@ -2375,20 +2387,29 @@ class AlwaysOnStemsTests(unittest.TestCase):
         self.assertEqual(compiled["clips"], [])
         self.assertEqual([group["id"] for group in compiled["stem_groups"]], ["lead-load"])
 
-    def test_toggle_pins_plain_load_to_stem_render(self):
+    def test_toggle_segments_load_original_then_stems(self):
+        # A toggle splits the load at that instant: the untouched span plays
+        # the ORIGINAL file, only the played-with span renders via stems.
         artifacts = {"stem_set_id": "set-x", "manifest_path": "/stems/lead/manifest.json", "stems": dict(self.STEMS)}
         with patch("slime_audio_session.ready_stem_artifacts", return_value=artifacts):
             compiled = self.compile(
                 [
                     self.load(),
                     {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": False, "at_ms": 20_000},
+                    {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": True, "at_ms": 40_000},
                 ]
             )
-        self.assertEqual(compiled["clips"], [])
+        self.assertEqual(
+            [(clip["id"], clip["start_ms"], clip["duration_ms"], clip["path"]) for clip in compiled["clips"]],
+            [
+                ("lead-load", 0, 20_000, "/music/lead.flac"),
+                ("lead-load-segment-03", 40_000, 20_000, "/music/lead.flac"),
+            ],
+        )
         group = compiled["stem_groups"][0]
-        self.assertEqual(group["id"], "lead-load")
-        vocal_automations = group["stems"]["vocals"].get("automations") or []
-        self.assertTrue(any(point["value"] for auto in vocal_automations for point in auto["points"] if auto["param"] == "mute"))
+        self.assertEqual((group["id"], group["start_ms"], group["duration_ms"]), ("lead-load-segment-02", 20_000, 20_000))
+        self.assertFalse(group["stems"]["vocals"].get("enabled", True))
+        self.assertTrue(group["stems"]["drums"].get("enabled", True))
 
     def test_toggle_without_artifacts_fails_loudly(self):
         with patch("slime_audio_session.ready_stem_artifacts", return_value=None):

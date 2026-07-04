@@ -88,7 +88,9 @@ class SlimeAudioWebTests(unittest.TestCase):
         self.assertEqual(stem_group["lane"], "deck-1")
         self.assertEqual(automation["lane"], "deck-1")
         self.assertEqual(counts["action"], 3)
-        self.assertEqual(counts["stem-group"], 1)
+        # The vocals-in toggle segments the load; both spans stay stem groups
+        # because the authored stems dict carries a per-stem enabled flag.
+        self.assertEqual(counts["stem-group"], 2)
         self.assertEqual([lane["id"] for lane in lanes[:2]], ["actions", "deck-3"])
 
     def test_session_events_include_stem_groups(self):

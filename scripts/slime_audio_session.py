@@ -977,7 +977,7 @@ def stem_customized_load_ids(actions: list[dict[str, Any]]) -> set[str]:
     customized: set[str] = set()
     for action in actions:
         kind = action_type(action)
-        if kind in {"stem_toggle", "stem_mute", "stem_solo"}:
+        if kind in {"stem_mute", "stem_solo"}:
             target = str(action.get("target") or action.get("group_id") or action.get("load_id") or "").strip()
             if target:
                 customized.add(target)
@@ -1076,11 +1076,21 @@ def append_deck_clock_segment(
     pending_stem_automations: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
     clips: list[dict[str, Any]] | None = None,
     stem_customized: set[str] | None = None,
+    stems_enabled: set[str] | None = None,
 ) -> dict[str, Any] | None:
     if duration_ms <= 0:
         return None
     load_id = action_id(load_action)
-    untouched = action_stems_untouched(load_action) and (not stem_customized or load_id not in stem_customized)
+    segment_all_on = stems_enabled is None or {str(stem) for stem in stems_enabled} == STEM_NAMES
+    if stems_enabled is not None and segment_all_on and not action_stems_untouched(load_action):
+        candidate = dict(load_action)
+        candidate["play_stems"] = sorted(STEM_NAMES)
+        if action_stems_untouched(candidate):
+            load_action = candidate
+    untouched = segment_all_on and action_stems_untouched(load_action) and (not stem_customized or load_id not in stem_customized)
+    if stems_enabled is not None and not segment_all_on:
+        load_action = dict(load_action)
+        load_action["play_stems"] = sorted(stems_enabled)
     if clips is not None and untouched:
         # Stems are always conceptually present; with all four at rest the
         # original file is the higher-quality render of the same thing.
@@ -1425,6 +1435,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             pending_stem_automations=pending_stem_automations,
             clips=clips,
             stem_customized=stem_customized,
+            stems_enabled=active.get("stems_enabled"),
         )
         deck_active.pop(deck, None)
 
@@ -1519,12 +1530,14 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if cue_name not in cues.get(target, {}):
                 raise ValueError(f"jump_to_cue {target} missing cue: {cue_name}")
             deck = str(loaded_actions[target].get("deck") or "")
+            carried_stems = (deck_active.get(deck) or {}).get("stems_enabled")
             close_active(deck, at_ms)
             deck_active[deck] = {
                 "action": loaded_actions[target],
                 "load_id": target,
                 "start_ms": at_ms,
                 "trim_start_ms": cues[target][cue_name],
+                "stems_enabled": carried_stems,
             }
             deck_paused.pop(deck, None)
         elif kind == "loop_start":
@@ -1532,6 +1545,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if target not in loaded_actions:
                 raise ValueError(f"loop_start target does not exist: {target}")
             deck = str(loaded_actions[target].get("deck") or "")
+            loop_stems_enabled = (deck_active.get(deck) or {}).get("stems_enabled")
             close_active(deck, at_ms)
             source_start_ms = action_position_ms(action, f"loop_start {target} position")
             length_source = action.get("length_ms", action.get("length", action.get("duration_ms", action.get("duration"))))
@@ -1562,6 +1576,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     pending_stem_automations=pending_stem_automations,
                     clips=clips,
                     stem_customized=stem_customized,
+                    stems_enabled=loop_stems_enabled,
                 )
                 cursor += duration_ms
                 loop_index += 1
@@ -1570,6 +1585,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "load_id": target,
                 "start_ms": exit_ms,
                 "trim_start_ms": source_start_ms + source_length_ms,
+                "stems_enabled": loop_stems_enabled,
             }
             deck_paused.pop(deck, None)
         elif kind == "loop_exit":
@@ -1577,6 +1593,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if target not in loaded_actions:
                 raise ValueError(f"loop_exit target does not exist: {target}")
             deck = str(loaded_actions[target].get("deck") or "")
+            carried_stems = (deck_active.get(deck) or {}).get("stems_enabled")
             close_active(deck, at_ms)
             resume_ms = action_position_ms(action, f"loop_exit {target} position")
             deck_active[deck] = {
@@ -1584,6 +1601,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "load_id": target,
                 "start_ms": at_ms,
                 "trim_start_ms": resume_ms,
+                "stems_enabled": carried_stems,
             }
             deck_paused.pop(deck, None)
         elif kind in {"pause", "deck_pause"}:
@@ -1594,11 +1612,13 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     continue
                 raise ValueError(f"{kind} deck is not playing: {deck}")
             resume_ms = active_source_position(active, at_ms)
+            paused_stems = active.get("stems_enabled")
             close_active(deck, at_ms)
             deck_paused[deck] = {
                 "action": loaded_actions[load_id],
                 "load_id": load_id,
                 "trim_start_ms": resume_ms,
+                "stems_enabled": paused_stems,
             }
         elif kind in {"play", "deck_play"}:
             load_id, deck = resolve_loaded_target(action, kind)
@@ -1610,26 +1630,31 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 action.get("cue_id") or action.get("cue_name") or action.get("name")
                 or any(key in action for key in ("position_ms", "position", "source_ms", "source_position_ms", "cue_ms", "cue", "trim_start_ms", "trim_start"))
             ) else int((deck_paused.get(deck) or {}).get("trim_start_ms", default_trim_ms))
+            carried_stems = (deck_active.get(deck) or deck_paused.get(deck) or {}).get("stems_enabled")
             close_active(deck, at_ms)
             deck_active[deck] = {
                 "action": loaded_actions[load_id],
                 "load_id": load_id,
                 "start_ms": at_ms,
                 "trim_start_ms": position_ms,
+                "stems_enabled": carried_stems,
             }
             deck_paused.pop(deck, None)
         elif kind in {"cue", "cue_seek"}:
             load_id, deck = resolve_loaded_target(action, kind)
             position_ms = cue_position(action, load_id, kind)
+            carried_stems = (deck_active.get(deck) or deck_paused.get(deck) or {}).get("stems_enabled")
             close_active(deck, at_ms)
             deck_paused[deck] = {
                 "action": loaded_actions[load_id],
                 "load_id": load_id,
                 "trim_start_ms": position_ms,
+                "stems_enabled": carried_stems,
             }
         elif kind in {"seek", "deck_seek"}:
             load_id, deck = resolve_loaded_target(action, kind)
             position_ms = cue_position(action, load_id, kind)
+            carried_stems = (deck_active.get(deck) or deck_paused.get(deck) or {}).get("stems_enabled")
             close_active(deck, at_ms)
             should_play = bool(action.get("play", True))
             if should_play:
@@ -1638,6 +1663,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "load_id": load_id,
                     "start_ms": at_ms,
                     "trim_start_ms": position_ms,
+                    "stems_enabled": carried_stems,
                 }
                 deck_paused.pop(deck, None)
             else:
@@ -1654,19 +1680,55 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if stem_name not in STEM_NAMES:
                 raise ValueError(f"stem_toggle {group_id} stem must be one of {sorted(STEM_NAMES)}")
             enabled = bool(action.get("enabled", True))
-            automation = {
-                "target": f"stem-group:{group_id}:{stem_name}",
-                "param": "mute",
-                "points": [{"at_ms": at_ms, "value": not enabled}],
-            }
-            pending_stem_automations.setdefault(group_id, {}).setdefault(stem_name, []).append(automation)
-            target_groups = [group for group in stem_groups if group.get("source_action_id") == group_id or group.get("id") == group_id]
-            for group in target_groups:
-                stem_payload = group.setdefault("stems", {}).setdefault(stem_name, {})
-                if isinstance(stem_payload, str):
-                    stem_payload = {"path": stem_payload}
-                    group["stems"][stem_name] = stem_payload
-                stem_payload.setdefault("automations", []).append(copy.deepcopy(automation))
+            toggle_deck = str(loaded_actions[group_id].get("deck") or "") if group_id in loaded_actions else ""
+            active = deck_active.get(toggle_deck)
+            if active is not None and str(active["load_id"]) == group_id:
+                # A toggle segments the load at this instant: the span behind
+                # keeps its state (all-four-on spans render the original file),
+                # the span ahead continues with the stem flipped. This is the
+                # always-on-stems model made literal.
+                enabled_before = active.get("stems_enabled")
+                if enabled_before is None:
+                    requested = active["action"].get("play_stems", active["action"].get("enabled_stems"))
+                    if isinstance(requested, list):
+                        enabled_before = {str(stem) for stem in requested}
+                    else:
+                        stems_payload = active["action"].get("stems")
+                        if isinstance(stems_payload, dict) and stems_payload:
+                            enabled_before = {
+                                str(name)
+                                for name, stem in stems_payload.items()
+                                if (stem.get("enabled", True) if isinstance(stem, dict) else bool(stem) if isinstance(stem, bool) else True)
+                            }
+                        else:
+                            enabled_before = set(STEM_NAMES)
+                source_pos = active_source_position(active, at_ms)
+                close_active(toggle_deck, at_ms)
+                next_state = set(enabled_before)
+                (next_state.add if enabled else next_state.discard)(stem_name)
+                deck_active[toggle_deck] = {
+                    "action": active["action"],
+                    "load_id": group_id,
+                    "start_ms": at_ms,
+                    "trim_start_ms": source_pos,
+                    "stems_enabled": next_state,
+                }
+            else:
+                # Not the live load on any deck (e.g. a directly-authored bed
+                # group): fall back to a timed mute on the materialized group.
+                automation = {
+                    "target": f"stem-group:{group_id}:{stem_name}",
+                    "param": "mute",
+                    "points": [{"at_ms": at_ms, "value": not enabled}],
+                }
+                pending_stem_automations.setdefault(group_id, {}).setdefault(stem_name, []).append(automation)
+                target_groups = [group for group in stem_groups if group.get("source_action_id") == group_id or group.get("id") == group_id]
+                for group in target_groups:
+                    stem_payload = group.setdefault("stems", {}).setdefault(stem_name, {})
+                    if isinstance(stem_payload, str):
+                        stem_payload = {"path": stem_payload}
+                        group["stems"][stem_name] = stem_payload
+                    stem_payload.setdefault("automations", []).append(copy.deepcopy(automation))
         elif kind == "knob_lerp":
             target = str(action.get("target") or "").strip()
             param = str(action.get("param") or "").strip()
@@ -1729,6 +1791,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             pending_stem_automations=pending_stem_automations,
             clips=clips,
             stem_customized=stem_customized,
+            stems_enabled=active.get("stems_enabled"),
         )
     compiled["decks"] = decks
     return compiled
