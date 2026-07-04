@@ -1424,6 +1424,11 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         natural_end = active_natural_end_ms(active)
         if natural_end is not None:
             end_ms = min(end_ms, natural_end)
+        if end_ms - start_ms <= 0:
+            # Nothing aired (e.g. a toggle at the load's own start): drop the
+            # empty span without consuming a segment id.
+            deck_active.pop(deck, None)
+            return
         append_deck_clock_segment(
             stem_groups,
             group_payloads,
@@ -1470,7 +1475,16 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             return cues[load_id][cue_name]
         raise ValueError(f"{label} {load_id} requires position or cue")
 
-    for index, action in sorted(enumerate(actions), key=lambda item: (action_at_ms(item[1]) if isinstance(item[1], dict) else 0, item[0])):
+    for index, action in sorted(
+        enumerate(actions),
+        key=lambda item: (
+            action_at_ms(item[1]) if isinstance(item[1], dict) else 0,
+            # Loads compile before same-instant actions that reference them
+            # (a stem_toggle at the load's own start must find its target).
+            0 if isinstance(item[1], dict) and action_type(item[1]) == "load_track" else 1,
+            item[0],
+        ),
+    ):
         if not isinstance(action, dict):
             raise ValueError(f"action {index} must be an object")
         kind = action_type(action)

@@ -2661,7 +2661,15 @@ def merge_block_into_payload(payload: dict[str, Any], block: dict[str, Any], off
     )
     merged["actions"] = sorted(
         merged.get("actions", []),
-        key=lambda action: (int(action.get("at_ms", action.get("start_ms", 0)) or 0), str(action.get("id") or "")),
+        # load_track must sort before same-instant actions that reference the
+        # load (e.g. a stem_toggle at the load's own start), or
+        # compile_actions_payload walks the toggle before the load exists and
+        # rejects the whole session.
+        key=lambda action: (
+            int(action.get("at_ms", action.get("start_ms", 0)) or 0),
+            0 if str(action.get("type") or "") == "load_track" else 1,
+            str(action.get("id") or ""),
+        ),
     )
     return merged
 

@@ -2387,6 +2387,22 @@ class AlwaysOnStemsTests(unittest.TestCase):
         self.assertEqual(compiled["clips"], [])
         self.assertEqual([group["id"] for group in compiled["stem_groups"]], ["lead-load"])
 
+    def test_same_instant_toggle_compiles_regardless_of_list_order(self):
+        # A stem_toggle at its load's own start must compile even when it
+        # appears BEFORE the load in the actions list (extend merges sort on
+        # time; the type tie-break keeps loads first).
+        artifacts = {"stem_set_id": "set-x", "manifest_path": "/stems/lead/manifest.json", "stems": dict(self.STEMS)}
+        with patch("slime_audio_session.ready_stem_artifacts", return_value=artifacts):
+            compiled = self.compile(
+                [
+                    {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": False, "at_ms": 0},
+                    self.load(),
+                ]
+            )
+        group = compiled["stem_groups"][0]
+        self.assertEqual(group["id"], "lead-load")
+        self.assertFalse(group["stems"]["vocals"].get("enabled", True))
+
     def test_toggle_segments_load_original_then_stems(self):
         # A toggle splits the load at that instant: the untouched span plays
         # the ORIGINAL file, only the played-with span renders via stems.
