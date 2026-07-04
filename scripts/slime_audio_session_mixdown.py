@@ -81,6 +81,16 @@ def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
         # shorter than its timeline span and the playhead drifts ahead of
         # the room.
         filters.append(f"aresample={sample_rate}")
+    # Every atempo stage runs BEFORE any asetrate (the linear scalings
+    # commute, so the result is identical): three or more parallel
+    # asetrate->aresample->atempo chains feeding one amix deadlock
+    # libavfilter on ffmpeg 6.1 — the renderer froze mid-window on any
+    # pitch-shifted 3-stem segment and the room sat silent.
+    if clip.pitch_shift_semitones:
+        pitch_factor = 2 ** (clip.pitch_shift_semitones / 12)
+        filters.extend(atempo_filters(1 / pitch_factor))
+    if clip.tempo_shift_pct:
+        filters.extend(atempo_filters(tempo_factor(clip)))
     if clip.playback_rate != 1.0:
         filters.append(f"asetrate={max(1, int(round(sample_rate * clip.playback_rate)))}")
         filters.append(f"aresample={sample_rate}")
@@ -88,9 +98,6 @@ def time_pitch_filters(clip: Clip, sample_rate: int) -> list[str]:
         pitch_factor = 2 ** (clip.pitch_shift_semitones / 12)
         filters.append(f"asetrate={max(1, int(round(sample_rate * pitch_factor)))}")
         filters.append(f"aresample={sample_rate}")
-        filters.extend(atempo_filters(1 / pitch_factor))
-    if clip.tempo_shift_pct:
-        filters.extend(atempo_filters(tempo_factor(clip)))
     return filters
 
 

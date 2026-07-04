@@ -1939,7 +1939,11 @@ class TimePitchFilterTests(unittest.TestCase):
 
         filters = time_pitch_filters(self.clip(pitch_shift_semitones=1), 48_000)
         self.assertEqual(filters[0], "aresample=48000")
-        self.assertTrue(filters[1].startswith("asetrate="))
+        # atempo must come before asetrate: 3+ parallel asetrate->aresample->
+        # atempo chains into one amix deadlock libavfilter (ffmpeg 6.1).
+        self.assertTrue(filters[1].startswith("atempo="))
+        self.assertTrue(filters[2].startswith("asetrate="))
+        self.assertEqual(filters[3], "aresample=48000")
 
     def test_playback_rate_also_normalized_and_neutral_clip_untouched(self):
         from slime_audio_session_mixdown import time_pitch_filters

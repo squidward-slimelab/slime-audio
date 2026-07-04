@@ -1877,7 +1877,15 @@ def playhead_ms_from_state(path: Path, now: float | None = None) -> int:
     window_started_at = parse_timestamp(payload.get("window_started_at"))
     if window_started_at is not None:
         window_start_ms = parse_ms(payload.get("window_start_ms", 0), "state window start")
-        return max(0, window_start_ms + int(round(((now if now is not None else time()) - window_started_at) * 1000)))
+        playhead = window_start_ms + int(round(((now if now is not None else time()) - window_started_at) * 1000))
+        window_end = payload.get("window_end_ms")
+        if window_end is not None:
+            # A window anchor vouches only for its own span. If the runner
+            # dies mid-window the wall clock keeps running; extrapolating past
+            # the window end reports audio that never played (a crashed runner
+            # once "completed" a set this way while the room sat silent).
+            playhead = min(playhead, parse_ms(window_end, "state window end"))
+        return max(0, playhead)
     mix_started_at = parse_timestamp(payload.get("mix_started_at"))
     if mix_started_at is not None:
         return max(0, int(round(((now if now is not None else time()) - mix_started_at) * 1000)))

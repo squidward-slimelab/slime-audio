@@ -562,7 +562,19 @@ def freeze_completed_window(args: argparse.Namespace, state: dict[str, Any], end
 def render_window(args: argparse.Namespace, start_ms: int, duration_ms: int, output: Path) -> list[str]:
     command = mixdown_command(args, start_ms, duration_ms, output)
     if not args.dry_run:
-        subprocess.run(command, cwd=REPO_ROOT, check=True)
+        # A hung render (an ffmpeg filter-graph deadlock did this once) must
+        # not block the runner forever — that airs as unbounded dead air.
+        # Renders run far faster than realtime; 2x the window duration plus
+        # startup slack means something is wrong, so fail the window and let
+        # the retry/failure path own it.
+        timeout_s = max(120.0, (duration_ms / 1000) * 2)
+        try:
+            subprocess.run(command, cwd=REPO_ROOT, check=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(
+                f"window render timed out after {timeout_s:.0f}s ({start_ms}ms+{duration_ms}ms); "
+                "likely a filter-graph hang in ffmpeg"
+            ) from error
     return command
 
 
@@ -606,6 +618,7 @@ def run_session(args: argparse.Namespace) -> int:
     write_runner_status(args, "running")
 
     prepared: PreparedWindow | None = None
+    prerender_failed_at: int | None = None
     fifo_hold = FifoHold(args.snapcast_fifo) if args.mode == "snapcast" and not args.dry_run else None
     windows_streamed = 0
     if fifo_hold is not None:
@@ -715,7 +728,25 @@ def run_session(args: argparse.Namespace) -> int:
 
                 start_ms = playhead_ms
                 end_ms = total_ms if args.single_window else min(total_ms, start_ms + args.window_ms)
-                window = prepare_window(args, session, start_ms, end_ms)
+                try:
+                    window = prepare_window(args, session, start_ms, end_ms)
+                except Exception as error:
+                    # A failed or hung render must not kill the runner; log it
+                    # and retry — the session may have been repaired meanwhile.
+                    append_history(
+                        args.history_log,
+                        {
+                            "event": "session_window_render_failed",
+                            "error": str(error),
+                            "session": str(args.session),
+                            "state": str(args.state),
+                            "timestamp": iso_now(),
+                            "window_start_ms": start_ms,
+                            "window_end_ms": end_ms,
+                        },
+                    )
+                    time.sleep(args.retry_seconds)
+                    continue
                 active_clips = window.active_clips
 
             if args.dry_run:
@@ -783,24 +814,44 @@ def run_session(args: argparse.Namespace) -> int:
                     and prepared is None
                     and end_ms < total_ms
                     and remaining_ms <= args.prerender_lead_ms
+                    and prerender_failed_at != end_ms
                 ):
                     next_session = load_session(args.session)
                     next_total_ms = session_duration_ms(next_session)
                     next_start_ms = end_ms
                     next_end_ms = min(next_total_ms, next_start_ms + args.window_ms)
-                    prepared = prepare_window(args, next_session, next_start_ms, next_end_ms)
-                    append_history(
-                        args.history_log,
-                        {
-                            "event": "session_window_prerendered",
-                            "session": str(args.session),
-                            "state": str(args.state),
-                            "timestamp": iso_now(),
-                            "window_start_ms": next_start_ms,
-                            "window_end_ms": next_end_ms,
-                            "clips": [clip.id for clip in prepared.active_clips],
-                        },
-                    )
+                    try:
+                        prepared = prepare_window(args, next_session, next_start_ms, next_end_ms)
+                    except Exception as error:
+                        # One attempt per boundary: a hung prerender already
+                        # cost its timeout; the window boundary's own render
+                        # (and its retry path) owns the failure from here.
+                        prerender_failed_at = end_ms
+                        append_history(
+                            args.history_log,
+                            {
+                                "event": "session_window_prerender_failed",
+                                "error": str(error),
+                                "session": str(args.session),
+                                "state": str(args.state),
+                                "timestamp": iso_now(),
+                                "window_start_ms": next_start_ms,
+                                "window_end_ms": next_end_ms,
+                            },
+                        )
+                    else:
+                        append_history(
+                            args.history_log,
+                            {
+                                "event": "session_window_prerendered",
+                                "session": str(args.session),
+                                "state": str(args.state),
+                                "timestamp": iso_now(),
+                                "window_start_ms": next_start_ms,
+                                "window_end_ms": next_end_ms,
+                                "clips": [clip.id for clip in prepared.active_clips],
+                            },
+                        )
                 time.sleep(0.2)
 
             window.cleanup()
