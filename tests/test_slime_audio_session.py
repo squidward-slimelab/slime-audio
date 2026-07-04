@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from slime_audio_session import AUDACITY_REVERB_PRESETS, apply_master_tempo, audit_hidden_volume_sag, audit_session_durations, load_payload, load_session, master_bpm_at, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary, set_event_warp, set_master_tempo
+from slime_audio_session import AUDACITY_REVERB_PRESETS, apply_master_key, apply_master_tempo, parse_master_key, set_master_key, audit_hidden_volume_sag, audit_session_durations, load_payload, load_session, master_bpm_at, parse_ms, playhead_ms_from_state, prepare_load_track_action_stems, session_summary, set_event_warp, set_master_tempo
 from slime_audio_session import main as session_main
 from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
@@ -2329,6 +2329,82 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload.get("automations", []), [])
         self.assertEqual(payload["deck_automations"][0]["target"], "deck-2")
         self.assertEqual(session.deck_automations[0].param, "gain_db")
+
+
+class MasterKeyTests(unittest.TestCase):
+    """The session owns key like it owns tempo: keymatch on by default,
+    per-track opt-out, minor converts to relative major before pitch math."""
+
+    @staticmethod
+    def payload(master_key="C major", **clip_overrides):
+        clip = {
+            "id": "lead-001",
+            "deck": "deck-2",
+            "path": "/music/a.flac",
+            "start_ms": 0,
+            "duration_ms": 240_000,
+            "tonic": 2,  # D
+            "mode": "major",
+            "pitch_shift_semitones": 0,
+        }
+        clip.update(clip_overrides)
+        return {
+            "version": 1,
+            "master_key": master_key,
+            "decks": ["deck-1", "deck-2", "deck-3", "deck-5"],
+            "clips": [clip],
+        }
+
+    def test_major_track_matches_master(self):
+        payload = apply_master_key(self.payload())  # D major -> C major = -2
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], -2)
+
+    def test_minor_converts_to_relative_major_first(self):
+        # A minor's relative major is C: already aligned with a C major master.
+        payload = apply_master_key(self.payload(tonic=9, mode="minor"))
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], 0)
+        # B minor -> relative major D -> C master = -2.
+        payload = apply_master_key(self.payload(tonic=11, mode="minor"))
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], -2)
+
+    def test_out_of_reach_plays_native(self):
+        # F# major is 6 semitones from C: beyond the default 2-semitone limit.
+        payload = apply_master_key(self.payload(tonic=6))
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], 0)
+
+    def test_keymatch_off_keeps_authored_pitch(self):
+        payload = apply_master_key(self.payload(keymatch=False, pitch_shift_semitones=1))
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], 1)
+
+    def test_no_key_metadata_untouched(self):
+        payload = self.payload()
+        payload["clips"][0].pop("tonic")
+        payload["clips"][0]["pitch_shift_semitones"] = 1
+        payload = apply_master_key(payload)
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], 1)
+
+    def test_master_key_parsing(self):
+        self.assertEqual(parse_master_key("A minor"), (9, "minor"))
+        self.assertEqual(parse_master_key("F# major"), (6, "major"))
+        self.assertEqual(parse_master_key("Bbm"), (10, "minor"))
+        self.assertEqual(parse_master_key({"tonic": 4, "mode": "min"}), (4, "minor"))
+        with self.assertRaises(ValueError):
+            parse_master_key("H sharp")
+
+    def test_set_master_key_release_returns_native_pitch(self):
+        payload = apply_master_key(self.payload())
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], -2)
+        released = set_master_key(payload, None)
+        self.assertNotIn("master_key", released)
+        self.assertEqual(released["clips"][0]["pitch_shift_semitones"], 0)
+
+    def test_set_event_warp_keymatch_toggle(self):
+        payload = apply_master_key(self.payload())
+        edited = set_event_warp(payload, "lead-001", warp=True, keymatch=False)
+        self.assertIs(edited["clips"][0]["keymatch"], False)
+        # Frozen pitch stays authored; a re-derivation must not touch it.
+        rederived = apply_master_key(edited)
+        self.assertEqual(rederived["clips"][0]["pitch_shift_semitones"], -2)
 
 
 class MasterTempoTests(unittest.TestCase):

@@ -842,7 +842,10 @@ function updatePlayhead() {
   }
   playhead.hidden = false;
   const left = clamp((ms / scale.duration) * scale.stageWidth, 0, scale.stageWidth);
-  playhead.style.setProperty("--playhead-x", `${left - els.timelineScroll.scrollLeft}px`);
+  // The playhead lives inside the scrolled stage: position it in stage
+  // coordinates. Subtracting scrollLeft displaced it by the scroll amount,
+  // so it vanished the moment the view (or follow mode) scrolled.
+  playhead.style.setProperty("--playhead-x", `${left}px`);
   if (!state.seekDragging && els.transportSeek && !els.transportSeek.disabled) {
     els.transportSeek.value = String(Math.round(ms));
   }

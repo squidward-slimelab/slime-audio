@@ -1241,6 +1241,14 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
             if getattr(args, "target_bpm", None) is not None
             else {}
         ),
+        **(
+            {
+                "master_key": str(args.target_key),
+                "max_key_shift_semitones": abs(int(getattr(args, "max_key_shift_semitones", 2))),
+            }
+            if getattr(args, "target_key", None)
+            else {}
+        ),
         "clips": sorted(timeline_events, key=lambda clip: (int(clip.get("start_ms") or 0), str(clip.get("id") or ""))),
         "actions": sorted(actions, key=lambda action: (int(action.get("at_ms", action.get("start_ms", 0)) or 0), str(action.get("id") or ""))),
         "transition_plans": transition_plans,
@@ -3206,6 +3214,17 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=16.0,
         help="How far a lead may be stretched to reach --target-bpm (turntable wide mode is 16).",
+    )
+    parser.add_argument(
+        "--target-key",
+        default=None,
+        help='Master key for the set (e.g. "A minor"): every keyed lead pitch-matches its relative-major tonic to it, within --max-key-shift-semitones; out-of-reach material plays native. Per-track opt-out via live_edit set-warp --no-keymatch.',
+    )
+    parser.add_argument(
+        "--max-key-shift-semitones",
+        type=int,
+        default=2,
+        help="Keymatch pitch limit; material further than this from the master key plays native.",
     )
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--default-track-ms", type=int, default=240_000)

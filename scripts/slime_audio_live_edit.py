@@ -196,6 +196,11 @@ def main() -> int:
     set_warp_parser.add_argument("--id", required=True)
     set_warp_parser.add_argument("--off", action="store_true", help="Opt this event out of master-tempo warping (sample drops, free-time material).")
     set_warp_parser.add_argument("--source-bpm", type=float, help="Stamp the source BPM so the event can warp to the master tempo.")
+    set_warp_parser.add_argument("--keymatch", action=argparse.BooleanOptionalAction, default=None, help="Toggle master-key matching for this event; disabling frees it for manual pitch shifts.")
+
+    set_key_parser = sub.add_parser("set-key", parents=[common])
+    set_key_parser.add_argument("--key", required=True, help='Master key for the set (e.g. "A minor", "F# major"); empty string releases keymatched events to native pitch.')
+    set_key_parser.add_argument("--max-shift", type=int, help="Keymatch pitch limit in semitones; out-of-reach material plays native (default 2).")
 
     routine_parser = sub.add_parser("instant-double-routine", parents=[common])
     routine_parser.add_argument("--source-id", required=True)
@@ -267,8 +272,19 @@ def main() -> int:
                 args.id,
                 warp=not args.off,
                 source_bpm=args.source_bpm,
+                keymatch=args.keymatch,
                 lock_before_ms=lock_ms,
                 force=args.force,
+            ),
+        )
+    elif args.command == "set-key":
+        args.affected_ids = ["master-key"]
+        apply_edit(
+            args,
+            lambda payload, _lock_ms: session.set_master_key(
+                payload,
+                args.key,
+                max_key_shift_semitones=args.max_shift,
             ),
         )
     elif args.command == "move":

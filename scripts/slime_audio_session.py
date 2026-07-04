@@ -598,10 +598,94 @@ def load_session(path: Path) -> MixSession:
 
 
 def load_payload(path: Path) -> dict[str, Any]:
-    return apply_master_tempo(json.loads(path.read_text(encoding="utf-8")))
+    return apply_master_key(apply_master_tempo(json.loads(path.read_text(encoding="utf-8"))))
 
 
 DEFAULT_MAX_WARP_STRETCH_PCT = 16.0
+DEFAULT_MAX_KEY_SHIFT_SEMITONES = 2
+
+KEY_NAME_TO_SEMITONE = {
+    "c": 0, "b#": 0, "c#": 1, "db": 1, "d": 2, "d#": 3, "eb": 3, "e": 4, "fb": 4,
+    "f": 5, "e#": 5, "f#": 6, "gb": 6, "g": 7, "g#": 8, "ab": 8, "a": 9,
+    "a#": 10, "bb": 10, "b": 11, "cb": 11,
+}
+
+
+def parse_master_key(value: Any) -> tuple[int, str] | None:
+    """Parse a master key like "A minor", "F# major", "Bbm", or {"tonic", "mode"}."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        tonic = value.get("tonic")
+        mode = str(value.get("mode") or "major").lower()
+        if tonic is None:
+            return None
+        return int(tonic) % 12, ("minor" if mode.startswith("min") or mode == "m" else "major")
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    mode = "major"
+    for suffix in (" minor", "minor", " min", "min"):
+        if text.endswith(suffix):
+            mode = "minor"
+            text = text[: -len(suffix)].strip()
+            break
+    else:
+        for suffix in (" major", "major", " maj", "maj"):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)].strip()
+                break
+        else:
+            if text.endswith("m") and text[:-1] in KEY_NAME_TO_SEMITONE:
+                mode = "minor"
+                text = text[:-1]
+    if text not in KEY_NAME_TO_SEMITONE:
+        raise ValueError(f"unrecognized master key: {value!r}")
+    return KEY_NAME_TO_SEMITONE[text], mode
+
+
+def relative_major_tonic(tonic: int, mode: str) -> int:
+    # Minor converts to its relative major before any pitch-step math.
+    return (int(tonic) + 3) % 12 if str(mode).lower().startswith("min") else int(tonic) % 12
+
+
+def master_key_shift_semitones(tonic: int, mode: str, master: tuple[int, str], max_shift: int) -> int | None:
+    """Smallest pitch shift aligning a track's relative-major tonic to the master's.
+
+    Returns None when no shift within the limit aligns them — such material
+    plays at its native key instead of being audibly wrenched.
+    """
+    delta = (relative_major_tonic(*master) - relative_major_tonic(tonic, mode)) % 12
+    if delta > 6:
+        delta -= 12
+    if abs(delta) > max_shift:
+        return None
+    return delta
+
+
+def apply_master_key(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keymatch clips/stem groups to the session's master key, DAW-style.
+
+    Auto keymatching is on by default for every event carrying key metadata;
+    `keymatch: false` opts a track out (it then keeps its authored pitch
+    shift, exactly as before). Minor keys convert to their relative major
+    before the pitch-step math. Out-of-reach material plays native.
+    Idempotent, applied on every payload load like the master tempo.
+    """
+    master = parse_master_key(payload.get("master_key"))
+    if master is None:
+        return payload
+    max_shift = abs(int(payload.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES)))
+    for event in list(payload.get("clips", [])) + list(payload.get("stem_groups", payload.get("stemGroups", []))):
+        if not event.get("keymatch", True):
+            continue
+        tonic = event.get("tonic")
+        mode = event.get("mode")
+        if tonic is None or mode not in ("major", "minor"):
+            continue
+        shift = master_key_shift_semitones(int(tonic), str(mode), master, max_shift)
+        event["pitch_shift_semitones"] = int(shift) if shift is not None else 0
+    return payload
 
 
 def master_tempo_shift_pct(source_bpm: float, master_bpm: float, max_stretch_pct: float) -> float | None:
@@ -1737,7 +1821,7 @@ def audit_hidden_volume_sag(
 
 
 def parse_session(payload: dict[str, Any]) -> MixSession:
-    payload = apply_master_tempo(compile_actions_payload(payload))
+    payload = apply_master_key(apply_master_tempo(compile_actions_payload(payload)))
     decks = [str(deck) for deck in payload.get("decks", [])]
     if not decks:
         decks = list(DEFAULT_SESSION_DECKS)
@@ -2398,16 +2482,46 @@ def set_master_tempo(
     return next_payload
 
 
+def set_master_key(
+    payload: dict[str, Any],
+    key: str | None,
+    *,
+    max_key_shift_semitones: int | None = None,
+) -> dict[str, Any]:
+    """Set (or with an empty key release) the session's master key.
+
+    Keymatched events re-derive at the next load; releasing returns them to
+    their native pitch instead of freezing the last match.
+    """
+    next_payload = copy.deepcopy(payload)
+    if key:
+        parse_master_key(key)  # validate before storing
+        next_payload["master_key"] = str(key)
+        if max_key_shift_semitones is not None:
+            next_payload["max_key_shift_semitones"] = abs(int(max_key_shift_semitones))
+    else:
+        next_payload.pop("master_key", None)
+        for event in list(next_payload.get("clips", [])) + list(next_payload.get("stem_groups", [])):
+            if event.get("keymatch", True) and event.get("tonic") is not None:
+                event["pitch_shift_semitones"] = 0
+    parse_session(next_payload)
+    return next_payload
+
+
 def set_event_warp(
     payload: dict[str, Any],
     event_id: str,
     *,
     warp: bool,
     source_bpm: float | None = None,
+    keymatch: bool | None = None,
     lock_before_ms: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Opt a clip in or out of master-tempo warping (sample drops opt out)."""
+    """Opt a clip in or out of master-tempo warping and/or keymatching.
+
+    Disabling keymatch freezes the event's current pitch as authored — it can
+    then be pitch-shifted manually, exactly as before master keys existed."""
     next_payload = copy.deepcopy(payload)
     found = find_event(next_payload, event_id)
     if found is None:
@@ -2419,6 +2533,8 @@ def set_event_warp(
     event["warp"] = bool(warp)
     if source_bpm is not None:
         event["source_bpm"] = float(source_bpm)
+    if keymatch is not None:
+        event["keymatch"] = bool(keymatch)
     if not warp:
         event["tempo_shift_pct"] = 0.0
     parse_session(next_payload)
