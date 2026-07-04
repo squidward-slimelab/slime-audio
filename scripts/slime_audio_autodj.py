@@ -2702,6 +2702,7 @@ def extend_set(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    inherit_room_masters(args)
     # extend is the heartbeat, so it also heals the room: receivers whose
     # shared-stream client crashed never restart it themselves, and a silent
     # receiver under a healthy server is otherwise invisible until a human
@@ -2914,6 +2915,7 @@ def continue_set(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    inherit_room_masters(args)
     lock_fd = acquire_lock()
     try:
         if not args.force and playback_healthy():
@@ -3258,6 +3260,37 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     parser.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
     parser.add_argument("--dry-run", action="store_true")
+
+
+def inherit_room_masters(args: argparse.Namespace) -> None:
+    """The room's musical identity survives relaunches.
+
+    A continue with explicit --target-bpm/--target-key records them in the
+    constraints file; a bare continue (the watchdog's dead-air fallback, a
+    minimal operator command) inherits them back — so even a blind relaunch
+    keeps the set's tempo and key instead of drifting off-vibe.
+    """
+    constraints_path = Path(getattr(args, "constraints", None) or (DEFAULT_RUNTIME / "live-set-constraints.json"))
+    try:
+        payload = json.loads(constraints_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        payload = {}
+    changed = False
+    if getattr(args, "target_bpm", None) is not None:
+        if payload.get("master_bpm") != float(args.target_bpm):
+            payload["master_bpm"] = float(args.target_bpm)
+            changed = True
+    elif payload.get("master_bpm"):
+        args.target_bpm = float(payload["master_bpm"])
+    if getattr(args, "target_key", None):
+        if payload.get("master_key") != str(args.target_key):
+            payload["master_key"] = str(args.target_key)
+            changed = True
+    elif payload.get("master_key"):
+        args.target_key = str(payload["master_key"])
+    if changed:
+        constraints_path.parent.mkdir(parents=True, exist_ok=True)
+        constraints_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def stop_set(args: argparse.Namespace) -> int:

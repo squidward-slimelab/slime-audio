@@ -1,0 +1,11 @@
+[Unit]
+Description=Continuously drain the SlimeAudio stem-split queue
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+AccuracySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

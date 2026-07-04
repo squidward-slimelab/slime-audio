@@ -2165,6 +2165,23 @@ class MasterTempoPayloadTests(unittest.TestCase):
             self.assertIsNone(autodj.slow_start_advisory_for(tracks, args_mechanical))
             self.assertIsNone(autodj.slow_start_advisory_for(tracks[:3], args))
 
+    def test_bare_continue_inherits_room_masters_from_constraints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            constraints = Path(temp) / "live-set-constraints.json"
+            constraints.write_text(json.dumps({"vibe": "party", "master_bpm": 118.0, "master_key": "A minor"}), encoding="utf-8")
+            args = autodj_args(constraints=constraints)
+            args.target_bpm = None
+            args.target_key = None
+            autodj.inherit_room_masters(args)
+            self.assertEqual(args.target_bpm, 118.0)
+            self.assertEqual(args.target_key, "A minor")
+            # Explicit values overwrite the room's memory for next time.
+            args2 = autodj_args(constraints=constraints, target_bpm=100.0, target_key="C major")
+            autodj.inherit_room_masters(args2)
+            saved = json.loads(constraints.read_text(encoding="utf-8"))
+            self.assertEqual(saved["master_bpm"], 100.0)
+            self.assertEqual(saved["master_key"], "C major")
+
     def test_master_tempo_bands_include_octaves(self):
         bands = autodj.master_tempo_bands(90.0, 16.0)
         self.assertEqual(len(bands), 3)

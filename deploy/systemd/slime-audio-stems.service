@@ -1,0 +1,14 @@
+[Unit]
+Description=Work the SlimeAudio stem-split queue (stems ready for every loaded record)
+After=network-online.target mnt-rockhouse.mount
+
+[Service]
+Type=oneshot
+User=squidward
+WorkingDirectory=/home/squidward/.openclaw/workspace/slime-audio
+ExecStart=/home/squidward/.openclaw/workspace/slime-audio/.venv/bin/python /home/squidward/.openclaw/workspace/slime-audio/scripts/slime_audio_stems.py backfill --limit 8
+Nice=15
+CPUSchedulingPolicy=batch
+CPUQuota=400%
+MemoryMax=8G
+IOSchedulingClass=idle
