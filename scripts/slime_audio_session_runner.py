@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import traceback
@@ -643,8 +644,28 @@ def run_session(args: argparse.Namespace) -> int:
                     "timestamp": iso_now(),
                 },
             )
+    runner_started_at = time.time()
+    deploy_stamp = args.session.parent / "deploy-stamp"
     try:
         while True:
+            # A deploy stamped after this process started means the code in
+            # memory is stale — session-format changes killed a live runner
+            # once, and bug fixes otherwise wait for a manual bounce. Re-exec
+            # onto the new code at the window boundary, resuming from state.
+            if windows_streamed > 0 and deploy_stamp.exists() and deploy_stamp.stat().st_mtime > runner_started_at:
+                append_history(
+                    args.history_log,
+                    {
+                        "event": "session_runner_reexec",
+                        "reason": "deploy stamped after runner start; picking up new code at window boundary",
+                        "session": str(args.session),
+                        "timestamp": iso_now(),
+                    },
+                )
+                if fifo_hold is not None:
+                    fifo_hold.release()
+                argv = [arg for arg in sys.argv if arg != "--reset-state"]
+                os.execv(sys.executable, [sys.executable, *argv])
             session = load_session(args.session)
             total_ms = session_duration_ms(session)
             playhead_ms = min(playhead_ms_from_state(args.state), total_ms)

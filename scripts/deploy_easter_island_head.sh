@@ -27,6 +27,12 @@ sudo systemctl enable slime-audio-web.service slime-music-library.timer
 sudo systemctl restart slime-audio-web.service
 sudo systemctl start slime-music-library.timer
 
+# A live session runner keeps its pre-deploy code in memory; stamping the
+# deploy lets it re-exec onto the new code at its next window boundary
+# instead of dying on session-format changes (or silently rendering old bugs).
+mkdir -p "$APP_DIR/runtime"
+date -u +%FT%TZ > "$APP_DIR/runtime/deploy-stamp"
+
 for _ in {1..30}; do
   if curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:8765/api/state; then
     break
