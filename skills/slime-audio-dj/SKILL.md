@@ -54,8 +54,12 @@ python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one
 #    curate the real tracklist while it plays, then append it behind the
 #    playhead with:  extend --track ... --track ...
 
-# 4. Keep it fed. Run this on a heartbeat/cron; it no-ops while there is
-#    enough runway and appends a fresh planned block when the buffer runs low.
+# 4. The extend heartbeat runs automatically (systemd timer) and keeps the
+#    set fed. If the operator asked for a BOUNDED set ("a 15 minute set"),
+#    declare it at launch so no mechanical extend crosses the border:
+#      continue ... --set-length-ms 900000
+#    Unbounded sets need nothing; the heartbeat grows them forever. Manual
+#    top-up if ever needed:
 python3 scripts/slime_audio_autodj.py extend --target-length-ms 0   # 0 = endless
 ```
 
