@@ -124,6 +124,10 @@ class Clip:
     # ready stem artifacts for the source; rendering fails loudly when the
     # requested stems are not ready instead of silently playing the full track.
     play_stems: tuple[str, ...] | None = None
+    # Deck-clock provenance: set when this clip is a materialized segment of a
+    # load_track action (loading is how songs play; raw clips are fallback).
+    source_action_id: str | None = None
+    deck_clock_segment: bool = False
     automations: list[Automation] = field(default_factory=list)
 
     @property
@@ -422,6 +426,8 @@ def parse_clip(payload: dict[str, Any]) -> Clip:
         attached_deck=str(payload["attached_deck"]) if payload.get("attached_deck") else None,
         effect_parent_clip_id=str(payload["effect_parent_clip_id"]) if payload.get("effect_parent_clip_id") else None,
         play_stems=play_stems,
+        source_action_id=str(payload["source_action_id"]) if payload.get("source_action_id") else None,
+        deck_clock_segment=bool(payload.get("deck_clock_segment", False)),
         automations=[
             parse_automation(item, default_target=clip_id)
             for item in payload.get("automations", [])
@@ -928,6 +934,83 @@ def action_requests_stems(action: dict[str, Any]) -> bool:
     return bool(action.get("play_stems") or action.get("enabled_stems") or action.get("stems"))
 
 
+def action_stems_untouched(action: dict[str, Any]) -> bool:
+    """True when the load's stem interface is at rest: all four stems on with
+    nothing customized. Stems are conceptually always present on every load;
+    when all four play untouched, the original file is simply the
+    higher-quality render of the same thing."""
+    enabled = action.get("play_stems", action.get("enabled_stems"))
+    if isinstance(enabled, list) and {str(stem) for stem in enabled} != STEM_NAMES:
+        return False
+    stems = action.get("stems")
+    if isinstance(stems, dict):
+        for stem_payload in stems.values():
+            if isinstance(stem_payload, str):
+                continue
+            if isinstance(stem_payload, bool):
+                if not stem_payload:
+                    return False
+                continue
+            if not isinstance(stem_payload, dict):
+                return False
+            for key, value in stem_payload.items():
+                if key == "path":
+                    continue
+                if key == "enabled" and bool(value):
+                    continue
+                if key in {"mute", "solo"} and not value:
+                    continue
+                if key in {"gain_db", "eq_low_db", "eq_mid_db", "eq_high_db", "send_echo", "send_reverb"} and not value:
+                    continue
+                if key == "automations" and not value:
+                    continue
+                return False
+    return True
+
+
+def stem_customized_load_ids(actions: list[dict[str, Any]]) -> set[str]:
+    """Loads whose stems get played with anywhere in the action list.
+
+    Toggling stems on and off through a track is a first-class move, so any
+    stem_toggle / stem-targeted knob ride / stem mute or solo pins every
+    segment of that load to the stems render path."""
+    customized: set[str] = set()
+    for action in actions:
+        kind = action_type(action)
+        if kind in {"stem_toggle", "stem_mute", "stem_solo"}:
+            target = str(action.get("target") or action.get("group_id") or action.get("load_id") or "").strip()
+            if target:
+                customized.add(target)
+        elif kind == "knob_lerp":
+            target = str(action.get("target") or "")
+            if target.startswith("stem-group:"):
+                parts = target.split(":")
+                if len(parts) >= 2 and parts[1]:
+                    customized.add(parts[1])
+    return customized
+
+
+def hydrate_action_stems(action: dict[str, Any], *, db_path: Path | None = None) -> dict[str, Any]:
+    """Attach ready stem artifact paths to a load that was authored plain.
+
+    Renders fail loudly rather than silently playing the full track when a
+    stem-customized load has no split artifacts."""
+    if isinstance(action.get("stems"), dict) and action["stems"]:
+        return action
+    source_path = str(action.get("source_path") or action.get("path") or "")
+    artifacts = ready_stem_artifacts(db_path or DEFAULT_LIBRARY_DB, source_path)
+    if artifacts is None:
+        raise ValueError(
+            f"load_track {action_id(action)} has stem moves but no ready stem artifacts for {source_path}; "
+            "run slime_audio_stems.py backfill (splits are queued automatically at generation)"
+        )
+    hydrated = copy.deepcopy(action)
+    hydrated["stems"] = dict(artifacts["stems"])
+    hydrated["stem_set_id"] = artifacts["stem_set_id"]
+    hydrated["manifest_path"] = artifacts["manifest_path"]
+    return hydrated
+
+
 PLAIN_LOAD_CLIP_FIELDS = (
     "gain_db",
     "tempo_shift_pct",
@@ -992,10 +1075,15 @@ def append_deck_clock_segment(
     duration_ms: int,
     pending_stem_automations: dict[str, dict[str, list[dict[str, Any]]]] | None = None,
     clips: list[dict[str, Any]] | None = None,
+    stem_customized: set[str] | None = None,
 ) -> dict[str, Any] | None:
     if duration_ms <= 0:
         return None
-    if clips is not None and not action_requests_stems(load_action):
+    load_id = action_id(load_action)
+    untouched = action_stems_untouched(load_action) and (not stem_customized or load_id not in stem_customized)
+    if clips is not None and untouched:
+        # Stems are always conceptually present; with all four at rest the
+        # original file is the higher-quality render of the same thing.
         clip = plain_clip_from_load_action(
             load_action,
             clip_id=segment_id,
@@ -1005,6 +1093,7 @@ def append_deck_clock_segment(
         )
         clips.append(clip)
         return clip
+    load_action = hydrate_action_stems(load_action)
     group, _deck = load_track_group_from_action(
         load_action,
         group_id=segment_id,
@@ -1282,6 +1371,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
     compiled["stem_groups"] = list(compiled.get("stem_groups", compiled.get("stemGroups", [])))
     stem_groups = compiled["stem_groups"]
     clips = compiled.setdefault("clips", [])
+    stem_customized = stem_customized_load_ids([action for action in actions if isinstance(action, dict)])
     deck_automations = compiled.setdefault("deck_automations", [])
     automations = compiled.setdefault("automations", [])
     decks = [str(deck) for deck in compiled.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
@@ -1334,6 +1424,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             duration_ms=end_ms - start_ms,
             pending_stem_automations=pending_stem_automations,
             clips=clips,
+            stem_customized=stem_customized,
         )
         deck_active.pop(deck, None)
 
@@ -1377,7 +1468,9 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         at_ms = action_at_ms(action)
 
         if kind == "load_track":
-            if action_requests_stems(action):
+            wants_stem_render = not action_stems_untouched(action) or action_id(action) in stem_customized
+            if wants_stem_render:
+                action = hydrate_action_stems(action)
                 group, deck = load_track_group_from_action(action)
                 load_id = str(group["id"])
                 trim_ms = int(group["trim_start_ms"])
@@ -1468,6 +1561,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     duration_ms=duration_ms,
                     pending_stem_automations=pending_stem_automations,
                     clips=clips,
+                    stem_customized=stem_customized,
                 )
                 cursor += duration_ms
                 loop_index += 1
@@ -1567,8 +1661,6 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             }
             pending_stem_automations.setdefault(group_id, {}).setdefault(stem_name, []).append(automation)
             target_groups = [group for group in stem_groups if group.get("source_action_id") == group_id or group.get("id") == group_id]
-            if not target_groups:
-                target_groups = [load_track_group_from_action(loaded_actions[group_id])[0]] if group_id in loaded_actions else []
             for group in target_groups:
                 stem_payload = group.setdefault("stems", {}).setdefault(stem_name, {})
                 if isinstance(stem_payload, str):
@@ -1636,6 +1728,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             duration_ms=remaining_ms,
             pending_stem_automations=pending_stem_automations,
             clips=clips,
+            stem_customized=stem_customized,
         )
     compiled["decks"] = decks
     return compiled

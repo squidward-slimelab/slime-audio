@@ -83,8 +83,9 @@ class SlimeAudioLiveEditTests(unittest.TestCase):
             session = load_session(session_path)
             history = [json.loads(line) for line in history_path.read_text(encoding="utf-8").splitlines()]
 
-        self.assertEqual([clip.id for clip in session.clips], ["current"])
-        self.assertEqual([group.id for group in session.stem_groups], ["future"])
+        # An untouched load renders the original file: a plain clip segment.
+        self.assertEqual([clip.id for clip in session.clips], ["current", "future"])
+        self.assertEqual(session.stem_groups, [])
         self.assertEqual(history[-1]["type"], "live_edit_applied")
         self.assertEqual(history[-1]["command"], "add-action")
         self.assertEqual(history[-1]["actor"], "test-dj")

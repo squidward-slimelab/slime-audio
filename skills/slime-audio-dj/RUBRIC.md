@@ -61,6 +61,11 @@ the most interesting mixes.
   presence: a quiet drums+bass pulse at −9 dB under a slow lead, a lone piano stem
   floating free-time under a vocal, drums-only under a handoff. Each layer has a
   musical job the grader can name.
+- **Stem toggling inside leads is a main move**: every load is conceptually four
+  always-on stems (the original file plays when all four are at rest), so cutting a
+  vocal for an instrumental stretch, opening a record drums-first, or leaving only
+  the acapella over the next record's groove are one-action moves. A set that never
+  plays with a lead's stems is leaving its primary creative axis untouched.
 - Objective signals: % of clips with non-neutral `tempo_shift_pct`/`pitch_shift_semitones`,
   clips with `play_stems`, routine/action counts.
 - Calibrate to vibe: a sleep set earns with *few, quiet* layers if the reshaping

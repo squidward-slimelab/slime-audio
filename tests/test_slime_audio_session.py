@@ -18,6 +18,14 @@ from slime_audio_session_mixdown import shift_session_window
 from slime_music_library import connect
 
 
+def deck_segments(session):
+    """Deck-clock segments regardless of representation: untouched loads
+    compile to plain clips (original-file quality), stem-customized loads to
+    stem groups — the segmenting math is identical."""
+    events = [c for c in session.clips if c.deck_clock_segment] + [g for g in session.stem_groups]
+    return sorted(events, key=lambda e: (e.start_ms, e.id))
+
+
 def run_cli(argv: list[str]) -> int:
     original_argv = sys.argv[:]
     try:
@@ -433,8 +441,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(session_path)
 
-        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-segment-02"])
-        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 10_000, 16_000), (16_000, 42_000, 28_000)])
+        self.assertEqual([seg.id for seg in deck_segments(session)], ["lead-load", "lead-load-segment-02"])
+        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 10_000, 16_000), (16_000, 42_000, 28_000)])
 
     def test_actions_compile_load_track_duration_caps_later_deck_close(self):
         stems = {
@@ -477,7 +485,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(session_path)
 
         self.assertEqual(
-            [(group.id, group.start_ms, group.duration_ms) for group in session.stem_groups],
+            [(seg.id, seg.start_ms, seg.duration_ms) for seg in deck_segments(session)],
             [("short-vocal", 10_000, 12_000), ("next-vocal", 60_000, 8_000)],
         )
 
@@ -516,8 +524,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(session_path)
 
-        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-segment-02"])
-        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 10_000, 8_000), (12_000, 20_000, 50_000)])
+        self.assertEqual([seg.id for seg in deck_segments(session)], ["lead-load", "lead-load-segment-02"])
+        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 10_000, 8_000), (12_000, 20_000, 50_000)])
 
     def test_actions_compile_cue_and_seek_transport_segments(self):
         stems = {
@@ -547,8 +555,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(session_path)
 
-        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-segment-02", "lead-load-segment-03"])
-        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 0, 8_000), (12_000, 32_000, 8_000), (20_000, 48_000, 8_000)])
+        self.assertEqual([seg.id for seg in deck_segments(session)], ["lead-load", "lead-load-segment-02", "lead-load-segment-03"])
+        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 0, 8_000), (12_000, 32_000, 8_000), (20_000, 48_000, 8_000)])
 
     def test_actions_compile_loop_segments_and_resume_deck_clock(self):
         stems = {
@@ -575,9 +583,8 @@ class SlimeAudioSessionTests(unittest.TestCase):
             )
             session = load_session(session_path)
 
-        self.assertEqual([group.id for group in session.stem_groups], ["lead-load", "lead-load-loop-01", "lead-load-loop-02", "lead-load-segment-02"])
-        self.assertEqual([(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups], [(0, 0, 8_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)])
-        self.assertTrue(all(group.stems["vocals"].automations for group in session.stem_groups))
+        self.assertEqual([seg.id for seg in deck_segments(session)], ["lead-load", "lead-load-loop-01", "lead-load-loop-02", "lead-load-segment-02"])
+        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 0, 8_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)])
 
     def test_session_covers_cues_beat_jumps_play_pause_and_loops_together(self):
         stems = {
@@ -650,7 +657,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
 
         self.assertEqual(session.clips[0].trim_start_ms, 1_500)
         self.assertEqual(
-            [(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups],
+            [(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)],
             [
                 (0, 0, 4_000),
                 (6_000, 16_000, 4_000),
@@ -703,7 +710,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(session_path)
 
         self.assertEqual(
-            [(group.start_ms, group.trim_start_ms, group.duration_ms) for group in session.stem_groups],
+            [(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)],
             [(0, 0, 8_000), (8_000, 24_000, 3_200), (11_200, 24_000, 3_200), (14_400, 24_000, 1_600), (16_000, 28_000, 12_000)],
         )
 
@@ -1004,15 +1011,16 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(path)
             summary = session_summary(session)
 
-        self.assertEqual(summary["clip_count"], 0)
-        self.assertEqual(summary["stem_group_count"], 1)
+        # An untouched load renders the original file: one plain clip segment.
+        self.assertEqual(summary["clip_count"], 1)
+        self.assertEqual(summary["stem_group_count"], 0)
         self.assertEqual(summary["mic_lean_in_count"], 1)
         self.assertEqual(summary["automation_count"], 3)
         self.assertIn("deck-5", summary["decks"])
         self.assertEqual(session.mic_lean_ins[0].deck, "deck-5")
         self.assertEqual(summary["fader_routing"]["deck-5"], "THRU")
-        self.assertEqual(session.stem_groups[0].gain_db, -2.0)
-        self.assertEqual(summary["stem_groups_by_deck"]["deck-1"][0]["start_ms"], 4_000)
+        self.assertEqual(next(clip for clip in session.clips if clip.deck_clock_segment).gain_db, -2.0)
+        self.assertEqual(summary["clips_by_deck"]["deck-1"][0]["start_ms"], 4_000)
         lean_in = session.mic_lean_ins[0]
         self.assertEqual([effect.param for effect in lean_in.effects], ["duck_volume", "lowpass_hz"])
 
@@ -2329,6 +2337,69 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(payload.get("automations", []), [])
         self.assertEqual(payload["deck_automations"][0]["target"], "deck-2")
         self.assertEqual(session.deck_automations[0].param, "gain_db")
+
+
+class AlwaysOnStemsTests(unittest.TestCase):
+    """Stems are conceptually always on for every load. All four at rest
+    renders the original file (quality); any stem play — subsets, toggles,
+    per-stem rides — pins the load to the stems render path."""
+
+    STEMS = {name: f"/stems/lead/{name}.wav" for name in ("vocals", "drums", "bass", "other")}
+
+    @staticmethod
+    def compile(actions):
+        from slime_audio_session import compile_actions_payload
+
+        return compile_actions_payload({"version": 1, "decks": ["deck-1"], "actions": actions})
+
+    def load(self, **overrides):
+        action = {
+            "type": "load_track",
+            "id": "lead-load",
+            "deck": "deck-1",
+            "source_path": "/music/lead.flac",
+            "at_ms": 0,
+            "duration_ms": 60_000,
+        }
+        action.update(overrides)
+        return action
+
+    def test_untouched_all_four_stem_load_renders_original(self):
+        compiled = self.compile([self.load(stems=dict(self.STEMS), play_stems=["vocals", "drums", "bass", "other"])])
+        self.assertEqual([clip["id"] for clip in compiled["clips"]], ["lead-load"])
+        self.assertEqual(compiled["stem_groups"], [])
+        self.assertEqual(compiled["clips"][0]["path"], "/music/lead.flac")
+
+    def test_subset_selection_renders_stems(self):
+        compiled = self.compile([self.load(stems=dict(self.STEMS), play_stems=["drums", "bass"])])
+        self.assertEqual(compiled["clips"], [])
+        self.assertEqual([group["id"] for group in compiled["stem_groups"]], ["lead-load"])
+
+    def test_toggle_pins_plain_load_to_stem_render(self):
+        artifacts = {"stem_set_id": "set-x", "manifest_path": "/stems/lead/manifest.json", "stems": dict(self.STEMS)}
+        with patch("slime_audio_session.ready_stem_artifacts", return_value=artifacts):
+            compiled = self.compile(
+                [
+                    self.load(),
+                    {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": False, "at_ms": 20_000},
+                ]
+            )
+        self.assertEqual(compiled["clips"], [])
+        group = compiled["stem_groups"][0]
+        self.assertEqual(group["id"], "lead-load")
+        vocal_automations = group["stems"]["vocals"].get("automations") or []
+        self.assertTrue(any(point["value"] for auto in vocal_automations for point in auto["points"] if auto["param"] == "mute"))
+
+    def test_toggle_without_artifacts_fails_loudly(self):
+        with patch("slime_audio_session.ready_stem_artifacts", return_value=None):
+            with self.assertRaises(ValueError) as caught:
+                self.compile(
+                    [
+                        self.load(),
+                        {"type": "stem_toggle", "target": "lead-load", "stem": "drums", "enabled": False, "at_ms": 20_000},
+                    ]
+                )
+        self.assertIn("no ready stem artifacts", str(caught.exception))
 
 
 class MasterKeyTests(unittest.TestCase):
