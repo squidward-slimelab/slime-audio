@@ -226,11 +226,12 @@ def tempo_locked_overlap_ms(
         return 0
     phrase = int(phrase_ms(source) or 16_000)
     if stems_ready:
-        # With split material on both sides the junction is a real double-deck
-        # passage — several phrases of both records interleaved with a bass
-        # swap — not a fade. A sixteen-second overlap on four-minute songs is
-        # ~95% single-source: a playlist with dressed doorways.
-        return max(24_000, min(4 * phrase, shorter_ms // 2, 64_000))
+        # With split material on both sides the junction is an extended
+        # same-record runway: the incoming record's OWN drums enter early and
+        # the outgoing's OWN tail lingers — no cross-record feel gambling, so
+        # the passage can run long. This is where dual-source time lives when
+        # the taste-risky moves are reserved for agents.
+        return max(32_000, min(6 * phrase, shorter_ms // 2, 96_000))
     return max(6_000, min(phrase, shorter_ms // 3))
 
 
@@ -499,23 +500,27 @@ def author_stem_handoff(
     out_ready = ready(outgoing)
     in_ready = ready(incoming)
     if out_ready and in_ready and overlap_end_ms - overlap_start_ms >= 24_000:
-        # The full double-deck junction: outgoing vocal steps out, incoming
-        # enters drums-only; at the midpoint the bass swaps hands (one low end
-        # at a time) while the outgoing strips to drums; the incoming opens
-        # fully at the boundary as the outgoing ends.
+        # The extended double-deck runway, staged in quarters: incoming enters
+        # drums-only under the outgoing (vocal already out); at 1/2 the bass
+        # swaps hands (one low end at a time) and the outgoing strips its
+        # melodics; at 3/4 the incoming opens melodics over the outgoing's
+        # bare drum tail; full song on the boundary as the outgoing ends.
+        # Every layered element is the record's OWN material — feel-safe.
         out_id = str(outgoing["source_action_id"])
         in_id = str(incoming["source_action_id"])
-        mid_ms = overlap_start_ms + (overlap_end_ms - overlap_start_ms) // 2
+        span = overlap_end_ms - overlap_start_ms
+        half_ms = overlap_start_ms + span // 2
+        three_quarter_ms = overlap_start_ms + (3 * span) // 4
         toggle(out_id, "vocals", False, overlap_start_ms, "out")
         toggle(in_id, "vocals", False, overlap_start_ms, "intro")
         toggle(in_id, "other", False, overlap_start_ms, "intro")
         toggle(in_id, "bass", False, overlap_start_ms, "intro")
-        toggle(out_id, "bass", False, mid_ms, "swap")
-        toggle(in_id, "bass", True, mid_ms, "swap")
-        toggle(out_id, "other", False, mid_ms, "strip")
+        toggle(out_id, "bass", False, half_ms, "swap")
+        toggle(in_id, "bass", True, half_ms, "swap")
+        toggle(out_id, "other", False, half_ms, "strip")
+        toggle(in_id, "other", True, three_quarter_ms, "melodics")
         toggle(in_id, "vocals", True, overlap_end_ms, "open")
-        toggle(in_id, "other", True, overlap_end_ms, "open")
-        notes.append("double-deck junction: drums-first entry, bass swap at the midpoint, open on the boundary")
+        notes.append("extended runway: drums-first entry, bass swap at half, melodics at three-quarters, open on the boundary")
         return notes
     if out_ready:
         out_id = str(outgoing["source_action_id"])

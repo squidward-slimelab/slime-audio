@@ -24,10 +24,12 @@ sudo install -m 0644 deploy/systemd/slime-music-library.service /etc/systemd/sys
 sudo install -m 0644 deploy/systemd/slime-music-library.timer /etc/systemd/system/slime-music-library.timer
 sudo install -m 0644 deploy/systemd/slime-audio-stems.service /etc/systemd/system/slime-audio-stems.service
 sudo install -m 0644 deploy/systemd/slime-audio-stems.timer /etc/systemd/system/slime-audio-stems.timer
+sudo install -m 0644 deploy/systemd/slime-audio-extend.service /etc/systemd/system/slime-audio-extend.service
+sudo install -m 0644 deploy/systemd/slime-audio-extend.timer /etc/systemd/system/slime-audio-extend.timer
 sudo systemctl daemon-reload
-sudo systemctl enable slime-audio-web.service slime-music-library.timer slime-audio-stems.timer
+sudo systemctl enable slime-audio-web.service slime-music-library.timer slime-audio-stems.timer slime-audio-extend.timer
 sudo systemctl restart slime-audio-web.service
-sudo systemctl start slime-music-library.timer slime-audio-stems.timer
+sudo systemctl start slime-music-library.timer slime-audio-stems.timer slime-audio-extend.timer
 
 # A live session runner keeps its pre-deploy code in memory; stamping the
 # deploy lets it re-exec onto the new code at its next window boundary

@@ -1387,6 +1387,14 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
     decks = [str(deck) for deck in compiled.get("decks", [])] or list(DEFAULT_SESSION_DECKS)
     group_payloads: dict[str, dict[str, Any]] = {str(group.get("id")): group for group in stem_groups if group.get("id")}
     loaded_actions: dict[str, dict[str, Any]] = {}
+    future_load_ids = {
+        action_id(action)
+        for action in actions
+        if isinstance(action, dict) and action_type(action) == "load_track" and action_id(action)
+    }
+    # Toggles that drift ahead of their own load (replans move loads later)
+    # absorb into the load's initial stem state instead of crashing compile.
+    pre_toggles: dict[str, dict[str, bool]] = {}
     deck_active: dict[str, dict[str, Any]] = {}
     deck_paused: dict[str, dict[str, Any]] = {}
     cues: dict[str, dict[str, int]] = {}
@@ -1537,11 +1545,18 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             close_active(deck, at_ms)
             loaded_actions[load_id] = action
             add_deck(deck)
+            initial_stems: set[str] | None = None
+            if load_id in pre_toggles:
+                requested = action.get("play_stems", action.get("enabled_stems"))
+                initial_stems = {str(s) for s in requested} if isinstance(requested, list) else set(STEM_NAMES)
+                for stem_name, stem_on in pre_toggles.pop(load_id).items():
+                    (initial_stems.add if stem_on else initial_stems.discard)(stem_name)
             deck_active[deck] = {
                 "action": action,
                 "load_id": load_id,
                 "start_ms": at_ms,
                 "trim_start_ms": trim_ms,
+                "stems_enabled": initial_stems,
             }
             deck_paused.pop(deck, None)
         elif kind == "set_cue":
@@ -1709,6 +1724,10 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             group_id = str(action.get("target") or action.get("group_id") or action.get("load_id") or "").strip()
             stem_name = str(action.get("stem") or "").strip()
             if group_id not in loaded_actions and group_id not in group_payloads:
+                if group_id in future_load_ids:
+                    if str(action.get("stem") or "") in STEM_NAMES:
+                        pre_toggles.setdefault(group_id, {})[str(action["stem"])] = bool(action.get("enabled", True))
+                    continue
                 raise ValueError(f"stem_toggle target does not exist: {group_id}")
             if stem_name not in STEM_NAMES:
                 raise ValueError(f"stem_toggle {group_id} stem must be one of {sorted(STEM_NAMES)}")

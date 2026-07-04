@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the live SlimeAudio set fed ahead of the playhead
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=4min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
