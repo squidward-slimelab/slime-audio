@@ -547,6 +547,18 @@ function feedbackEventSnapshot(event) {
 
 function renderStemIndicators(event) {
   const indicators = event.stem_indicators || [];
+  if (event.kind === "song" && event.stems_ready) {
+    // Stems exist for this record: beds, bass swaps, and acapella tags are
+    // playable moves, not wishes.
+    const strip = document.createElement("div");
+    strip.className = "stem-indicators";
+    const item = document.createElement("i");
+    item.className = "stem-indicator ready";
+    item.textContent = "S";
+    item.title = "stems ready";
+    strip.append(item);
+    return strip;
+  }
   if (event.kind !== "stem-group" || !indicators.length) return null;
   const strip = document.createElement("div");
   strip.className = "stem-indicators";

@@ -941,6 +941,7 @@ PLAIN_LOAD_CLIP_FIELDS = (
     "source_window_reason",
     "source_structure_kind",
     "source_duration_ms",
+    "stems_ready",
     "key",
     "tonic",
     "mode",

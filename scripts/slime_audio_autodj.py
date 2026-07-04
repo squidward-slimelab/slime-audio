@@ -1131,11 +1131,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
     cursor_ms = 0
     lead_clips: list[dict[str, Any]] = []
     lead_actions: list[dict[str, Any]] = []
-    stem_ready_paths = (
-        ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
-        if bool(getattr(args, "stem_aware_remix", False))
-        else set()
-    )
+    stem_ready_paths = ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
     stem_split_queued: list[str] = []
     transition_plans: list[dict[str, Any]] = []
     previous_track: SelectedTrack | None = None
@@ -1191,13 +1187,19 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
             action = prepare_load_track_action_stems(
                 action, db_path=Path(getattr(args, "db", DEFAULT_DB)), prepare_stems=False
             )
-        elif bool(getattr(args, "stem_aware_remix", False)):
+        elif track.path not in stem_ready_paths:
+            # Every loaded record should have stems ready — beds, bass swaps,
+            # drums-only intros, and acapella tags are only playable moves if
+            # the artifacts exist. Queue the split in every mode; the backfill
+            # cron churns through it without ever blocking live audio.
             stem_split_queued.append(track.path)
+        if track.path in stem_ready_paths:
+            action["stems_ready"] = True
         lead_actions.append(action)
         cursor_ms += max(16_000, source_window.duration_ms - args.base_overlap_ms)
         previous_track = track
 
-    queue_stem_splits(stem_split_queued, args, reason="stem-aware lead selected without ready stems")
+    queue_stem_splits(stem_split_queued, args, reason="lead loaded without ready stems; every loaded record should have stems prepared")
     timeline_events = lead_clips
     actions = lead_actions
     lead_starts = [
