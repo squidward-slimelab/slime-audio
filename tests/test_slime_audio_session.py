@@ -414,7 +414,9 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(group.pitch_shift_semitones, -1)
         self.assertFalse(group.stems["vocals"].enabled)
         tail = next(clip for clip in session.clips if clip.deck_clock_segment)
-        self.assertEqual((tail.id, tail.start_ms, tail.trim_start_ms, tail.duration_ms), ("lead-load-segment-02", 24_000, 32_400, 15_600))
+        # duration_ms is a TIMELINE span: the tail runs to start+duration (40s),
+        # not shortened by the tempo factor (the old 15_600 encoded that bug).
+        self.assertEqual((tail.id, tail.start_ms, tail.trim_start_ms, tail.duration_ms), ("lead-load-segment-02", 24_000, 32_400, 16_000))
         self.assertEqual(tail.path, "/music/lead.flac")
         self.assertEqual(session.deck_automations[0].target, "deck-1")
         self.assertEqual(session.deck_automations[0].param, "lowpass_hz")
@@ -528,7 +530,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
             session = load_session(session_path)
 
         self.assertEqual([seg.id for seg in deck_segments(session)], ["lead-load", "lead-load-segment-02"])
-        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 10_000, 8_000), (12_000, 20_000, 50_000)])
+        self.assertEqual([(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)], [(0, 10_000, 8_000), (12_000, 20_000, 52_000)])
 
     def test_actions_compile_cue_and_seek_transport_segments(self):
         stems = {
@@ -723,7 +725,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
 
         self.assertEqual(
             [(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)],
-            [(0, 0, 8_000), (8_000, 24_000, 3_200), (11_200, 24_000, 3_200), (14_400, 24_000, 1_600), (16_000, 28_000, 12_000)],
+            [(0, 0, 8_000), (8_000, 24_000, 3_200), (11_200, 24_000, 3_200), (14_400, 24_000, 1_600), (16_000, 28_000, 17_600)],
         )
 
     def test_add_action_hydrates_ready_stems_from_db(self):

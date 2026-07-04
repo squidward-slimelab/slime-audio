@@ -1403,6 +1403,21 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         segment_counts[load_id] = count + 1
         return load_id if count == 0 else f"{load_id}-segment-{count + 1:02d}"
 
+    def effective_render_factor(action: dict[str, Any]) -> float:
+        """The rate the renderer actually consumes source at.
+
+        Continuity math must match the render: under a master tempo the warp
+        overrides the authored shift, and using the authored factor made every
+        toggle boundary jump by elapsed x warp%% (measured +315ms live)."""
+        factor = clip_tempo_factor(action)
+        if action.get("warp", True) and action.get("source_bpm"):
+            master = master_bpm_at(compiled, int(action_at_ms(action)))
+            if master is not None:
+                max_stretch = abs(float(compiled.get("max_tempo_stretch_pct", DEFAULT_MAX_WARP_STRETCH_PCT)))
+                shift = master_tempo_shift_pct(float(action["source_bpm"]), master, max_stretch)
+                return 1.0 + (shift or 0.0) / 100.0
+        return factor
+
     def active_natural_end_ms(active: dict[str, Any]) -> int | None:
         raw_duration = active["action"].get("duration_ms", active["action"].get("duration"))
         if raw_duration is None:
@@ -1412,8 +1427,12 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             active["action"].get("trim_start_ms", active["action"].get("trim_start", active["action"].get("cue_ms", active["action"].get("cue", 0)))),
             f"load_track {active['load_id']} trim",
         )
+        factor = effective_render_factor(active["action"])
         source_elapsed_ms = int(active["trim_start_ms"]) - original_trim_ms
-        remaining_ms = max(0, total_duration_ms - source_elapsed_ms)
+        # duration_ms is the load's TIMELINE span; consumed source maps back
+        # to timeline through the render factor.
+        timeline_consumed_ms = source_elapsed_ms / factor if factor > 0 else source_elapsed_ms
+        remaining_ms = max(0, int(round(total_duration_ms - timeline_consumed_ms)))
         return int(active["start_ms"]) + remaining_ms
 
     def close_active(deck: str, end_ms: int) -> None:
@@ -1446,7 +1465,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
     def active_source_position(active: dict[str, Any], at_ms: int) -> int:
         elapsed_ms = max(0, at_ms - int(active["start_ms"]))
-        return int(active["trim_start_ms"]) + int(round(elapsed_ms * clip_tempo_factor(active["action"])))
+        return int(active["trim_start_ms"]) + int(round(elapsed_ms * effective_render_factor(active["action"])))
 
     def resolve_loaded_target(action: dict[str, Any], label: str) -> tuple[str, str]:
         target = action_load_target(action)
@@ -1789,11 +1808,12 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if raw_duration is None:
             continue
         total_duration_ms = parse_ms(raw_duration, f"load_track {active['load_id']} duration")
+        flush_factor = effective_render_factor(active["action"])
         source_elapsed_ms = int(active["trim_start_ms"]) - parse_ms(
             active["action"].get("trim_start_ms", active["action"].get("trim_start", active["action"].get("cue_ms", active["action"].get("cue", 0)))),
             f"load_track {active['load_id']} trim",
         )
-        remaining_ms = total_duration_ms - source_elapsed_ms
+        remaining_ms = int(round(total_duration_ms - (source_elapsed_ms / flush_factor if flush_factor > 0 else source_elapsed_ms)))
         append_deck_clock_segment(
             stem_groups,
             group_payloads,
