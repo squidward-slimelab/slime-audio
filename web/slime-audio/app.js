@@ -23,6 +23,7 @@ const state = {
   waveformCache: new Map(),
   waveformHydrating: false,
   seekDragging: false,
+  playheadDragging: false,
   transportBusy: false,
   tickInFlight: false,
   lastSetsRefresh: 0,
@@ -830,10 +831,50 @@ function renderTimeline() {
   const playhead = document.createElement("div");
   playhead.className = "playhead";
   live.playheadEl = playhead;
+  attachPlayheadScrub(playhead);
   els.timeline.append(playhead);
   updatePlayhead();
   updateKnobs(true);
   hydrateWaveforms();
+}
+
+/* The playhead IS the scrub control: grab the needle and drag to seek. */
+function attachPlayheadScrub(playhead) {
+  const msFromPointer = (event) => {
+    const rect = els.timelineScroll.getBoundingClientRect();
+    const stageX = event.clientX - rect.left + els.timelineScroll.scrollLeft;
+    const scale = state.scale;
+    if (!scale) return null;
+    return clamp((stageX / scale.stageWidth) * scale.duration, 0, scale.duration);
+  };
+  playhead.addEventListener("pointerdown", (event) => {
+    if (!state.scale) return;
+    event.preventDefault();
+    state.playheadDragging = true;
+    playhead.classList.add("dragging");
+    playhead.setPointerCapture(event.pointerId);
+  });
+  playhead.addEventListener("pointermove", (event) => {
+    if (!state.playheadDragging) return;
+    const ms = msFromPointer(event);
+    if (ms === null) return;
+    const left = clamp((ms / state.scale.duration) * state.scale.stageWidth, 0, state.scale.stageWidth);
+    playhead.style.setProperty("--playhead-x", `${left}px`);
+    if (els.playheadTime) els.playheadTime.textContent = fmtMs(ms);
+    if (els.transportSeek && !els.transportSeek.disabled) els.transportSeek.value = String(Math.round(ms));
+  });
+  const finish = (event) => {
+    if (!state.playheadDragging) return;
+    state.playheadDragging = false;
+    playhead.classList.remove("dragging");
+    const ms = msFromPointer(event);
+    if (ms !== null) sendTransport("seek", { position_ms: Math.round(ms) });
+  };
+  playhead.addEventListener("pointerup", finish);
+  playhead.addEventListener("pointercancel", () => {
+    state.playheadDragging = false;
+    playhead.classList.remove("dragging");
+  });
 }
 
 /* ---------------- per-frame updates (CSS vars only) ---------------- */
@@ -845,6 +886,7 @@ function syncAxis() {
 function updatePlayhead() {
   const scale = state.scale;
   const playhead = live.playheadEl;
+  if (state.playheadDragging) return; // the hand on the needle wins
   const ms = livePlayheadMs();
   if (els.playheadTime) els.playheadTime.textContent = fmtMs(ms);
   if (!scale || !playhead) return;
