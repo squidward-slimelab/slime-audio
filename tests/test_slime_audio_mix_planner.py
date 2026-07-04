@@ -301,6 +301,111 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
         self.assertEqual(transition_plan["overlap_ms"], 0)
         self.assertIn("below overlay threshold", transition_plan["reason"])
 
+    def test_out_of_reach_keys_modulate_the_master_at_a_cut(self):
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 180_000},
+                {"id": "far", "deck": "deck-1", "path": "/music/far.flac", "start_ms": 200_000, "duration_ms": 180_000},
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        planned, moves = plan_future_mix(
+            payload,
+            {
+                "/music/current.flac": analysis("/music/current.flac", bpm=120, tonic=0, mode="major"),
+                "/music/far.flac": analysis("/music/far.flac", bpm=120, tonic=6, mode="major"),
+            },
+            lock_before_ms=0,
+            double_every=0,
+            target_bpm=120.0,
+        )
+
+        clips = {clip["id"]: clip for clip in planned["clips"]}
+        self.assertIn("cut", moves[-1].reason)
+        self.assertIn("modulates", moves[-1].reason)
+        points = planned.get("master_key_automation", [])
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["value"], {"tonic": 6, "mode": "major"})
+        self.assertEqual(points[0]["at_ms"], clips["far"]["start_ms"])
+        self.assertEqual(points[0]["planner_role"], "mix-planner-modulation")
+
+    def test_out_of_reach_keys_blend_via_modulated_runway_when_split(self):
+        from unittest import mock
+
+        payload = {
+            "version": 1,
+            "decks": ["deck-3", "deck-1", "deck-2", "deck-4"],
+            "clips": [
+                {"id": "current", "deck": "deck-3", "path": "/music/current.flac", "start_ms": 0, "duration_ms": 180_000},
+                {
+                    "id": "far",
+                    "deck": "deck-1",
+                    "path": "/music/far.flac",
+                    "start_ms": 200_000,
+                    "duration_ms": 180_000,
+                    "source_action_id": "load-far",
+                    "deck_clock_segment": True,
+                },
+            ],
+            "mic_lean_ins": [],
+            "automations": [],
+        }
+
+        with mock.patch("slime_audio_mix_planner.ready_stem_artifacts", return_value={"stems": "ready"}):
+            planned, moves = plan_future_mix(
+                payload,
+                {
+                    "/music/current.flac": analysis("/music/current.flac", bpm=120, tonic=0, mode="major"),
+                    "/music/far.flac": analysis("/music/far.flac", bpm=120, tonic=6, mode="major"),
+                },
+                lock_before_ms=0,
+                double_every=0,
+                target_bpm=120.0,
+            )
+
+        clips = {clip["id"]: clip for clip in planned["clips"]}
+        self.assertEqual(moves[-1].kind, "blend")
+        self.assertLess(clips["far"]["start_ms"], 180_000)
+        self.assertEqual(clips["far"].get("pitch_shift_semitones"), 0)
+        points = planned.get("master_key_automation", [])
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["at_ms"], clips["far"]["start_ms"])
+        self.assertEqual(points[0]["value"], {"tonic": 6, "mode": "major"})
+
+    def test_modulated_handoff_holds_tonal_stems_to_the_boundary_over_unsplit_outgoing(self):
+        from unittest import mock
+
+        from slime_audio_mix_planner import author_stem_handoff
+
+        actions: list[dict] = []
+        outgoing = {"id": "out", "path": "/music/out.flac"}
+        incoming = {
+            "id": "in",
+            "path": "/music/in.flac",
+            "source_action_id": "load-in",
+            "deck_clock_segment": True,
+        }
+        with mock.patch("slime_audio_mix_planner.ready_stem_artifacts", return_value={"stems": "ready"}):
+            notes = author_stem_handoff(
+                actions,
+                outgoing=outgoing,
+                incoming=incoming,
+                overlap_start_ms=100_000,
+                overlap_end_ms=160_000,
+                modulated=True,
+            )
+
+        self.assertTrue(any("modulated runway" in note for note in notes))
+        opens = {(a["stem"], a["at_ms"]) for a in actions if a["target"] == "load-in" and a["enabled"]}
+        self.assertIn(("bass", 160_000), opens)
+        self.assertIn(("other", 160_000), opens)
+        self.assertIn(("vocals", 160_000), opens)
+        self.assertFalse(any(a["enabled"] and a["at_ms"] < 160_000 for a in actions if a["target"] == "load-in"))
+
     def test_planner_can_rewrite_only_a_bounded_future_block(self):
         payload = {
             "version": 1,

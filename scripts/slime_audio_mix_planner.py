@@ -28,6 +28,7 @@ from slime_audio_session import (
     compile_actions_payload,
     edit_lock_ms_from_state,
     load_payload,
+    parse_ms,
     master_bpm_at,
     master_tempo_shift_pct,
     parse_session,
@@ -468,6 +469,7 @@ def author_stem_handoff(
     incoming: dict[str, Any],
     overlap_start_ms: int,
     overlap_end_ms: int,
+    modulated: bool = False,
 ) -> list[str]:
     """The remix handoff, authored by default on every blend with split material.
 
@@ -519,13 +521,22 @@ def author_stem_handoff(
         toggle(in_id, "vocals", False, overlap_start_ms, "intro")
         toggle(in_id, "other", False, overlap_start_ms, "intro")
         toggle(in_id, "bass", False, overlap_start_ms, "intro")
-        toggle(in_id, "bass", True, half_ms, "swap")
-        toggle(in_id, "other", True, three_quarter_ms, "melodics")
+        if modulated and not out_ready:
+            # A modulated junction over an unsplit outgoing: the incoming's
+            # tonal stems (in the NEW center) must not sound under the
+            # outgoing's full song (old center) — drums carry the whole
+            # runway and everything opens where the outgoing ends.
+            toggle(in_id, "bass", True, overlap_end_ms, "swap")
+            toggle(in_id, "other", True, overlap_end_ms, "melodics")
+            notes.append("modulated runway: drums-only entry, full song opens with the new key on the boundary")
+        else:
+            toggle(in_id, "bass", True, half_ms, "swap")
+            toggle(in_id, "other", True, three_quarter_ms, "melodics")
+            notes.append(
+                ("modulated " if modulated else "") + "extended runway: drums-first entry, bass swap at half, melodics at three-quarters, open on the boundary"
+                + ("" if out_ready else " (incoming-only: outgoing unsplit)")
+            )
         toggle(in_id, "vocals", True, overlap_end_ms, "open")
-        notes.append(
-            "extended runway: drums-first entry, bass swap at half, melodics at three-quarters, open on the boundary"
-            + ("" if out_ready else " (incoming-only: outgoing unsplit)")
-        )
         return notes
     if out_ready:
         out_id = str(outgoing["source_action_id"])
@@ -583,6 +594,16 @@ def plan_future_mix(
             and (plan_until_ms is None or int(plan.get("start_ms") or 0) < plan_until_ms)
         )
     ]
+    # Planner-authored key modulations beyond the lock rebuild each pass;
+    # aired ones stay (they already pitched what the room heard).
+    next_payload["master_key_automation"] = [
+        point
+        for point in next_payload.get("master_key_automation", []) or []
+        if str(point.get("planner_role") or "") != "mix-planner-modulation"
+        or parse_ms(point.get("at", point.get("at_ms")), "master key point") < lock_before_ms
+    ]
+    if not next_payload["master_key_automation"]:
+        next_payload.pop("master_key_automation")
     analyses = {path: coerce_analysis(analysis) for path, analysis in analyses_by_path.items()}
     original_clips = sorted(next_payload.get("clips", []), key=lambda clip: (int(clip.get("start_ms", 0)), str(clip.get("deck")), str(clip.get("id"))))
     locked = [clip for clip in original_clips if int(clip.get("start_ms", 0)) < lock_before_ms]
@@ -641,6 +662,7 @@ def plan_future_mix(
         # within the render limits, which keeps unsafe handoffs as hard cuts.
         # In a tempo-locked set every clip is authored to the same rendered
         # tempo, so tempo compatibility is free and only key fit decides.
+        modulation_key: dict[str, Any] | None = None
         if target_bpm is not None:
             previous_shift = int(previous.get("pitch_shift_semitones") or 0) if previous else 0
             # The extended runway needs only the INCOMING record split (its own
@@ -650,12 +672,30 @@ def plan_future_mix(
             pair_stems_ready = (
                 previous is not None
                 and bool(clip.get("source_action_id"))
+                and bool(clip.get("deck_clock_segment"))
                 and ready_stem_artifacts(SESSION_LIBRARY_DB, str(clip.get("path") or "")) is not None
             )
             overlap = tempo_locked_overlap_ms(
                 previous_analysis, analysis, shorter, max_pitch_shift_semitones,
                 source_pitch_shift=previous_shift, stems_ready=pair_stems_ready,
             )
+            # The master key is a ride, not a fence: a pair that won't align
+            # within the render limit is the cue to MODULATE the center to the
+            # incoming record, not to fall back to a hard cut. With split
+            # material the junction still blends — the incoming enters on its
+            # own drums (atonal) and its tonal stems wait for the modulation
+            # boundary, so the two centers never sound together.
+            if (
+                overlap == 0
+                and previous is not None
+                and analysis is not None
+                and analysis.tonic is not None
+                and analysis.mode in ("major", "minor")
+            ):
+                modulation_key = {"tonic": int(analysis.tonic) % 12, "mode": str(analysis.mode)}
+                if pair_stems_ready:
+                    phrase = int(phrase_ms(previous_analysis) or 16_000)
+                    overlap = max(32_000, min(6 * phrase, shorter // 2, 96_000))
         else:
             overlap = transition_overlap_ms(
                 previous_analysis,
@@ -683,16 +723,38 @@ def plan_future_mix(
         if target_bpm is not None:
             # Authored tempo locks are the arrangement; the planner only picks
             # the key alignment for overlaps and never rewrites tempo.
-            plan, overlay_reason = (None, "tempo-locked cut") if not overlap else tempo_locked_key_plan(
-                previous_analysis, analysis, max_pitch_shift_semitones, source_pitch_shift=previous_shift
-            )
-            if plan is not None:
-                clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
-                reason = f"overlap {overlap}ms; tempo-locked; {overlay_reason}"
+            if modulation_key is not None:
+                key_label = f"{modulation_key['tonic']} {modulation_key['mode']}"
+                if overlap:
+                    plan = TempoLockedKeyPlan(0)
+                    plan.key_relation = "modulated"
+                    clip["pitch_shift_semitones"] = 0
+                    reason = f"overlap {overlap}ms; tempo-locked; master key modulates to {key_label} with the incoming record"
+                else:
+                    plan = None
+                    clip["start_ms"] = cursor if previous is None else max(lock_before_ms, clip_end(previous))
+                    reason = f"cut; keys out of reach and incoming unsplit; master key modulates to {key_label} at the cut"
+                # The center steps where the incoming record starts; keymatched
+                # events pin the center at their own start, so the outgoing
+                # keeps its pitch and everything after aligns to the new key.
+                next_payload.setdefault("master_key_automation", []).append(
+                    {
+                        "at_ms": int(clip["start_ms"]),
+                        "value": modulation_key,
+                        "planner_role": "mix-planner-modulation",
+                    }
+                )
             else:
-                overlap = 0
-                clip["start_ms"] = cursor if previous is None else max(lock_before_ms, clip_end(previous))
-                reason = f"cut; {overlay_reason}"
+                plan, overlay_reason = (None, "tempo-locked cut") if not overlap else tempo_locked_key_plan(
+                    previous_analysis, analysis, max_pitch_shift_semitones, source_pitch_shift=previous_shift
+                )
+                if plan is not None:
+                    clip["pitch_shift_semitones"] = plan.pitch_shift_semitones
+                    reason = f"overlap {overlap}ms; tempo-locked; {overlay_reason}"
+                else:
+                    overlap = 0
+                    clip["start_ms"] = cursor if previous is None else max(lock_before_ms, clip_end(previous))
+                    reason = f"cut; {overlay_reason}"
         else:
             plan, overlay_reason = safe_overlay_plan(
                 previous_analysis,
@@ -730,6 +792,7 @@ def plan_future_mix(
                     incoming=clip,
                     overlap_start_ms=start_ms,
                     overlap_end_ms=start_ms + actual_overlap_ms,
+                    modulated=modulation_key is not None,
                 )
 
         if double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
@@ -833,7 +896,7 @@ def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any]) -> 
             continue
         kept_clips.append(clip)
     result["clips"] = kept_clips
-    for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner"), ("actions", "mix-planner")):
+    for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner"), ("actions", "mix-planner"), ("master_key_automation", "mix-planner")):
         original_entries = [
             entry
             for entry in result.get(key, []) or []

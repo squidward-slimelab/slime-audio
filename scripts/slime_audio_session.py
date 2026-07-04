@@ -2710,6 +2710,13 @@ def remove_event(
     guard_event_live_edit(next_payload, event_id, lock_before_ms=lock_before_ms, force=force)
     collection, index = found
     del next_payload[collection][index]
+    # Removal is cascade-atomic: everything targeting the event (stem toggles,
+    # knob rides) goes with it in the same write. Removing children separately
+    # races the advancing live-edit lock — a load stripped of its toggles but
+    # itself un-removable aired a vocal clash once.
+    next_payload["actions"] = [
+        action for action in next_payload.get("actions", []) if str(action.get("target") or "") != event_id
+    ]
     next_payload["automations"] = [
         automation for automation in next_payload.get("automations", []) if automation.get("target") != event_id
     ]

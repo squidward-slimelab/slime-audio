@@ -2931,7 +2931,9 @@ def extend_set(args: argparse.Namespace) -> int:
         session_bound = (payload.get("notes") or {}).get("target_length_ms")
         effective_target = int(session_bound) if session_bound is not None else args.target_length_ms
         if not args.force:
-            if effective_target > 0 and total_ms >= effective_target:
+            # Within a phrase of the border nothing meaningful fits; treat the
+            # bound as reached instead of overshooting it with a full record.
+            if effective_target > 0 and total_ms >= effective_target - 45_000:
                 print(json.dumps({"status": "ok", "reason": "target length reached (session-declared)" if session_bound is not None else "target length reached", **base_status}, sort_keys=True))
                 return 0
             if remaining_ms >= args.ahead_ms:
@@ -2963,6 +2965,17 @@ def extend_set(args: argparse.Namespace) -> int:
             prefix_block_ids(block, f"ext-{time.strftime('%m%d%H%M%S')}")
             stage = "merge"
             merged = merge_block_into_payload(payload, block, offset_ms=total_ms)
+            # A declared bound is a border for hand-picked material too:
+            # `--set-length-ms` never truncates full songs, so the addition
+            # must be SIZED to the remaining runway (a musical ending may
+            # run one phrase past the border, nothing more).
+            merged_total_ms = session_duration_ms(parse_session(merged))
+            if not args.force and effective_target > 0 and merged_total_ms > effective_target + 90_000:
+                raise SystemExit(
+                    f"extend would overrun the declared set length by {merged_total_ms - effective_target}ms "
+                    f"(bound {effective_target}ms, runway to it {max(0, effective_target - total_ms)}ms); "
+                    "size the addition to the remaining runway or pass --force to overrun deliberately"
+                )
             notes = merged.setdefault("notes", {})
             block_commentary_slots = [
                 {**slot, "at_ms": int(slot.get("at_ms") or 0) + total_ms}
