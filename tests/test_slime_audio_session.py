@@ -2389,6 +2389,27 @@ class AlwaysOnStemsTests(unittest.TestCase):
         self.assertEqual(compiled["clips"], [])
         self.assertEqual([group["id"] for group in compiled["stem_groups"]], ["lead-load"])
 
+    def test_mid_load_segments_carry_no_authored_fades(self):
+        # Fades belong to a load's REAL ends: a toggle boundary must not
+        # replay the fade_in (heard live as a cut-to-zero at every stems
+        # handoff). First segment keeps fade_in, last keeps fade_out,
+        # everything between is fadeless.
+        artifacts = {"stem_set_id": "x", "manifest_path": "/stems/m.json", "stems": dict(self.STEMS)}
+        with patch("slime_audio_session.ready_stem_artifacts", return_value=artifacts):
+            compiled = self.compile(
+                [
+                    self.load(fade_in_ms=4_000, fade_out_ms=6_000),
+                    {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": False, "at_ms": 20_000},
+                    {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": True, "at_ms": 40_000},
+                ]
+            )
+        first = next(c for c in compiled["clips"] if c["id"] == "lead-load")
+        middle = compiled["stem_groups"][0]
+        last = next(c for c in compiled["clips"] if c["id"] == "lead-load-segment-03")
+        self.assertEqual((first["fade_in_ms"], first.get("fade_out_ms", 0)), (4_000, 0))
+        self.assertEqual((middle.get("fade_in_ms", 0), middle.get("fade_out_ms", 0)), (0, 0))
+        self.assertEqual((last.get("fade_in_ms", 0), last["fade_out_ms"]), (0, 6_000))
+
     def test_same_instant_toggle_compiles_regardless_of_list_order(self):
         # A stem_toggle at its load's own start must compile even when it
         # appears BEFORE the load in the actions list (extend merges sort on

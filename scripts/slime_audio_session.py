@@ -1077,9 +1077,20 @@ def append_deck_clock_segment(
     clips: list[dict[str, Any]] | None = None,
     stem_customized: set[str] | None = None,
     stems_enabled: set[str] | None = None,
+    keep_fade_in: bool = True,
+    keep_fade_out: bool = True,
 ) -> dict[str, Any] | None:
     if duration_ms <= 0:
         return None
+    # Fades belong to a load's REAL ends. A mid-load segment boundary (a
+    # toggle) inheriting the authored fade_in played every stems handoff as
+    # a cut-to-zero-and-fade-back (heard live on 2026-07-04).
+    if not keep_fade_in or not keep_fade_out:
+        load_action = dict(load_action)
+        if not keep_fade_in:
+            load_action["fade_in_ms"] = 0
+        if not keep_fade_out:
+            load_action["fade_out_ms"] = 0
     load_id = action_id(load_action)
     segment_all_on = stems_enabled is None or {str(stem) for stem in stems_enabled} == STEM_NAMES
     if stems_enabled is not None and segment_all_on and not action_stems_untouched(load_action):
@@ -1456,6 +1467,8 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             # empty span without consuming a segment id.
             deck_active.pop(deck, None)
             return
+        first_segment = segment_counts.get(str(active["load_id"]), 0) == 0
+        reaches_natural_end = natural_end is not None and end_ms >= natural_end
         append_deck_clock_segment(
             stem_groups,
             group_payloads,
@@ -1468,6 +1481,8 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             clips=clips,
             stem_customized=stem_customized,
             stems_enabled=active.get("stems_enabled"),
+            keep_fade_in=first_segment,
+            keep_fade_out=reaches_natural_end,
         )
         deck_active.pop(deck, None)
 
@@ -1625,6 +1640,8 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     clips=clips,
                     stem_customized=stem_customized,
                     stems_enabled=loop_stems_enabled,
+                    keep_fade_in=False,
+                    keep_fade_out=False,
                 )
                 cursor += duration_ms
                 loop_index += 1
@@ -1845,6 +1862,8 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             clips=clips,
             stem_customized=stem_customized,
             stems_enabled=active.get("stems_enabled"),
+            keep_fade_in=segment_counts.get(str(active["load_id"]), 0) == 0,
+            keep_fade_out=True,
         )
     compiled["decks"] = decks
     return compiled
