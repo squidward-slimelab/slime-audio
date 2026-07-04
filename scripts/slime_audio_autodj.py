@@ -3147,6 +3147,15 @@ def load_json_file(path: Path) -> dict[str, Any]:
 
 def continue_set(args: argparse.Namespace) -> int:
     args.runtime.mkdir(parents=True, exist_ok=True)
+    # Short bounded sets render in smaller windows: the live-edit lock covers
+    # the current window plus one prerendered window, and on a 15-minute set a
+    # 6-minute horizon swallows the timeline before the DJ's first pass. 90s
+    # windows halve that to ~3 minutes of untouchable runway.
+    bounded_short = bool(getattr(args, "set_length_ms", None)) and int(args.set_length_ms) <= 20 * 60_000
+    if getattr(args, "window_ms", None) is None:
+        args.window_ms = 90_000 if bounded_short else 180_000
+    if getattr(args, "prerender_lead_ms", None) is None:
+        args.prerender_lead_ms = 30_000 if bounded_short else 60_000
     if args.pause_file.exists() and not args.ignore_pause:
         print(
             json.dumps(
@@ -3391,8 +3400,13 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--min-runway-ms", type=int, default=DEFAULT_MIN_RUNWAY_MS)
     cont.add_argument("--min-tracks", type=int, default=5)
     cont.add_argument("--max-tracks", type=int, default=DEFAULT_MAX_TRACKS)
-    cont.add_argument("--window-ms", type=int, default=180_000)
-    cont.add_argument("--prerender-lead-ms", type=int, default=60_000)
+    cont.add_argument(
+        "--window-ms",
+        type=int,
+        default=None,
+        help="Render window size. Defaults to 180s, or 90s for bounded sets of 20 minutes or less (a smaller window shrinks the live-edit lock horizon, leaving more of a short set editable).",
+    )
+    cont.add_argument("--prerender-lead-ms", type=int, default=None)
     cont.add_argument("--discover-timeout-ms", type=int, default=4000)
     cont.add_argument("--force", action="store_true", help="Generate and launch even when playback looks healthy.")
     extend = sub.add_parser("extend", help="Append a planned, guarded block to the live session behind the playhead.")

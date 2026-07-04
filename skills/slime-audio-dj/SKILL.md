@@ -161,11 +161,13 @@ for in a handoff note:
   backfill catch up behind you. On a short/bounded set, pick S-crate records —
   the planner's extended runways only fire on split material, and a 15-minute
   set has no time to wait for Demucs.
-- **Short sets: author everything in the first pass.** The live-edit lock sits
-  up to ~6 minutes past the needle (rendered audio, see above), so on a
-  15-minute set half the timeline is unreachable within minutes of launch; mic
-  drops and junction rebuilds must land in your first edit pass or their slots
-  are gone.
+- **Short sets: the performance pass comes FIRST, the moment `continue`
+  returns.** The live-edit lock advances with rendered audio (bounded sets ≤20
+  min run 90s windows, so the horizon is ~3 minutes — declared via
+  `--set-length-ms`, which also sizes the windows). Sequence strictly: launch →
+  author mic lines, beds, and junction touches in the next 2-3 minutes →
+  THEN verify receivers, run reports, and write anything down. Every minute of
+  checking before editing donates a minute of your set to the lock.
 
 Score yourself against RUBRIC.md before finishing. If your own honest grade is
 below 90, the set is not done and the room is still listening.
