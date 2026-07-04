@@ -195,6 +195,19 @@ def upsert_stem_set(conn: sqlite3.Connection, identity: TrackIdentity, artifact_
     )
 
 
+def measure_stem_audio(path: Path, window_ms: int = WINDOW_MS) -> tuple[dict[str, float | int], list[tuple[int, int, float]]]:
+    """measure_wav for any stem artifact: non-WAV (FLAC store) decodes first."""
+    if path.suffix.lower() == ".wav":
+        return measure_wav(path, window_ms)
+    with tempfile.TemporaryDirectory(prefix="slime-audio-stem-measure-") as temp:
+        decoded = Path(temp) / "decoded.wav"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-c:a", "pcm_s16le", str(decoded)],
+            check=True,
+        )
+        return measure_wav(decoded, window_ms)
+
+
 def measure_wav(path: Path, window_ms: int = WINDOW_MS) -> tuple[dict[str, float | int], list[tuple[int, int, float]]]:
     with wave.open(str(path), "rb") as audio:
         channels = audio.getnchannels()
@@ -384,8 +397,14 @@ def copy_stems(source_dir: Path, artifact_root: Path) -> dict[str, Path]:
         source = source_dir / f"{stem_name}.wav"
         if not source.exists():
             raise ValueError(f"missing {stem_name}.wav in {source_dir}")
-        target = artifact_root / f"{stem_name}.wav"
-        shutil.copy2(source, target)
+        # Stems store as FLAC: lossless, ~half the WAV footprint, and every
+        # consumer feeds the path to ffmpeg anyway. The WAV store grew ~8G/hour
+        # under stems-everywhere and filled the root filesystem once.
+        target = artifact_root / f"{stem_name}.flac"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(source), "-c:a", "flac", str(target)],
+            check=True,
+        )
         copied[stem_name] = target
     return copied
 
@@ -535,7 +554,7 @@ def write_manifest(path: Path, identity: TrackIdentity, audio: dict[str, Any], s
         "duration_ms": audio.get("duration_ms"),
         "stems": {
             stem_name: {
-                "path": f"{stem_name}.wav",
+                "path": f"{stem_name}.flac",
                 "loudness_db": metrics.get("loudness_db"),
                 "peak_db": metrics.get("peak_db"),
             }
@@ -674,7 +693,7 @@ def command_split(args: argparse.Namespace) -> int:
         metrics: dict[str, dict[str, Any]] = {}
         windows: dict[str, list[tuple[int, int, float]]] = {}
         for stem_name, stem_path in stems.items():
-            metrics[stem_name], windows[stem_name] = measure_wav(stem_path)
+            metrics[stem_name], windows[stem_name] = measure_stem_audio(stem_path)
         write_manifest(artifact_root / "manifest.json", identity, source_audio, metrics)
         upsert_stem_set(conn, identity, artifact_root, status="ready", error=None, audio=source_audio)
         write_stem_rows(conn, identity.stem_set_id, stems, metrics, windows)
@@ -696,7 +715,7 @@ def command_analyze(args: argparse.Namespace) -> int:
     metrics: dict[str, dict[str, Any]] = {}
     windows: dict[str, list[tuple[int, int, float]]] = {}
     for stem_name, stem_path in stems.items():
-        metrics[stem_name], windows[stem_name] = measure_wav(stem_path)
+        metrics[stem_name], windows[stem_name] = measure_stem_audio(stem_path)
     write_stem_rows(conn, row["id"], stems, metrics, windows)
     conn.commit()
     print(json.dumps({"status": "analyzed", "id": row["id"], "windows": sum(len(items) for items in windows.values())}, indent=2))
@@ -733,8 +752,8 @@ def command_verify(args: argparse.Namespace) -> int:
     if not (artifact_root / "manifest.json").exists():
         errors.append("manifest missing")
     for stem_name in CANONICAL_STEMS:
-        if not (artifact_root / f"{stem_name}.wav").exists():
-            errors.append(f"{stem_name}.wav missing")
+        if not any((artifact_root / f"{stem_name}{ext}").exists() for ext in (".flac", ".wav")):
+            errors.append(f"{stem_name} artifact missing")
     window_count = conn.execute("SELECT COUNT(*) AS count FROM track_stem_windows WHERE stem_set_id = ?", (row["id"],)).fetchone()["count"]
     print(json.dumps({"status": "ok" if not errors else "failed", "id": row["id"], "errors": errors, "window_count": window_count}, indent=2))
     return 1 if errors else 0
@@ -791,6 +810,7 @@ def command_backfill(args: argparse.Namespace) -> int:
         entries.append(entry)
     conn = connect(args.db)
     remaining: list[dict[str, Any]] = []
+    min_free_bytes = int(float(getattr(args, "min_free_gb", 10.0)) * 1024**3)
     for entry in entries:
         source = Path(str(entry["path"]))
         if not source.exists():
@@ -801,6 +821,17 @@ def command_backfill(args: argparse.Namespace) -> int:
             continue
         if summary["split"] >= args.limit:
             summary["deferred"] += 1
+            remaining.append(entry)
+            continue
+        # Splitting must never fill the disk: renders, the library DB, and the
+        # whole host share this filesystem (it hit 100% once and nothing could
+        # render). Defer loudly and let the next run resume when space exists.
+        disk_probe = args.stem_root
+        while not disk_probe.exists():
+            disk_probe = disk_probe.parent
+        if shutil.disk_usage(disk_probe).free < min_free_bytes:
+            summary["deferred"] += 1
+            summary["low_disk"] = True
             remaining.append(entry)
             continue
         split_args = argparse.Namespace(**{**vars(args), "track": str(source), "force": False, "source_stems_dir": None})
@@ -884,6 +915,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     backfill.add_argument("--queue", type=Path, default=DEFAULT_STEM_QUEUE)
     backfill.add_argument("--limit", type=int, default=2, help="Maximum Demucs runs per invocation.")
     backfill.add_argument("--max-attempts", type=int, default=3)
+    backfill.add_argument("--min-free-gb", type=float, default=10.0, help="Defer splitting when the stems filesystem has less free space than this.")
     backfill.add_argument("--demucs-bin", default="demucs")
     backfill.add_argument(
         "--demucs-host",
