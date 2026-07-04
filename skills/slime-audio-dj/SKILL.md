@@ -153,7 +153,12 @@ for in a handoff note:
   party) — a handful of authored drops timed into gaps.
 - **Stems-ready material first**: `browse --stems-ready-only` (S column) is your
   crate for anything you plan to layer; queue splits for the rest and let the
-  backfill catch up behind you.
+  backfill catch up behind you. On a short/bounded set, pick S-crate records —
+  the planner's extended runways only fire on split material, and a 15-minute
+  set has no time to wait for Demucs.
+- **Short sets: author everything in the first pass.** The playhead eats a
+  quarter of a 15-minute set while you deliberate; mic drops and junction
+  rebuilds must land in your first edit pass or their slots are gone.
 
 Score yourself against RUBRIC.md before finishing. If your own honest grade is
 below 90, the set is not done and the room is still listening.
