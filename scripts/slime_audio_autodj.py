@@ -2044,6 +2044,11 @@ def event_start_ms(event: dict[str, Any]) -> int | None:
     for key in ("start_ms", "start", "at_ms", "at"):
         value = event.get(key)
         if value is not None:
+            # "MM:SS.mmm"-style timestamps (hand-authored automations) crashed
+            # int(); validate-session then tracebacked instead of reporting
+            # its guard (cold test 21's agent found and fixed this live).
+            if isinstance(value, str) and not value.strip().isdigit():
+                return parse_ms(value, key)
             return int(value)
     points = event.get("points")
     if isinstance(points, list):

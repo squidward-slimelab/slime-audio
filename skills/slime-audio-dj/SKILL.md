@@ -33,7 +33,13 @@ python3 scripts/slime_audio_autodj.py continue --track ... --track ... \
 
 **Write your mic lines AT LAUNCH via `--mic-drop`** (repeatable, in set order): you already know the tracklist, and compose-time is the only moment the front of a short set is still writable — the system places your words into junction gaps (where the choreography has pulled the outgoing vocal) across the whole set. The words must be yours: about the music, never templated, never about talking.
 
-The instant `continue` returns: author your stem moves and the ending — the WHOLE timeline, front first (`scripts/slime_audio_live_edit.py`, see Live work below). Only after that pass lands do you verify receivers, run reports, or write anything down. Then read the rest of this manual and keep performing.
+The instant `continue` returns, in this order:
+
+1. **Tempo ride first** (lock-free — the master retempos every future window whenever you set it): `live_edit set-tempo --bpm N --points-json '[...]'`, points at the junction times `continue` just printed in `commentary_slots`. The arc should map the set's energy story; a flat master on a party set reads as no arc.
+2. **Stem/junction craft, front first** (`scripts/slime_audio_live_edit.py`, see Live work below) — these ARE lock-sensitive; every junction you touch must be touched now.
+3. Only then: verify receivers, read advisories, run reports or proof renders. **Do not run validate-session, set_report, or any proof render before steps 1-2 land** — the lock advances while you read, and a cold test lost four of its five junctions exactly this way. Advisories describe the set you already shipped; the performance pass is the set.
+
+Then read the rest of this manual and keep performing.
 
 ## Privacy
 
