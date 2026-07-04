@@ -1184,6 +1184,8 @@ def weave_arrangement(
     lead_actions: list[dict[str, Any]],
     analyses: dict[str, TrackAnalysis],
     args: argparse.Namespace,
+    *,
+    occupancy: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Weave the set: the body is remixed, not just the junctions.
 
@@ -1202,6 +1204,16 @@ def weave_arrangement(
         return []
     ready_paths = ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
     woven: list[dict[str, Any]] = []
+
+    def deck_free(deck: str, start_ms: int, end_ms: int) -> bool:
+        for event in (occupancy or []) + woven:
+            if event.get("type") != "load_track" or str(event.get("deck")) != deck:
+                continue
+            ev_start = int(event.get("at_ms") or 0)
+            ev_end = ev_start + int(event.get("duration_ms") or 0)
+            if ev_start < end_ms and start_ms < ev_end:
+                return False
+        return True
     chapter_size = max(2, int(getattr(args, "chapter_size", 3) or 3))
     for chapter_start in range(0, len(lead_actions), chapter_size):
         chapter = lead_actions[chapter_start : chapter_start + chapter_size]
@@ -1226,7 +1238,7 @@ def weave_arrangement(
                 host_end = host_start + int(host.get("duration_ms") or 0)
                 window_start = snap_to_host_beat(host_start + 40_000, host, host_analysis, args)
                 window_end = snap_to_host_beat(host_end - 40_000, host, host_analysis, args)
-                if window_end - window_start < 32_000:
+                if window_end - window_start < 32_000 or not deck_free("deck-1", window_start, window_end):
                     continue
                 base_trim = int(foundation.get("trim_start_ms") or 0)
                 bed = {
@@ -1292,7 +1304,7 @@ def weave_arrangement(
             tease_ms = 24_000
             tease_at = max(int(current.get("at_ms") or 0), current_end - tease_ms - 8_000)
             tease_at = snap_to_host_beat(tease_at, current, current_analysis, args)
-            if current_end - tease_at < 16_000:
+            if current_end - tease_at < 16_000 or not deck_free("deck-4", tease_at, current_end):
                 continue
             follow_analysis = analyses.get(follow_path)
             tease = {
@@ -1417,7 +1429,6 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         previous_track = track
 
     queue_stem_splits(stem_split_queued, args, reason="lead loaded without ready stems; every loaded record should have stems prepared")
-    lead_actions.extend(weave_arrangement(lead_actions[:], analyses, args))
     timeline_events = lead_clips
     actions = lead_actions
     lead_starts = [
@@ -3180,6 +3191,19 @@ def continue_set(args: argparse.Namespace) -> int:
             planner = run_planner(session_path, args)
             if planner["returncode"] != 0:
                 raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
+            stage = "weave"
+            # Weave on FINAL positions: the planner re-times every lead (deep
+            # overlaps, bar snapping), so grooves and teases authored earlier
+            # would reference a timeline that no longer exists.
+            planned_payload = load_session_payload(session_path)
+            planned_leads = sorted(
+                [a for a in planned_payload.get("actions", []) if a.get("type") == "load_track" and a.get("planner_role") == "lead"],
+                key=lambda a: int(a.get("at_ms") or 0),
+            )
+            woven = weave_arrangement(planned_leads, analyses, args, occupancy=planned_payload.get("actions", []))
+            if woven:
+                planned_payload.setdefault("actions", []).extend(woven)
+                write_payload(session_path, planned_payload)
             stage = "structural_beds"
             structural = add_structural_beds(session_path, selected, args)
             if not structural.get("added"):

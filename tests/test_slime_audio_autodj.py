@@ -2126,6 +2126,18 @@ class WovenArrangementTests(unittest.TestCase):
                 args,
                 analyses={t.path: replace(analysis(t.path), tonic=9, mode="minor") for t in tracks},
             )
+            leads = sorted(
+                [a for a in payload.get("actions", []) if a.get("type") == "load_track"],
+                key=lambda a: int(a.get("at_ms") or 0),
+            )
+            payload.setdefault("actions", []).extend(
+                autodj.weave_arrangement(
+                    leads,
+                    {t.path: replace(analysis(t.path), tonic=9, mode="minor") for t in tracks},
+                    args,
+                    occupancy=payload.get("actions", []),
+                )
+            )
         return payload
 
     def test_weave_authors_groove_and_teases(self):

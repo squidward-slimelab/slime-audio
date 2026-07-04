@@ -601,6 +601,14 @@ def plan_future_mix(
     planned: list[PlannedMove] = []
     rebuilt: list[dict[str, Any]] = protected[:]
     planner_actions: list[dict[str, Any]] = []
+    # Deck occupancy must include everything that sounds — the weave's groove
+    # beds and teases are stem groups, invisible to a clips-only scan, and
+    # deep overlaps exhaust the lead decks into whatever the scan can't see.
+    stem_occupancy: list[dict[str, Any]] = [
+        {"start_ms": int(g.get("start_ms") or 0), "duration_ms": int(g.get("duration_ms") or 0), "deck": g.get("deck"), "id": g.get("id")}
+        for g in next_payload.get("stem_groups", [])
+        if g.get("duration_ms")
+    ]
     previous = max(locked, key=clip_end, default=None)
     cursor = max(lock_before_ms, clip_end(previous) - 12_000 if previous else lock_before_ms)
     previous_analysis = analyses.get(str(previous.get("path"))) if previous else None
@@ -648,7 +656,7 @@ def plan_future_mix(
             # The incoming record arrives on the outgoing record's bar.
             start_ms = max(lock_before_ms, snap_to_clip_beat(start_ms, previous, previous_analysis))
         end_ms = start_ms + duration_ms
-        deck = choose_deck(rebuilt, start_ms, end_ms, deck_order=deck_order, avoid={previous_deck} if previous_deck else set())
+        deck = choose_deck(rebuilt + stem_occupancy, start_ms, end_ms, deck_order=deck_order, avoid={previous_deck} if previous_deck else set())
 
         clip["start_ms"] = start_ms
         clip["deck"] = deck
@@ -719,7 +727,7 @@ def plan_future_mix(
                 double_duration = start_ms - double_start
                 if double_duration >= 4_000:
                     double_end = double_start + double_duration
-                    double_deck = choose_deck(rebuilt, double_start, double_end, deck_order=deck_order, avoid={deck, previous_deck})
+                    double_deck = choose_deck(rebuilt + stem_occupancy, double_start, double_end, deck_order=deck_order, avoid={deck, previous_deck})
                     double_clip = {
                         "id": f"double-{clip.get('id')}",
                         "deck": double_deck,
