@@ -663,17 +663,42 @@ def master_key_shift_semitones(tonic: int, mode: str, master: tuple[int, str], m
     return delta
 
 
+def master_key_at(payload: dict[str, Any], at_ms: int) -> tuple[int, str] | None:
+    """The master key at a timeline position.
+
+    Keys are discrete, so `master_key_automation` points are step changes:
+    the base `master_key` holds until the first point, then each point's
+    value holds until the next. The DJ modulates the set's key strategically
+    when the upcoming crate sits out of reach of the current center — far
+    material should trigger a key ride, not a fallback to native clashes.
+    """
+    base = parse_master_key(payload.get("master_key"))
+    points = sorted(
+        ((parse_ms(point.get("at", point.get("at_ms")), "master key point"), point["value"]) for point in payload.get("master_key_automation", [])),
+        key=lambda item: item[0],
+    )
+    current = base
+    for point_ms, value in points:
+        if at_ms >= point_ms:
+            current = parse_master_key(value)
+        else:
+            break
+    return current
+
+
 def apply_master_key(payload: dict[str, Any]) -> dict[str, Any]:
     """Keymatch clips/stem groups to the session's master key, DAW-style.
 
     Auto keymatching is on by default for every event carrying key metadata;
     `keymatch: false` opts a track out (it then keeps its authored pitch
     shift, exactly as before). Minor keys convert to their relative major
-    before the pitch-step math. Out-of-reach material plays native.
-    Idempotent, applied on every payload load like the master tempo.
+    before the pitch-step math. The master key is rideable
+    (`master_key_automation` step points); each event matches the key at its
+    own start, so a modulation lands with an incoming record. Material out
+    of reach of the *current* key plays native — the cue to modulate, not a
+    steady state. Idempotent, applied on every payload load like the tempo.
     """
-    master = parse_master_key(payload.get("master_key"))
-    if master is None:
+    if not payload.get("master_key") and not payload.get("master_key_automation"):
         return payload
     max_shift = abs(int(payload.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES)))
     for event in list(payload.get("clips", [])) + list(payload.get("stem_groups", payload.get("stemGroups", []))):
@@ -682,6 +707,9 @@ def apply_master_key(payload: dict[str, Any]) -> dict[str, Any]:
         tonic = event.get("tonic")
         mode = event.get("mode")
         if tonic is None or mode not in ("major", "minor"):
+            continue
+        master = master_key_at(payload, int(event.get("start_ms") or 0))
+        if master is None:
             continue
         shift = master_key_shift_semitones(int(tonic), str(mode), master, max_shift)
         event["pitch_shift_semitones"] = int(shift) if shift is not None else 0
@@ -2487,11 +2515,15 @@ def set_master_key(
     key: str | None,
     *,
     max_key_shift_semitones: int | None = None,
+    points_json: str | None = None,
 ) -> dict[str, Any]:
     """Set (or with an empty key release) the session's master key.
 
-    Keymatched events re-derive at the next load; releasing returns them to
-    their native pitch instead of freezing the last match.
+    `points_json` rides the key across the timeline as step changes
+    (`[{"at": "60:00.000", "value": "C major"}, ...]`) — the strategic
+    modulation for when upcoming material sits out of the current center's
+    reach. Keymatched events re-derive at the next load; releasing returns
+    them to their native pitch and clears any ride.
     """
     next_payload = copy.deepcopy(payload)
     if key:
@@ -2499,8 +2531,17 @@ def set_master_key(
         next_payload["master_key"] = str(key)
         if max_key_shift_semitones is not None:
             next_payload["max_key_shift_semitones"] = abs(int(max_key_shift_semitones))
+        if points_json is not None:
+            points = json.loads(points_json)
+            if not isinstance(points, list):
+                raise ValueError("master key points must be a JSON list")
+            for point in points:
+                parse_master_key(point["value"])  # validate each stop
+                parse_ms(point.get("at", point.get("at_ms")), "master key point")
+            next_payload["master_key_automation"] = points
     else:
         next_payload.pop("master_key", None)
+        next_payload.pop("master_key_automation", None)
         for event in list(next_payload.get("clips", [])) + list(next_payload.get("stem_groups", [])):
             if event.get("keymatch", True) and event.get("tonic") is not None:
                 event["pitch_shift_semitones"] = 0
@@ -2562,10 +2603,22 @@ def move_event(
         force=force,
     )
     collection, index = found
+    # Readers prefer the pre-baked *_ms integers over the human-readable
+    # at/start strings, so writing only the string made move a silent no-op
+    # on any already-planned event (found live by the DJ agent 2026-07-04).
+    # Keep every time field the event carries in sync.
+    event = next_payload[collection][index]
+    new_ms = parse_ms(start, f"event {event_id} start")
     if collection == "actions":
-        next_payload[collection][index]["at"] = start
+        event["at"] = start
+        if "at_ms" in event:
+            event["at_ms"] = new_ms
+        if "start_ms" in event:
+            event["start_ms"] = new_ms
     else:
-        next_payload[collection][index]["start"] = start
+        event["start"] = start
+        if "start_ms" in event:
+            event["start_ms"] = new_ms
     parse_session(next_payload)
     return next_payload
 

@@ -200,7 +200,11 @@ def main() -> int:
 
     set_key_parser = sub.add_parser("set-key", parents=[common])
     set_key_parser.add_argument("--key", required=True, help='Master key for the set (e.g. "A minor", "F# major"); empty string releases keymatched events to native pitch.')
-    set_key_parser.add_argument("--max-shift", type=int, help="Keymatch pitch limit in semitones; out-of-reach material plays native (default 2).")
+    set_key_parser.add_argument("--max-shift", type=int, help="Keymatch pitch limit in semitones per track (default 2).")
+    set_key_parser.add_argument(
+        "--points-json",
+        help='Ride the master key across the set as step changes: [{"at": "60:00.000", "value": "C major"}, ...]. Modulate when upcoming material sits out of the current center\'s reach — clips match the key at their own start, so the change lands with an incoming record.',
+    )
 
     routine_parser = sub.add_parser("instant-double-routine", parents=[common])
     routine_parser.add_argument("--source-id", required=True)
@@ -285,6 +289,7 @@ def main() -> int:
                 payload,
                 args.key,
                 max_key_shift_semitones=args.max_shift,
+                points_json=args.points_json,
             ),
         )
     elif args.command == "move":

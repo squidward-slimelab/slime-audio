@@ -2398,6 +2398,22 @@ class MasterKeyTests(unittest.TestCase):
         self.assertNotIn("master_key", released)
         self.assertEqual(released["clips"][0]["pitch_shift_semitones"], 0)
 
+    def test_master_key_ride_steps_per_clip_start(self):
+        # D major leads against a C master (-2)... until the ride modulates
+        # the set to D major at the hour, where they play native (0).
+        payload = self.payload()
+        payload["clips"].append({**payload["clips"][0], "id": "lead-002", "start_ms": 3_600_000, "deck": "deck-3"})
+        payload["master_key_automation"] = [{"at": "60:00.000", "value": "D major"}]
+        payload = apply_master_key(payload)
+        self.assertEqual(payload["clips"][0]["pitch_shift_semitones"], -2)
+        self.assertEqual(payload["clips"][1]["pitch_shift_semitones"], 0)
+
+    def test_set_master_key_accepts_and_clears_ride_points(self):
+        automated = set_master_key(self.payload(), "C major", points_json='[{"at": "45:00.000", "value": "G major"}]')
+        self.assertEqual(automated["master_key_automation"][0]["value"], "G major")
+        released = set_master_key(automated, None)
+        self.assertNotIn("master_key_automation", released)
+
     def test_set_event_warp_keymatch_toggle(self):
         payload = apply_master_key(self.payload())
         edited = set_event_warp(payload, "lead-001", warp=True, keymatch=False)
