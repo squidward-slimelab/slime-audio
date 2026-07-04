@@ -8,6 +8,7 @@ import mimetypes
 import os
 import signal
 import socket
+import sqlite3
 import subprocess
 import time
 from array import array
@@ -41,6 +42,28 @@ DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 DEFAULT_WAVEFORM_CACHE = REPO_ROOT / "runtime" / "waveform-cache.json"
 DEFAULT_FEEDBACK_LOG = REPO_ROOT / "runtime" / "dashboard-feedback.jsonl"
 DEFAULT_DJ_PAUSE_FILE = REPO_ROOT / "runtime" / "dj-watchdog.paused"
+DEFAULT_LIBRARY_DB = REPO_ROOT / "runtime" / "slime-music-library.sqlite3"
+_STEMS_READY_CACHE: dict[str, Any] = {"at": 0.0, "paths": set()}
+
+
+def stems_ready_paths(ttl_s: float = 20.0) -> set[str]:
+    """Source paths with ready stem artifacts, straight from the library db.
+
+    Badges come from truth at render time, not authoring-time stamps, so a
+    background split finishing mid-set lights the record up immediately."""
+    now = time.time()
+    if now - _STEMS_READY_CACHE["at"] < ttl_s:
+        return _STEMS_READY_CACHE["paths"]
+    paths: set[str] = set()
+    try:
+        conn = sqlite3.connect(DEFAULT_LIBRARY_DB)
+        paths = {str(path) for (path,) in conn.execute("SELECT source_path FROM track_stem_sets WHERE status = 'ready'")}
+        conn.close()
+    except sqlite3.Error:
+        pass
+    _STEMS_READY_CACHE["at"] = now
+    _STEMS_READY_CACHE["paths"] = paths
+    return paths
 DECK_ORDER = ["deck-3", "deck-1", VOCAL_DECK, "deck-2", "deck-4"]
 LANE_LABELS = {VOCAL_DECK: "MIC"}
 DEFAULT_VOCAL_DURATION_MS = 4500
@@ -100,7 +123,7 @@ def session_clip_event(clip: dict[str, Any]) -> dict[str, Any]:
         "reverse": bool(clip.get("reverse", False)),
         "playback_rate": clip.get("playback_rate", 1.0),
         "planner_role": clip.get("planner_role"),
-        "stems_ready": bool(clip.get("stems_ready")),
+        "stems_ready": bool(clip.get("stems_ready")) or str(clip.get("path") or "") in stems_ready_paths(),
         "source_clip_id": clip.get("source_clip_id"),
         "routine_id": clip.get("routine_id"),
         "routine_recipe": clip.get("routine_recipe"),
@@ -161,7 +184,8 @@ def session_action_event(action: dict[str, Any]) -> dict[str, Any]:
         "param": action.get("param"),
         "stem": action.get("stem"),
         "cue_id": action.get("cue_id") or action.get("cue_name") or action.get("name"),
-        "stems_ready": bool(action.get("stems_ready") or action.get("stem_set_id") or action.get("play_stems")),
+        "stems_ready": bool(action.get("stems_ready") or action.get("stem_set_id") or action.get("play_stems"))
+        or str(action.get("source_path") or action.get("path") or "") in stems_ready_paths(),
         "position_ms": action.get("position_ms", action.get("position")),
         "length_ms": action.get("length_ms", action.get("length")),
         "start_ms": start_ms,
