@@ -1434,9 +1434,12 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         "fader_routing": {"deck_assignments": {"deck-1": "A", "deck-2": "A", "deck-3": "B", VOCAL_DECK: "THRU"}},
     }
     payload["title"] = args.title
+    if getattr(args, "set_length_ms", None) is not None:
+        pass  # stamped into notes below
     payload["notes"] = {
         "created_at": iso_now(),
         "intent": args.intent,
+        **({"target_length_ms": int(args.set_length_ms)} if getattr(args, "set_length_ms", None) is not None else {}),
         "selection_process": "database candidates plus play-history freshness penalties; arranged as short lead sections plus real handoffs/beds/effects",
         "scratch_material_policy": str(getattr(args, "scratch_material_policy", "ban") or "ban"),
         "scratch_source_files": [str(path) for path in (getattr(args, "scratch_source_file", None) or DEFAULT_SCRATCH_SOURCE_FILES)],
@@ -2922,9 +2925,14 @@ def extend_set(args: argparse.Namespace) -> int:
             "playhead_ms": playhead_ms,
             "remaining_ms": remaining_ms,
         }
+        # A session's own declared length outranks the heartbeat's CLI value:
+        # "give me a 15 minute set" is a border no mechanical extend may cross
+        # (the heartbeat grew a bounded set with off-vibe filler until this).
+        session_bound = (payload.get("notes") or {}).get("target_length_ms")
+        effective_target = int(session_bound) if session_bound is not None else args.target_length_ms
         if not args.force:
-            if args.target_length_ms > 0 and total_ms >= args.target_length_ms:
-                print(json.dumps({"status": "ok", "reason": "target length reached", **base_status}, sort_keys=True))
+            if effective_target > 0 and total_ms >= effective_target:
+                print(json.dumps({"status": "ok", "reason": "target length reached (session-declared)" if session_bound is not None else "target length reached", **base_status}, sort_keys=True))
                 return 0
             if remaining_ms >= args.ahead_ms:
                 print(json.dumps({"status": "ok", "reason": "enough runway ahead", **base_status}, sort_keys=True))
@@ -3413,6 +3421,12 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=16.0,
         help="How far a lead may be stretched to reach --target-bpm (turntable wide mode is 16).",
+    )
+    parser.add_argument(
+        "--set-length-ms",
+        type=int,
+        default=None,
+        help="Declare the set's intended total length; mechanical extends stop at this border (0 = endless). A bounded operator request ('a 15 minute set') should always declare it.",
     )
     parser.add_argument(
         "--target-key",

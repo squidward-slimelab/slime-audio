@@ -32,7 +32,61 @@ def lead_clips(session: dict) -> list[dict]:
     return [c for c in session.get("clips", []) if not c.get("play_stems")]
 
 
+def _lead_coverage_from_compiled(session: dict) -> list[tuple[int, int, int]] | None:
+    """Real (start, end, nominal_at_ms) span per lead from the compiled deck
+    clock, unioning every clips/stem_groups segment that traces back to the
+    same load_track action. Live edits (move/stem_toggle) change these
+    segments directly, so this reflects what actually renders -- unlike the
+    static `transition_plans` array, which is a snapshot from planning time
+    and goes stale the moment a cut is hand-rebuilt into a blend."""
+    actions = session.get("actions")
+    if not actions:
+        return None
+    lead_order: dict[str, int] = {}
+    for action in actions:
+        if isinstance(action, dict) and action.get("type") == "load_track" and action.get("planner_role") == "lead":
+            lead_id = action.get("id")
+            if lead_id:
+                lead_order[str(lead_id)] = int(action.get("at_ms") or 0)
+    if not lead_order:
+        return None
+    spans: dict[str, list[int]] = {}
+    for coll in ("clips", "stem_groups"):
+        for event in session.get(coll, []):
+            source_id = str(event.get("source_action_id") or event.get("id") or "")
+            if source_id not in lead_order:
+                continue
+            start = int(event.get("start_ms") or 0)
+            end = start + int(event.get("duration_ms") or 0)
+            span = spans.setdefault(source_id, [start, end])
+            span[0] = min(span[0], start)
+            span[1] = max(span[1], end)
+    return sorted(
+        ((span[0], span[1], lead_order[lead_id]) for lead_id, span in spans.items()),
+        key=lambda item: item[2],
+    )
+
+
 def transition_stats(session: dict) -> dict:
+    coverage = _lead_coverage_from_compiled(session)
+    if coverage and len(coverage) > 1:
+        overlaps_ms: list[int] = []
+        cuts = 0
+        for (_, prev_end, _), (next_start, _, _) in zip(coverage, coverage[1:]):
+            overlap = prev_end - next_start
+            if overlap > 0:
+                overlaps_ms.append(overlap)
+            else:
+                cuts += 1
+        blends = len(overlaps_ms)
+        total = blends + cuts
+        return {
+            "transitions": total,
+            "blends": blends,
+            "cuts": cuts,
+            "blend_ratio": round(blends / total, 3) if total else None,
+            "mean_overlap_ms": int(sum(overlaps_ms) / len(overlaps_ms)) if overlaps_ms else 0,
+        }
     plans = session.get("transition_plans", [])
     decisions = Counter(str(p.get("decision")) for p in plans)
     blends = decisions.get("blend", 0)
@@ -105,7 +159,7 @@ def layer_stats(session: dict) -> dict:
     stem_clips = [c for c in session.get("clips", []) if c.get("play_stems")]
     actions = session.get("actions", [])
     stem_actions = [a for a in actions if a.get("play_stems")]
-    action_kinds = Counter(str(a.get("action")) for a in actions)
+    action_kinds = Counter(str(a.get("type")) for a in actions)
     return {
         "stem_layers": len(stem_clips) + len(stem_actions),
         "actions": dict(action_kinds),
