@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import sqlite3
 import json
 import os
@@ -44,6 +45,7 @@ from slime_audio_dj import (
 from slime_audio_session import (
     VOCAL_DECK,
     add_action,
+    add_mic_lean_in,
     compile_actions_payload,
     DEFAULT_MAX_KEY_SHIFT_SEMITONES,
     master_key_at,
@@ -3145,6 +3147,73 @@ def load_json_file(path: Path) -> dict[str, Any]:
         return {}
 
 
+def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[str, Any]]:
+    """Schedule the DJ's own mic lines across the whole set at compose time.
+
+    A cold DJ can author line TEXTS the moment the tracklist is chosen, but by
+    the time they can run live edits the front of a short set is already
+    rendered — hosting kept losing its first slots to the lock. Placement is
+    mechanical (junction overlaps, where the choreography has pulled the
+    outgoing vocal; plus an intro slot), the words are the DJ's; that division
+    is exactly the planner-runway model.
+    """
+    payload = load_session_payload(session_path)
+    compiled = compile_actions_payload(copy.deepcopy(payload))
+    leads = sorted(
+        (
+            clip
+            for clip in compiled.get("clips", []) + compiled.get("stem_groups", [])
+            if clip.get("source_action_id") or clip.get("deck_clock_segment")
+        ),
+        key=lambda clip: int(clip.get("start_ms") or 0),
+    )
+    sites: list[int] = []
+    if leads:
+        sites.append(int(leads[0].get("start_ms") or 0) + 12_000)
+    seen_actions: set[str] = set()
+    for clip in leads:
+        action = str(clip.get("source_action_id") or clip.get("id") or "")
+        start = int(clip.get("start_ms") or 0)
+        if action in seen_actions or start == 0:
+            continue
+        seen_actions.add(action)
+        # 4s into the junction: the outgoing vocal has stepped out, the
+        # incoming record's vocals are still held by the runway choreography.
+        sites.append(start + 4_000)
+    sites = sorted(set(sites))
+    spaced: list[int] = []
+    for site in sites:
+        if not spaced or site - spaced[-1] >= 45_000:
+            spaced.append(site)
+    if not spaced:
+        return []
+    count = min(len(texts), len(spaced))
+    if count == 1:
+        chosen = [spaced[0]]
+    else:
+        indices = sorted({round(i * (len(spaced) - 1) / (count - 1)) for i in range(count)})
+        chosen = [spaced[i] for i in indices]
+    placed: list[dict[str, Any]] = []
+    for index, (text, at_ms) in enumerate(zip(texts, chosen)):
+        lean_id = f"mic-drop-{index + 1:02d}"
+        payload = add_mic_lean_in(
+            payload,
+            lean_id=lean_id,
+            start=str(at_ms),
+            text=text,
+            deck=VOCAL_DECK,
+            voice=None,
+            rate=None,
+            volume=1.45,
+            duck_volume=0.45,
+            lowpass_hz=1400.0,
+            duck_ms=3500,
+        )
+        placed.append({"id": lean_id, "at_ms": at_ms, "text": text})
+    write_payload(session_path, payload)
+    return placed
+
+
 def continue_set(args: argparse.Namespace) -> int:
     args.runtime.mkdir(parents=True, exist_ok=True)
     # Short bounded sets render in smaller windows: the live-edit lock covers
@@ -3220,6 +3289,10 @@ def continue_set(args: argparse.Namespace) -> int:
             if woven:
                 planned_payload.setdefault("actions", []).extend(woven)
                 write_payload(session_path, planned_payload)
+            stage = "mic_drops"
+            placed_mic_drops: list[dict[str, Any]] = []
+            if getattr(args, "mic_drop", None):
+                placed_mic_drops = place_authored_mic_drops(session_path, [str(t) for t in args.mic_drop])
             stage = "structural_beds"
             structural = add_structural_beds(session_path, selected, args)
             if not structural.get("added"):
@@ -3290,6 +3363,7 @@ def continue_set(args: argparse.Namespace) -> int:
                 "guards": guards,
                 "advisories": advisories,
                 "stem_readiness": stem_readiness,
+                "mic_drops_placed": placed_mic_drops,
                 "commentary_slots": (payload.get("notes") or {}).get("commentary_slots", []),
                 "tracks": [asdict(track) for track in selected],
                 "structure_rejections": structure_rejections,
@@ -3409,6 +3483,12 @@ def parse_args() -> argparse.Namespace:
     cont.add_argument("--prerender-lead-ms", type=int, default=None)
     cont.add_argument("--discover-timeout-ms", type=int, default=4000)
     cont.add_argument("--force", action="store_true", help="Generate and launch even when playback looks healthy.")
+    cont.add_argument(
+        "--mic-drop",
+        action="append",
+        default=None,
+        help="Your own mic line (repeatable, in set order). Placed mechanically into junction gaps across the WHOLE set at compose time — the only way hosting reaches the front of a short set before the render lock does. Author the words yourself; never template them.",
+    )
     extend = sub.add_parser("extend", help="Append a planned, guarded block to the live session behind the playhead.")
     add_generation_arguments(extend)
     extend.add_argument("--session", type=Path, help="Live session to extend. Defaults to the active-set pointer.")

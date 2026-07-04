@@ -25,10 +25,15 @@ python3 scripts/slime_audio_autodj.py stop --reason "new request" 2>/dev/null  #
 python3 scripts/slime_music_library.py browse --stems-ready-only --query "<vibe words>" | head -40   # pick 5-6 from the S crate
 python3 scripts/slime_audio_autodj.py set-constraints --vibe "..." --direction "..."
 python3 scripts/slime_audio_autodj.py continue --track ... --track ... \
-  --target-bpm N --target-key "X minor" --set-length-ms 900000 --title "..."
+  --target-bpm N --target-key "X minor" --set-length-ms 900000 --title "..." \
+  --mic-drop "your own opening line" \
+  --mic-drop "a line about the record you're most excited to bring in" \
+  --mic-drop "your sign-off"
 ```
 
-The instant `continue` returns: author your mic lines, stem moves, and the ending — the WHOLE timeline, front first (`scripts/slime_audio_live_edit.py`, see Live work below). Only after that pass lands do you verify receivers, run reports, or write anything down. Then read the rest of this manual and keep performing.
+**Write your mic lines AT LAUNCH via `--mic-drop`** (repeatable, in set order): you already know the tracklist, and compose-time is the only moment the front of a short set is still writable — the system places your words into junction gaps (where the choreography has pulled the outgoing vocal) across the whole set. The words must be yours: about the music, never templated, never about talking.
+
+The instant `continue` returns: author your stem moves and the ending — the WHOLE timeline, front first (`scripts/slime_audio_live_edit.py`, see Live work below). Only after that pass lands do you verify receivers, run reports, or write anything down. Then read the rest of this manual and keep performing.
 
 ## Privacy
 
@@ -121,7 +126,7 @@ Once audio is running, you are live. Work *ahead of the playhead* with `scripts/
 - **Beds and layers**: `add-action` a `load_track` with `play_stems` (drums/bass/other) under a lead, key/tempo-matched, carved with `knob_lerp` filter and EQ moves. Beds usually sit −6 to −9 dB under a full lead — audible enough to change the groove. **Stems are prepared for every lead automatically** (splits queue at generation; the backfill churns in the background; the dashboard badges stems-ready records with an S) — so a set with zero stem moves is a choice you must be able to defend, not a material shortage. Bass swaps at handoffs, a drums-only intro, an acapella tag over the incoming groove: these are playable on any badged record.
 - **Moves**: `instant-double-routine` (`stabs`, `one-beat-trades`, `offbeat-swaps`, `hook-tease`, `echo-stabs`, `echo-drop`, `scratch-cuts`, `slip-brake`, `brake-drop`), `add-effect`, `beat-jump`, `crossfader`, `fader-routing`. Every move needs a musical job you could name out loud; if you can't, don't add it.
 - **Tempo**: the master is an automatable knob. `set-tempo --bpm N` moves it for every future window; `set-tempo --bpm 90 --points-json '[{"at": "90:00.000", "value": 84}]'` rides it across the set (clips warp to the knob's value at their own start, so the drift lands record by record — easing the master down through a sleep set is a real arc move). Ride it only deliberately, with a reason you could say out loud; a set's tempo identity is the point of having one. `set-warp --id X --off` frees a sample drop or rubato cue from the master; `set-warp --id X --source-bpm N` lets hand-added material warp.
-- **Mic**: hosting is craft and it is graded (see RUBRIC.md, Motion & hosting). You author every line yourself (autodj publishes `commentary_slots` — handoff timing plus incoming artist/title/BPM/key — as raw material). Short, spaced well apart, timed into gaps (never over a vocal), about the music: name the incoming record when it earns it, call the energy move, tease the drop. Never talk about talking, never reuse template lines, never invent artist facts. Schedule with `slime_audio_lean_ins.py` on `deck-5` with ducking. For sleep/background sets, hosting goes hushed and rare — a whispered record name into a long gap — it does not go away; drop the mic entirely only when the operator asks for silence.
+- **Mic**: hosting is craft and it is graded (see RUBRIC.md, Motion & hosting). You author every line yourself (autodj publishes `commentary_slots` — handoff timing plus incoming artist/title/BPM/key — as raw material). Short, spaced well apart, timed into gaps (never over a vocal), about the music: name the incoming record when it earns it, call the energy move, tease the drop. Never talk about talking, never reuse template lines, never invent artist facts. Author lines at launch with `continue --mic-drop` (placement is mechanical, words are yours); add or adjust later ones with `slime_audio_lean_ins.py` on `deck-5` with ducking. For sleep/background sets, hosting goes hushed and rare — a whispered record name into a long gap — it does not go away; drop the mic entirely only when the operator asks for silence.
 - **Proof renders**: for a risky routine or an uncertain bed, render a short window through `slime_audio_session_mixdown.py --routine-id/--from/--duration --verify` and listen-check the report. Don't block a normal live set on full-set proofs.
 
 Craft notes that consistently separate good sets from canned ones:

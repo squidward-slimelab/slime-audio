@@ -1475,6 +1475,44 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
 
+    def test_authored_mic_drops_place_across_the_whole_set_at_compose_time(self):
+        from slime_audio_autodj import place_authored_mic_drops
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": f"lead-{i}",
+                                "deck": "deck-1" if i % 2 == 0 else "deck-2",
+                                "source_path": f"/music/{i}.flac",
+                                "at_ms": i * 150_000,
+                                "duration_ms": 160_000,
+                            }
+                            for i in range(4)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            placed = place_authored_mic_drops(session_path, ["opening line", "middle line", "sign-off"])
+
+            self.assertEqual(len(placed), 3)
+            times = [p["at_ms"] for p in placed]
+            self.assertEqual(times, sorted(times))
+            self.assertEqual(times[0], 12_000)
+            self.assertGreater(times[-1], 300_000)
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+            leans = payload.get("mic_lean_ins", [])
+            self.assertEqual(len(leans), 3)
+            self.assertEqual(leans[0]["text"], "opening line")
+
     def test_harmonic_guard_allows_master_key_modulation_at_junction(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             session_path = Path(temp_dir) / "session.json"
