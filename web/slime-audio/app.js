@@ -841,10 +841,14 @@ function renderTimeline() {
 /* The playhead IS the scrub control: grab the needle and drag to seek. */
 function attachPlayheadScrub(playhead) {
   const msFromPointer = (event) => {
-    const rect = els.timelineScroll.getBoundingClientRect();
-    const stageX = event.clientX - rect.left + els.timelineScroll.scrollLeft;
     const scale = state.scale;
     if (!scale) return null;
+    // Measure from the stage element itself (it scrolls with the content, so
+    // no scrollLeft math) and subtract the lane header column: time zero
+    // starts where the tracks start, not at the container's left edge.
+    const stageRect = els.timeline.getBoundingClientRect();
+    const headerW = parseFloat(getComputedStyle(playhead).left) || 0;
+    const stageX = event.clientX - stageRect.left - headerW;
     return clamp((stageX / scale.stageWidth) * scale.duration, 0, scale.duration);
   };
   playhead.addEventListener("pointerdown", (event) => {
