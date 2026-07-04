@@ -2121,7 +2121,11 @@ class WovenArrangementTests(unittest.TestCase):
         with patch("slime_audio_autodj.ready_stem_source_paths", return_value=ready), patch(
             "slime_audio_session.ready_stem_artifacts", return_value=artifacts if ready_all else None
         ):
-            payload = session_payload(tracks, args, analyses={t.path: analysis(t.path) for t in tracks})
+            payload = session_payload(
+                tracks,
+                args,
+                analyses={t.path: replace(analysis(t.path), tonic=9, mode="minor") for t in tracks},
+            )
         return payload
 
     def test_weave_authors_groove_and_teases(self):

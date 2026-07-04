@@ -1167,11 +1167,28 @@ def weave_arrangement(
             if analysis is not None and analysis.bpm:
                 bed["source_bpm"] = float(analysis.bpm)
             woven.append(bed)
-        # The tease: next record's vocal over this record's instrumental tail.
+        # The tease: next record's vocal over this record's instrumental tail,
+        # pitched into the host's tonal center (relative-major alignment, max
+        # 2 st) — or skipped when the keys genuinely don't reach.
         for current, following in zip(chapter, chapter[1:]):
             follow_path = str(following.get("source_path") or "")
             current_path = str(current.get("source_path") or "")
             if follow_path not in ready_paths or current_path not in ready_paths:
+                continue
+            current_analysis = analyses.get(current_path)
+            follow_analysis_key = analyses.get(follow_path)
+            if (
+                current_analysis is None or follow_analysis_key is None
+                or current_analysis.tonic is None or follow_analysis_key.tonic is None
+                or current_analysis.mode not in ("major", "minor") or follow_analysis_key.mode not in ("major", "minor")
+            ):
+                continue
+            def _rel(tonic, mode):
+                return (int(tonic) + 3) % 12 if mode == "minor" else int(tonic) % 12
+            tease_delta = (_rel(current_analysis.tonic, current_analysis.mode) - _rel(follow_analysis_key.tonic, follow_analysis_key.mode)) % 12
+            if tease_delta > 6:
+                tease_delta -= 12
+            if abs(tease_delta) > 2:
                 continue
             current_end = int(current.get("at_ms") or 0) + int(current.get("duration_ms") or 0)
             tease_ms = 24_000
@@ -1193,6 +1210,8 @@ def weave_arrangement(
                 "fade_out_ms": 1_500,
                 "planner_role": "arrangement-tease",
                 "kind": "tease",
+                "pitch_shift_semitones": tease_delta,
+                "keymatch": False,
             }
             if follow_analysis is not None:
                 if follow_analysis.bpm:
