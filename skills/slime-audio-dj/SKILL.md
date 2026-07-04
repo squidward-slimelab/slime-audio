@@ -128,6 +128,32 @@ A couple of well-chosen downloads while the first tracks play is normal DJ behav
 
 Background maintenance (cron): `scripts/slime_audio_structure_backfill.py` grows the analysis cache; `scripts/slime_audio_stems.py backfill` works the stem-split queue autodj writes when it wanted stems it didn't have. Neither ever blocks live audio.
 
+## The A bar (self-grade in flight, fix before it airs)
+
+Run `set_report` on your session after launch and again after every performance
+pass, and hold yourself to this before calling the set done — anything below the
+bar that the playhead hasn't reached yet is yours to fix *now*, not to apologize
+for in a handoff note:
+
+- **Dual-source ≥ 50%** of the timeline, from layers a listener can hear (the
+  metric ignores anything ≤ −10 dB). The mechanical weave gives you teases and
+  junctions; the rest is your craft — eared groove swaps between records whose
+  feels actually match, beds, doubles, acapella tags. Proof-render one layered
+  passage before trusting it.
+- **No planner cut airs unfixed**: rebuild upcoming cuts as stem blends or
+  deliberate tag mixes before the playhead reaches them; ride the master key
+  (`set-key --points-json`) when the next stretch sits out of the current
+  center's reach instead of accepting native clashes.
+- **An authored arc**: the tempo knob rides somewhere on purpose across the set.
+- **Hosting present** in the vibe's register (hushed for sleep, called-out for a
+  party) — a handful of authored drops timed into gaps.
+- **Stems-ready material first**: `browse --stems-ready-only` (S column) is your
+  crate for anything you plan to layer; queue splits for the rest and let the
+  backfill catch up behind you.
+
+Score yourself against RUBRIC.md before finishing. If your own honest grade is
+below 90, the set is not done and the room is still listening.
+
 ## Sets, feedback, health
 
 - Named sets: `slime_audio_sets.py new/activate/save-loaded/replay/render`. Keep archived sets separate from the active pointers.

@@ -565,6 +565,7 @@ def command_browse(
     max_bpm: float | None,
     analyzed_only: bool,
     available_only: bool,
+    stems_ready_only: bool,
     limit: int,
     as_json: bool,
 ) -> None:
@@ -600,11 +601,18 @@ def command_browse(
         """,
         [*params, max(1, limit)],
     ).fetchall()
+    ready_paths = {
+        str(path)
+        for (path,) in conn.execute("SELECT source_path FROM track_stem_sets WHERE status = 'ready'")
+    }
     results = []
     for row in rows:
         path_text = str(row["preferred_path"] or "")
         available = bool(path_text) and Path(path_text).exists()
         if available_only and not available:
+            continue
+        stems_ready = path_text in ready_paths
+        if stems_ready_only and not stems_ready:
             continue
         results.append(
             {
@@ -616,6 +624,7 @@ def command_browse(
                 "key": row["tunebat_key"],
                 "path": path_text,
                 "available": available,
+                "stems_ready": stems_ready,
             }
         )
     if as_json:
@@ -628,10 +637,12 @@ def command_browse(
         bpm = f"{item['bpm']:>6.1f}" if item["bpm"] is not None else "     ?"
         camelot = f"{item['camelot'] or '?':>3s}"
         flag = " " if item["available"] else "!"
-        print(f"{flag} {bpm} {camelot}  {item['artist']} - {item['title']}  [{item['album']}]")
-        print(f"      {item['path']}")
+        stems = "S" if item["stems_ready"] else " "
+        print(f"{flag}{stems} {bpm} {camelot}  {item['artist']} - {item['title']}  [{item['album']}]")
+        print(f"       {item['path']}")
     missing = sum(1 for item in results if not item["available"])
-    print(f"-- {len(results)} tracks ({missing} on unmounted shares, marked !)  bpm ? = not yet analyzed")
+    ready = sum(1 for item in results if item["stems_ready"])
+    print(f"-- {len(results)} tracks ({missing} on unmounted shares marked !; {ready} stems-ready marked S)  bpm ? = not yet analyzed")
 
 
 def command_search(conn: sqlite3.Connection, query: str, limit: int) -> None:
@@ -1045,6 +1056,7 @@ def parse_args() -> argparse.Namespace:
     browse_parser.add_argument("--max-bpm", type=float)
     browse_parser.add_argument("--analyzed-only", action="store_true", help="Only tracks with BPM/key metadata.")
     browse_parser.add_argument("--available-only", action="store_true", help="Only tracks whose files are reachable right now.")
+    browse_parser.add_argument("--stems-ready-only", action="store_true", help="Only tracks with split stem artifacts ready (playable as beds/swaps/tags, marked S).")
     browse_parser.add_argument("--limit", type=int, default=40)
     browse_parser.add_argument("--json", action="store_true")
 
@@ -1129,6 +1141,7 @@ def main() -> int:
             max_bpm=args.max_bpm,
             analyzed_only=args.analyzed_only,
             available_only=args.available_only,
+            stems_ready_only=args.stems_ready_only,
             limit=args.limit,
             as_json=args.json,
         )
