@@ -2987,7 +2987,11 @@ def extend_set(args: argparse.Namespace) -> int:
             # including the junction between old tail and new block.
             state_payload = load_json_file(state_path) if state_path.exists() else {}
             window_end_ms = int(state_payload.get("window_end_ms") or 0)
-            lock_before_ms = max(playhead_ms, window_end_ms) + args.prerender_lead_ms + 5_000
+            prerender_horizon_ms = int(state_payload.get("edit_lock_ms") or 0)
+            lock_before_ms = max(
+                max(playhead_ms, window_end_ms) + args.prerender_lead_ms,
+                prerender_horizon_ms,
+            ) + 5_000
             stage = "mix_planner"
             planner = run_planner(work_path, args, lock_before_ms=min(lock_before_ms, total_ms))
             if planner["returncode"] != 0:
@@ -3391,7 +3395,9 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--recent-material-policy", choices=["penalty", "ban", "off"], default="penalty")
     parser.add_argument("--pool-per-query", type=int, default=60)
     parser.add_argument("--sql-pool-limit", type=int, default=600)
-    parser.add_argument("--query-count", type=int, default=0)
+    # Vibe/direction/notes words from the constraints become selection lanes;
+    # without them the mechanical picker is tempo-matched anything.
+    parser.add_argument("--query-count", type=int, default=8)
     parser.add_argument("--include-broad-pool", action="store_true")
     parser.add_argument("--remix-focus", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--stem-aware-remix", action=argparse.BooleanOptionalAction, default=False)

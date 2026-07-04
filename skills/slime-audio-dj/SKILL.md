@@ -58,6 +58,11 @@ python3 scripts/slime_audio_autodj.py continue --title "Set title" --intent "one
 #    set fed. If the operator asked for a BOUNDED set ("a 15 minute set"),
 #    declare it at launch so no mechanical extend crosses the border:
 #      continue ... --set-length-ms 900000
+#    Compose to the FULL requested length (a 15-minute ask deserves ~15
+#    composed minutes, not 12), give it a real ending, and when it ends,
+#    ending IS the deliverable — the room going quiet at the border is
+#    success, not dead air. Do not relaunch or extend a finished bounded
+#    set unless the operator asks.
 #    Unbounded sets need nothing; the heartbeat grows them forever. Manual
 #    top-up if ever needed:
 python3 scripts/slime_audio_autodj.py extend --target-length-ms 0   # 0 = endless
@@ -95,7 +100,7 @@ Safety that is built into the tools (you never have to think about it):
 
 **Split stems for the whole tracklist during the opener, author transitions before they air.** The opener buys you minutes: spend them running `slime_audio_stems.py backfill` over your picks and authoring the stem handoffs on every junction *before the playhead reaches them* — a planner cut that airs is unfinished work the room already heard. **Launch is the midpoint of the job, not the end.** `continue` gives you a competent skeleton — leads at the set tempo with planner blends. What makes it a *set* is what you layer on top while the first records play. Before you consider the job done, make real performance passes over the future timeline: stem/bed layers where the vibe allows, filter rides into the bigger transitions, a move or two with a nameable job. Then run `scripts/slime_audio_set_report.py SESSION.json` and read it against `RUBRIC.md` — if it reads like a playlist (low blend ratio, no tempo identity, zero layers), you are not done. Walking away right after launch ships a D.
 
-Once audio is running, you are live. Work *ahead of the playhead* with `scripts/slime_audio_live_edit.py` (state-locked; it will refuse edits under the needle):
+Once audio is running, you are live. Work *ahead of the playhead* with `scripts/slime_audio_live_edit.py`. The state lock covers everything already **rendered**, not just already heard: the runner bakes audio in ~3-minute windows and prerenders the next full window early, so the lock sits up to ~6 minutes past the needle. An edit refused by the lock would not have aired anyway — move it later in the timeline; never `--force` past the lock (forced edits into baked audio caused a 27-second on-air skip once). Practically: author each junction at least one full window (~3 min) before it plays.
 
 - **Selection steering**: re-rank what comes next from what is playing now; respect operator steering in the constraints file as hard input. Pull candidates from several angles (vibe queries, compatible keys/tempos, less-played corners). Don't loop the same crates; if selection keeps reaching for the same few artists, that is an acquisition gap — see Music Acquisition.
 - **Beds and layers**: `add-action` a `load_track` with `play_stems` (drums/bass/other) under a lead, key/tempo-matched, carved with `knob_lerp` filter and EQ moves. Beds usually sit −6 to −9 dB under a full lead — audible enough to change the groove. **Stems are prepared for every lead automatically** (splits queue at generation; the backfill churns in the background; the dashboard badges stems-ready records with an S) — so a set with zero stem moves is a choice you must be able to defend, not a material shortage. Bass swaps at handoffs, a drums-only intro, an acapella tag over the incoming groove: these are playable on any badged record.
@@ -156,9 +161,11 @@ for in a handoff note:
   backfill catch up behind you. On a short/bounded set, pick S-crate records —
   the planner's extended runways only fire on split material, and a 15-minute
   set has no time to wait for Demucs.
-- **Short sets: author everything in the first pass.** The playhead eats a
-  quarter of a 15-minute set while you deliberate; mic drops and junction
-  rebuilds must land in your first edit pass or their slots are gone.
+- **Short sets: author everything in the first pass.** The live-edit lock sits
+  up to ~6 minutes past the needle (rendered audio, see above), so on a
+  15-minute set half the timeline is unreachable within minutes of launch; mic
+  drops and junction rebuilds must land in your first edit pass or their slots
+  are gone.
 
 Score yourself against RUBRIC.md before finishing. If your own honest grade is
 below 90, the set is not done and the room is still listening.

@@ -26,6 +26,7 @@ from slime_audio_session import (
     DEFAULT_MAX_WARP_STRETCH_PCT,
     action_type,
     compile_actions_payload,
+    edit_lock_ms_from_state,
     load_payload,
     master_bpm_at,
     master_tempo_shift_pct,
@@ -890,12 +891,8 @@ def analyze_session_paths(
 def state_lock_ms(state_path: Path | None, lead_ms: int) -> int:
     if state_path is None or not state_path.exists():
         return 0
-    payload = load_payload(state_path)
-    window_end = payload.get("window_end_ms")
     playhead = playhead_ms_from_state(state_path)
-    if isinstance(window_end, (int, float)):
-        return max(int(window_end), playhead + lead_ms)
-    return playhead + lead_ms
+    return max(edit_lock_ms_from_state(state_path), playhead + lead_ms)
 
 
 def main() -> int:

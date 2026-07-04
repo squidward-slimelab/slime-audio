@@ -52,7 +52,7 @@ def state_lock_ms(state_path: Path | None, lock_before: str | None) -> int | Non
         return session.parse_ms(lock_before, "live edit lock")
     if state_path is None:
         return None
-    return session.playhead_ms_from_state(state_path)
+    return session.edit_lock_ms_from_state(state_path)
 
 
 def event_summary(payload: dict[str, Any], event_id: str) -> dict[str, Any] | None:

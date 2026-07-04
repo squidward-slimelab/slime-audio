@@ -1921,6 +1921,28 @@ def playhead_ms_from_state(path: Path, now: float | None = None) -> int:
     return sum(durations.get(track, 0) for track in prior_tracks) + elapsed_ms
 
 
+DEFAULT_RUNNER_WINDOW_MS = 180_000
+
+
+def edit_lock_ms_from_state(path: Path, now: float | None = None) -> int:
+    """Earliest timeline instant that is safe to edit.
+
+    The playhead alone is not the lock: the runner prerenders the entire next
+    window once the current one enters its prerender lead, so audio up to
+    ``edit_lock_ms`` (published by the runner) may already be baked. Edits
+    before that horizon silently miss the render and desync the timeline.
+    """
+    playhead = playhead_ms_from_state(path, now)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    horizon = payload.get("edit_lock_ms")
+    if horizon is not None:
+        return max(playhead, parse_ms(horizon, "state edit lock"))
+    window_end = payload.get("window_end_ms")
+    if window_end is not None:
+        return max(playhead, parse_ms(window_end, "state window end") + DEFAULT_RUNNER_WINDOW_MS)
+    return playhead
+
+
 def probe_duration_ms(path: str) -> int:
     try:
         result = subprocess.run(
@@ -2565,7 +2587,9 @@ def guard_live_edit(
     if start_ms < lock_before_ms:
         raise ValueError(
             f"{label} is before the live edit lock ({start_ms}ms < {lock_before_ms}ms); "
-            "only future events can be edited without --force"
+            "audio up to the lock is playing or already prerendered, so an edit there "
+            "would not air (and forcing it desyncs the timeline). Move the edit past "
+            "the lock instead of using --force"
         )
 
 
@@ -3738,7 +3762,7 @@ def live_edit_lock(args: argparse.Namespace) -> int | None:
     if getattr(args, "lock_before", None):
         return parse_ms(args.lock_before, "live edit lock")
     if getattr(args, "state", None):
-        return playhead_ms_from_state(args.state)
+        return edit_lock_ms_from_state(args.state)
     return None
 
 

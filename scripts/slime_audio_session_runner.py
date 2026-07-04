@@ -500,6 +500,9 @@ def write_window_state(
             "window_started_at": now,
             "window_start_ms": start_ms,
             "window_end_ms": end_ms,
+            # The next full window may be prerendered at any moment once this one
+            # enters its prerender lead; editors must not touch anything before this.
+            "edit_lock_ms": end_ms + (args.window_ms if args.prerender_next else 0),
             "current": current_path,
             "resolved_current": current_path,
             "current_clips": [

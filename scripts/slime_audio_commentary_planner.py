@@ -12,6 +12,7 @@ from slime_audio_session import (
     VOCAL_DECK,
     add_mic_lean_in,
     base_payload,
+    edit_lock_ms_from_state,
     load_payload,
     parse_ms,
     parse_session,
@@ -283,7 +284,8 @@ def main() -> int:
         raise SystemExit("--count must be positive")
     payload = base_payload(args.session, args.create)
     playhead_ms = playhead_ms_from_state(args.state) if args.state.exists() else 0
-    earliest_ms = playhead_ms + args.lead_ms
+    lock_ms = edit_lock_ms_from_state(args.state) if args.state.exists() else 0
+    earliest_ms = max(playhead_ms + args.lead_ms, lock_ms)
     existing = existing_lean_times(payload)
     candidates = build_candidates(
         payload,

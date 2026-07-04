@@ -827,6 +827,34 @@ class SlimeAudioSessionTests(unittest.TestCase):
 
         self.assertEqual(playhead, 35_000)
 
+    def test_edit_lock_covers_runner_published_prerender_horizon(self):
+        from slime_audio_session import edit_lock_ms_from_state
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = Path(temp_dir) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "playhead_ms": 40_000,
+                        "window_end_ms": 180_000,
+                        "edit_lock_ms": 360_000,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(edit_lock_ms_from_state(state), 360_000)
+
+    def test_edit_lock_assumes_full_prerendered_window_when_unpublished(self):
+        from slime_audio_session import DEFAULT_RUNNER_WINDOW_MS, edit_lock_ms_from_state
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = Path(temp_dir) / "state.json"
+            state.write_text(
+                json.dumps({"playhead_ms": 40_000, "window_end_ms": 180_000}),
+                encoding="utf-8",
+            )
+            self.assertEqual(edit_lock_ms_from_state(state), 180_000 + DEFAULT_RUNNER_WINDOW_MS)
+
     def test_session_allows_non_contiguous_overlapping_clips_on_different_decks(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "session.json"
