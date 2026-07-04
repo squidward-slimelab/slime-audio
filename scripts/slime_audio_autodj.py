@@ -3110,6 +3110,9 @@ def parse_args() -> argparse.Namespace:
     validate.add_argument("--max-vanilla-lead-ms", type=int, default=90_000)
     validate.add_argument("--min-harmonic-overlap-ms", type=int, default=DEFAULT_MIN_HARMONIC_OVERLAP_MS)
     validate.add_argument("--require-stem-loads", action=argparse.BooleanOptionalAction, default=False)
+    stop = sub.add_parser("stop", help="Stop the live set cleanly (terminates runners, logs why, leaves no pause).")
+    stop.add_argument("--reason", default="operator stop")
+    stop.add_argument("--history", type=Path, default=DEFAULT_RUNTIME / "play-history.jsonl")
     cont = sub.add_parser("continue", help="Start a fresh database-backed set when nothing is playing.")
     add_generation_arguments(cont)
     cont.add_argument("--title", default=f"Autodj Continuation {time.strftime('%Y-%m-%d %H%M')}")
@@ -3236,6 +3239,36 @@ def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dry-run", action="store_true")
 
 
+def stop_set(args: argparse.Namespace) -> int:
+    """Stop the live set cleanly: terminate runners, log why, leave no pause.
+
+    The room goes quiet on purpose (operator request, cold-test reset) and the
+    next `continue` starts fresh without needing --force or an unpause.
+    """
+    pids = live_session_runner_pids()
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            continue
+    deadline = time.time() + 10.0
+    while live_session_runner_pids() and time.time() < deadline:
+        time.sleep(0.3)
+    remaining = live_session_runner_pids()
+    if args.history is not None:
+        args.history.parent.mkdir(parents=True, exist_ok=True)
+        with args.history.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {"event": "set_stopped", "pids": pids, "reason": args.reason, "timestamp": iso_now()},
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+    print(json.dumps({"status": "stopped" if not remaining else "failed", "stopped_pids": pids, "still_running": remaining, "reason": args.reason}, sort_keys=True))
+    return 0 if not remaining else 1
+
+
 def main() -> int:
     args = parse_args()
     if args.command == "validate-session":
@@ -3244,6 +3277,8 @@ def main() -> int:
         return continue_set(args)
     if args.command == "extend":
         return extend_set(args)
+    if args.command == "stop":
+        return stop_set(args)
     raise AssertionError(args.command)
 
 
