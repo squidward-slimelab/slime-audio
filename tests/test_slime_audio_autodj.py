@@ -1475,6 +1475,109 @@ class SlimeAudioAutodjTests(unittest.TestCase):
 
         self.assertEqual(result["checked"], 1)
 
+    def test_harmonic_guard_allows_master_key_modulation_at_junction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "master_key": "A minor",
+                        "master_key_automation": [
+                            {"at_ms": 90_000, "value": "G major", "planner_role": "mix-planner-modulation"}
+                        ],
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "outgoing",
+                                "deck": "deck-1",
+                                "source_path": "/music/out.flac",
+                                "at_ms": 0,
+                                "duration_ms": 150_000,
+                                "tonic": 9,
+                                "mode": "minor",
+                                "key": "A minor",
+                            },
+                            {
+                                "type": "load_track",
+                                "id": "incoming",
+                                "deck": "deck-2",
+                                "source_path": "/music/in.flac",
+                                "at_ms": 90_000,
+                                "duration_ms": 120_000,
+                                "tonic": 7,
+                                "mode": "major",
+                                "key": "G major",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = validate_harmonic_overlaps(
+                session_path,
+                SimpleNamespace(min_harmonic_overlap_ms=8_000),
+            )
+
+        self.assertEqual(result["checked"], 1)
+
+    def test_harmonic_guard_still_rejects_unstepped_mismatch_after_modulation(self):
+        stems = {
+            "vocals": {"path": "/stems/vocals.wav"},
+            "drums": {"path": "/stems/drums.wav"},
+            "bass": {"path": "/stems/bass.wav"},
+            "other": {"path": "/stems/other.wav"},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir) / "session.json"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "decks": ["deck-1", "deck-2"],
+                        "master_key": "G major",
+                        "actions": [
+                            {
+                                "type": "load_track",
+                                "id": "lead",
+                                "deck": "deck-1",
+                                "source_path": "/music/lead.flac",
+                                "at_ms": 0,
+                                "duration_ms": 150_000,
+                                "tonic": 7,
+                                "mode": "major",
+                                "key": "G major",
+                            },
+                            {
+                                "type": "load_track",
+                                "id": "clashing-bed",
+                                "deck": "deck-2",
+                                "source_path": "/music/bed.flac",
+                                "at_ms": 60_000,
+                                "duration_ms": 60_000,
+                                "stems": stems,
+                                "play_stems": ["vocals", "other"],
+                                "keymatch": False,
+                                "tonic": 11,
+                                "mode": "major",
+                                "key": "B major",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                validate_harmonic_overlaps(
+                    session_path,
+                    SimpleNamespace(min_harmonic_overlap_ms=8_000),
+                )
+
+        self.assertIn("effective keys do not share", str(raised.exception))
+
     def test_transition_decision_guard_rejects_zero_shift_handoff_without_plan(self):
         stems = {
             "vocals": {"path": "/stems/vocals.wav"},

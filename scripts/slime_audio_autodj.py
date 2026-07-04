@@ -45,11 +45,15 @@ from slime_audio_session import (
     VOCAL_DECK,
     add_action,
     compile_actions_payload,
+    DEFAULT_MAX_KEY_SHIFT_SEMITONES,
+    master_key_at,
+    master_key_shift_semitones,
     parse_ms,
     parse_session,
     playhead_ms_from_state,
     prepare_load_track_action_stems,
     probe_duration_ms,
+    relative_major_tonic,
     write_payload,
 )
 from slime_audio_vocal_cues import audit_vocal_alignment_payload, audit_vocal_overlap_payload
@@ -2199,6 +2203,39 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
             left_relative = shifted_relative_tonic(left_tonic, left_mode, left)
             right_relative = shifted_relative_tonic(right_tonic, right_mode, right)
             if left_relative != right_relative:
+                # A mismatch that IS the master-key ride is by design, not a
+                # clash: the ride steps the center exactly where the later
+                # record starts (planner junction modulation or an authored
+                # set-key move), that record aligns to the new center, and the
+                # runway choreography keeps the two centers from sounding
+                # tonally together. The guard must not undo the ride by
+                # comparing effective keys across the step — but a layer with
+                # no step at its start (a genuinely clashing bed) still fails.
+                if clip_start_ms(right) >= clip_start_ms(left):
+                    earlier, later = left, right
+                    earlier_relative, later_relative = left_relative, right_relative
+                    earlier_meta = (left_tonic, left_mode)
+                else:
+                    earlier, later = right, left
+                    earlier_relative, later_relative = right_relative, left_relative
+                    earlier_meta = (right_tonic, right_mode)
+                later_center = master_key_at(compiled, clip_start_ms(later))
+                earlier_center = master_key_at(compiled, clip_start_ms(earlier))
+                later_aligned = later_center is not None and relative_major_tonic(*later_center) == later_relative
+                earlier_aligned = earlier_center is not None and relative_major_tonic(*earlier_center) == earlier_relative
+                earlier_native_out_of_reach = (
+                    earlier_center is not None
+                    and int(earlier.get("pitch_shift_semitones") or 0) == 0
+                    and master_key_shift_semitones(
+                        earlier_meta[0],
+                        earlier_meta[1],
+                        earlier_center,
+                        abs(int(compiled.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES))),
+                    )
+                    is None
+                )
+                if later_aligned and (earlier_aligned or earlier_native_out_of_reach):
+                    continue
                 failures.append(
                     {
                         "left": str(left.get("id") or ""),
