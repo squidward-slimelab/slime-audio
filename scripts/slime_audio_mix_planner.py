@@ -691,9 +691,13 @@ def plan_future_mix(
         for automation in next_payload.get("automations", [])
         if not (automation.get("target") == "master" and automation.get("param") == "duck_volume" and automation.get("planner_role") == "mix-planner")
     ]
-    if planner_actions and has_deck_loads:
-        next_payload["actions"] = planner_actions
     parse_session(copy.deepcopy(next_payload))
+    if planner_actions and has_deck_loads:
+        # Attached AFTER validating the planned timeline: these toggles
+        # reference the original load actions, which the compiled working
+        # copy consumed — they only become parseable once write_back merges
+        # them next to the loads they target (validated there).
+        next_payload["actions"] = planner_actions
     if has_deck_loads:
         return write_back_deck_loads(original_payload, next_payload), planned
     return next_payload, planned
