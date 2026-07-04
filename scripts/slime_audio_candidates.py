@@ -114,6 +114,16 @@ def write_constraints(path: Path, constraints: SetConstraints, reason: str) -> N
             changes=changes,
         )
     )
+    # The constraints file carries fields beyond this schema (master_bpm,
+    # master_key, agent handoff notes): preserve them. Rewriting only known
+    # keys silently erased the room's masters on every set-constraints call.
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        for key, value in existing.items():
+            if key not in payload:
+                payload[key] = value
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
