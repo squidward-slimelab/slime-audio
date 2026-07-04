@@ -1219,64 +1219,11 @@ def weave_arrangement(
         chapter = lead_actions[chapter_start : chapter_start + chapter_size]
         if len(chapter) < 2:
             continue
-        foundation = chapter[0]
-        foundation_path = str(foundation.get("source_path") or "")
-        foundation_analysis = analyses.get(foundation_path)
-        if foundation_path in ready_paths:
-            # The groove is a DRUM SWAP, per lead: the host record's own drums
-            # step out while the foundation's drums carry — audible by
-            # construction, at real volume, never a -7dB stack a listener
-            # cannot hear. One segment per following lead, beat-snapped to
-            # the host's grid and phase-aligned, kept a phrase clear of the
-            # junction windows on both ends.
-            for host in chapter[1:]:
-                host_path = str(host.get("source_path") or "")
-                if host_path not in ready_paths:
-                    continue
-                host_analysis = analyses.get(host_path)
-                host_start = int(host.get("at_ms") or 0)
-                host_end = host_start + int(host.get("duration_ms") or 0)
-                window_start = snap_to_host_beat(host_start + 40_000, host, host_analysis, args)
-                window_end = snap_to_host_beat(host_end - 40_000, host, host_analysis, args)
-                if window_end - window_start < 32_000 or not deck_free("deck-1", window_start, window_end):
-                    continue
-                base_trim = int(foundation.get("trim_start_ms") or 0)
-                bed = {
-                    "type": "load_track",
-                    "id": f"{host['id']}-groove-swap",
-                    "deck": "deck-1",
-                    "source_path": foundation_path,
-                    "at_ms": window_start,
-                    "trim_start_ms": phase_aligned_trim(window_start, host, host_analysis, foundation_analysis, base_trim, args),
-                    "duration_ms": window_end - window_start,
-                    "gain_db": -3.0,
-                    "play_stems": ["drums"],
-                    "fade_in_ms": 400,
-                    "fade_out_ms": 400,
-                    "planner_role": "arrangement-groove",
-                    "kind": "bed",
-                }
-                if foundation_analysis is not None and foundation_analysis.bpm:
-                    bed["source_bpm"] = float(foundation_analysis.bpm)
-                woven.append(bed)
-                woven.append({
-                    "type": "stem_toggle",
-                    "id": f"{host['id']}-drums-out-for-groove",
-                    "target": host["id"],
-                    "stem": "drums",
-                    "enabled": False,
-                    "at_ms": window_start,
-                    "planner_role": "arrangement-groove",
-                })
-                woven.append({
-                    "type": "stem_toggle",
-                    "id": f"{host['id']}-drums-back",
-                    "target": host["id"],
-                    "stem": "drums",
-                    "enabled": True,
-                    "at_ms": window_end,
-                    "planner_role": "arrangement-groove",
-                })
+        # Groove swaps (one record's drums carrying another) are an AGENT
+        # move, not a mechanical default: beat math makes layering possible,
+        # not good — the operator's ear rejected bhangra drums under French
+        # house within one listen. Agents author swaps with proof renders;
+        # the mechanical weave keeps to teases and junction handoffs.
         # The tease: next record's vocal over this record's instrumental tail,
         # pitched into the host's tonal center (relative-major alignment, max
         # 2 st) — or skipped when the keys genuinely don't reach.

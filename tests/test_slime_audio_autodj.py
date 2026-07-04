@@ -2147,14 +2147,10 @@ class WovenArrangementTests(unittest.TestCase):
         groove_toggles = [a for a in actions if a.get("planner_role") == "arrangement-groove" and a.get("type") == "stem_toggle"]
         teases = [a for a in actions if a.get("planner_role") == "arrangement-tease" and a.get("type") == "load_track"]
         vocal_outs = [a for a in actions if a.get("planner_role") == "arrangement-tease" and a.get("type") == "stem_toggle"]
-        # A drum SWAP per following lead: the foundation's drums carry at an
-        # audible level while the host's drums step out and back.
-        self.assertEqual(len(groove_beds), 2)
-        for bed in groove_beds:
-            self.assertEqual(bed["play_stems"], ["drums"])
-            self.assertEqual(bed["deck"], "deck-1")
-            self.assertGreater(bed["gain_db"], -10.0)
-        self.assertEqual(len(groove_toggles), 4)  # drums out + back per host
+        # Groove swaps are agent territory (taste), not a mechanical default:
+        # the weave authors none.
+        self.assertEqual(groove_beds, [])
+        self.assertEqual(groove_toggles, [])
         self.assertGreaterEqual(len(teases), 1)
         self.assertEqual(teases[0]["play_stems"], ["vocals"])
         self.assertEqual(len(teases), len(vocal_outs))
