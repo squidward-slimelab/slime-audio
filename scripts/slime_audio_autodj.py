@@ -1116,6 +1116,105 @@ def order_by_key_chain(selected: list[SelectedTrack], analyses: dict[str, TrackA
     return ordered
 
 
+def weave_arrangement(
+    lead_actions: list[dict[str, Any]],
+    analyses: dict[str, TrackAnalysis],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Weave the set: the body is remixed, not just the junctions.
+
+    Leads group into chapters; each chapter's opening record donates its
+    drums as a foundation groove that keeps running under the following
+    leads, and mid-chapter the NEXT record's vocal rides over the current
+    record's instrumental for two phrases (its own vocal toggled out) — the
+    tease. Songs happen over a persistent groove instead of in sequence.
+    A playlist with transitions is not the assignment.
+
+    Only stems-ready material participates; sparse coverage degrades toward
+    the plain sequence gracefully. Requires a master tempo (the weave only
+    makes sense on one grid).
+    """
+    if getattr(args, "target_bpm", None) is None or len(lead_actions) < 2:
+        return []
+    ready_paths = ready_stem_source_paths(Path(getattr(args, "db", DEFAULT_DB)))
+    woven: list[dict[str, Any]] = []
+    chapter_size = max(2, int(getattr(args, "chapter_size", 3) or 3))
+    for chapter_start in range(0, len(lead_actions), chapter_size):
+        chapter = lead_actions[chapter_start : chapter_start + chapter_size]
+        if len(chapter) < 2:
+            continue
+        foundation = chapter[0]
+        foundation_path = str(foundation.get("source_path") or "")
+        chapter_end_ms = max(int(a.get("at_ms") or 0) + int(a.get("duration_ms") or 0) for a in chapter[1:])
+        foundation_end_ms = int(foundation.get("at_ms") or 0) + int(foundation.get("duration_ms") or 0)
+        if foundation_path in ready_paths and chapter_end_ms - foundation_end_ms >= 60_000:
+            analysis = analyses.get(foundation_path)
+            bed = {
+                "type": "load_track",
+                "id": f"{foundation['id']}-groove",
+                "deck": "deck-1",
+                "source_path": foundation_path,
+                "at_ms": foundation_end_ms,
+                "trim_start_ms": foundation.get("trim_start_ms", 0),
+                "duration_ms": chapter_end_ms - foundation_end_ms,
+                "gain_db": -7.0,
+                "play_stems": ["drums"],
+                "fade_in_ms": 2_000,
+                "fade_out_ms": 4_000,
+                "planner_role": "arrangement-groove",
+                "kind": "bed",
+            }
+            if analysis is not None and analysis.bpm:
+                bed["source_bpm"] = float(analysis.bpm)
+            woven.append(bed)
+        # The tease: next record's vocal over this record's instrumental tail.
+        for current, following in zip(chapter, chapter[1:]):
+            follow_path = str(following.get("source_path") or "")
+            current_path = str(current.get("source_path") or "")
+            if follow_path not in ready_paths or current_path not in ready_paths:
+                continue
+            current_end = int(current.get("at_ms") or 0) + int(current.get("duration_ms") or 0)
+            tease_ms = 24_000
+            tease_at = max(int(current.get("at_ms") or 0), current_end - tease_ms - 8_000)
+            if current_end - tease_at < 16_000:
+                continue
+            follow_analysis = analyses.get(follow_path)
+            tease = {
+                "type": "load_track",
+                "id": f"{following['id']}-tease",
+                "deck": "deck-4",
+                "source_path": follow_path,
+                "at_ms": tease_at,
+                "trim_start_ms": following.get("trim_start_ms", 0),
+                "duration_ms": min(tease_ms, current_end - tease_at),
+                "gain_db": -3.0,
+                "play_stems": ["vocals"],
+                "fade_in_ms": 1_500,
+                "fade_out_ms": 1_500,
+                "planner_role": "arrangement-tease",
+                "kind": "tease",
+            }
+            if follow_analysis is not None:
+                if follow_analysis.bpm:
+                    tease["source_bpm"] = float(follow_analysis.bpm)
+                for key in ("key", "tonic", "mode", "camelot"):
+                    value = getattr(follow_analysis, key, None)
+                    if value is not None:
+                        tease[key] = value
+            woven.append(tease)
+            # The host record steps its own vocal out under the tease.
+            woven.append({
+                "type": "stem_toggle",
+                "id": f"{current['id']}-vocal-out-for-tease",
+                "target": current["id"],
+                "stem": "vocals",
+                "enabled": False,
+                "at_ms": tease_at,
+                "planner_role": "arrangement-tease",
+            })
+    return woven
+
+
 def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, analyses: dict[str, TrackAnalysis] | None = None) -> dict[str, Any]:
     analyses = analyses or {}
     if getattr(args, "target_bpm", None) is not None and not getattr(args, "track", None):
@@ -1200,6 +1299,7 @@ def session_payload(selected: list[SelectedTrack], args: argparse.Namespace, ana
         previous_track = track
 
     queue_stem_splits(stem_split_queued, args, reason="lead loaded without ready stems; every loaded record should have stems prepared")
+    lead_actions.extend(weave_arrangement(lead_actions[:], analyses, args))
     timeline_events = lead_clips
     actions = lead_actions
     lead_starts = [

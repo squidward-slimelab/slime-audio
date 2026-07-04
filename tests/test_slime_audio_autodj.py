@@ -2108,6 +2108,46 @@ class SlimeAudioAutodjExtendTests(unittest.TestCase):
         self.assertEqual(plan["to_action_id"], "ext-42-lead-002")
 
 
+class WovenArrangementTests(unittest.TestCase):
+    """The body of the set is remixed: a foundation groove persists under the
+    chapter and the next record's vocal teases over the current one's tail.
+    A playlist with transitions is not the assignment."""
+
+    def build(self, ready_all=True):
+        tracks = [selected_track(f"/music/lead-{i}.flac") for i in range(3)]
+        args = autodj_args(min_tracks=3, max_tracks=3, target_bpm=118.0, arrangement="full")
+        ready = {t.path for t in tracks} if ready_all else set()
+        artifacts = {"stem_set_id": "x", "manifest_path": "/stems/m.json", "stems": {n: f"/stems/{n}.wav" for n in ("vocals", "drums", "bass", "other")}}
+        with patch("slime_audio_autodj.ready_stem_source_paths", return_value=ready), patch(
+            "slime_audio_session.ready_stem_artifacts", return_value=artifacts if ready_all else None
+        ):
+            payload = session_payload(tracks, args, analyses={t.path: analysis(t.path) for t in tracks})
+        return payload
+
+    def test_weave_authors_groove_and_teases(self):
+        payload = self.build()
+        actions = payload["actions"]
+        grooves = [a for a in actions if a.get("planner_role") == "arrangement-groove"]
+        teases = [a for a in actions if a.get("planner_role") == "arrangement-tease" and a.get("type") == "load_track"]
+        vocal_outs = [a for a in actions if a.get("planner_role") == "arrangement-tease" and a.get("type") == "stem_toggle"]
+        self.assertEqual(len(grooves), 1)
+        self.assertEqual(grooves[0]["play_stems"], ["drums"])
+        self.assertEqual(grooves[0]["deck"], "deck-1")
+        self.assertGreaterEqual(len(teases), 1)
+        self.assertEqual(teases[0]["play_stems"], ["vocals"])
+        self.assertEqual(len(teases), len(vocal_outs))
+        # The whole thing must still compile and validate.
+        artifacts = {"stem_set_id": "x", "manifest_path": "/stems/m.json", "stems": {n: f"/stems/{n}.wav" for n in ("vocals", "drums", "bass", "other")}}
+        with patch("slime_audio_session.ready_stem_artifacts", return_value=artifacts):
+            session = autodj.parse_session(payload)
+        self.assertTrue(session.stem_groups)
+
+    def test_weave_degrades_gracefully_without_stems(self):
+        payload = self.build(ready_all=False)
+        woven = [a for a in payload["actions"] if str(a.get("planner_role", "")).startswith("arrangement-")]
+        self.assertEqual(woven, [])
+
+
 class MasterTempoPayloadTests(unittest.TestCase):
     """--target-bpm makes the session own tempo instead of baking per-lead shifts."""
 

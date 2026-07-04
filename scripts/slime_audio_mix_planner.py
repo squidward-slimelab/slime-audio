@@ -219,11 +219,19 @@ def tempo_locked_overlap_ms(
     max_pitch_shift_semitones: int,
     *,
     source_pitch_shift: int = 0,
+    stems_ready: bool = False,
 ) -> int:
     plan, _reason = tempo_locked_key_plan(source, target, max_pitch_shift_semitones, source_pitch_shift=source_pitch_shift)
     if plan is None:
         return 0
-    return max(6_000, min(int(phrase_ms(source) or 16_000), shorter_ms // 3))
+    phrase = int(phrase_ms(source) or 16_000)
+    if stems_ready:
+        # With split material on both sides the junction is a real double-deck
+        # passage — several phrases of both records interleaved with a bass
+        # swap — not a fade. A sixteen-second overlap on four-minute songs is
+        # ~95% single-source: a playlist with dressed doorways.
+        return max(24_000, min(4 * phrase, shorter_ms // 2, 64_000))
+    return max(6_000, min(phrase, shorter_ms // 3))
 
 
 def transition_overlap_ms(
@@ -469,11 +477,32 @@ def author_stem_handoff(
             }
         )
 
-    if ready(outgoing):
+    out_ready = ready(outgoing)
+    in_ready = ready(incoming)
+    if out_ready and in_ready and overlap_end_ms - overlap_start_ms >= 24_000:
+        # The full double-deck junction: outgoing vocal steps out, incoming
+        # enters drums-only; at the midpoint the bass swaps hands (one low end
+        # at a time) while the outgoing strips to drums; the incoming opens
+        # fully at the boundary as the outgoing ends.
+        out_id = str(outgoing["source_action_id"])
+        in_id = str(incoming["source_action_id"])
+        mid_ms = overlap_start_ms + (overlap_end_ms - overlap_start_ms) // 2
+        toggle(out_id, "vocals", False, overlap_start_ms, "out")
+        toggle(in_id, "vocals", False, overlap_start_ms, "intro")
+        toggle(in_id, "other", False, overlap_start_ms, "intro")
+        toggle(in_id, "bass", False, overlap_start_ms, "intro")
+        toggle(out_id, "bass", False, mid_ms, "swap")
+        toggle(in_id, "bass", True, mid_ms, "swap")
+        toggle(out_id, "other", False, mid_ms, "strip")
+        toggle(in_id, "vocals", True, overlap_end_ms, "open")
+        toggle(in_id, "other", True, overlap_end_ms, "open")
+        notes.append("double-deck junction: drums-first entry, bass swap at the midpoint, open on the boundary")
+        return notes
+    if out_ready:
         out_id = str(outgoing["source_action_id"])
         toggle(out_id, "vocals", False, overlap_start_ms, "out")
         notes.append("outgoing vocal steps out for the overlap")
-    if ready(incoming):
+    if in_ready:
         in_id = str(incoming["source_action_id"])
         toggle(in_id, "vocals", False, overlap_start_ms, "intro")
         toggle(in_id, "other", False, overlap_start_ms, "intro")
@@ -577,8 +606,15 @@ def plan_future_mix(
         # tempo, so tempo compatibility is free and only key fit decides.
         if target_bpm is not None:
             previous_shift = int(previous.get("pitch_shift_semitones") or 0) if previous else 0
+            pair_stems_ready = (
+                previous is not None
+                and bool(previous.get("source_action_id")) and bool(clip.get("source_action_id"))
+                and ready_stem_artifacts(SESSION_LIBRARY_DB, str(previous.get("path") or "")) is not None
+                and ready_stem_artifacts(SESSION_LIBRARY_DB, str(clip.get("path") or "")) is not None
+            )
             overlap = tempo_locked_overlap_ms(
-                previous_analysis, analysis, shorter, max_pitch_shift_semitones, source_pitch_shift=previous_shift
+                previous_analysis, analysis, shorter, max_pitch_shift_semitones,
+                source_pitch_shift=previous_shift, stems_ready=pair_stems_ready,
             )
         else:
             overlap = transition_overlap_ms(

@@ -44,8 +44,10 @@ deliberate gesture.
 - The set has a nameable arc (rising, sinking, plateau-and-release…) that matches the
   requested vibe from first track to last.
 - Objective signals: locked-lead coverage (% of leads rendered at set tempo),
-  blend/cut ratio in `transition_plans`, overlap durations. A set where most handoffs
-  are bare cuts is a playlist unless the grader can defend each cut musically.
+  blend/cut ratio in `transition_plans`, overlap durations, and **dual-source time**
+  (set_report): the percent of the timeline with two or more records sounding at
+  once. A set living under ~40% dual-source is songs-in-a-row whatever its junctions
+  do; a woven set (foundation grooves, teases, deep junctions) runs well above it.
 - 25: continuous, tempo-coherent, arc audible. 15: mostly blended but arc is vague or
   lock is partial. 8: sporadic blends, playlist bones showing. 0: a playlist.
 

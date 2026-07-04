@@ -112,6 +112,28 @@ def layer_stats(session: dict) -> dict:
     }
 
 
+def dual_source_stats(session: dict) -> dict:
+    """Percent of the timeline with two or more music sources sounding at
+    once — the single number that separates a remix set from a playlist
+    with dressed doorways."""
+    events = []
+    for event in list(session.get("clips", [])) + list(session.get("stem_groups", [])):
+        start = int(event.get("start_ms") or 0)
+        duration = int(event.get("duration_ms") or 0)
+        if duration > 0:
+            events.append((start, start + duration))
+    if not events:
+        return {"dual_source_pct": None, "timeline_ms": 0}
+    points = sorted({t for pair in events for t in pair})
+    total = points[-1] - points[0]
+    dual = 0
+    for left, right in zip(points, points[1:]):
+        active = sum(1 for s, e in events if s <= left and e >= right)
+        if active >= 2:
+            dual += right - left
+    return {"dual_source_pct": round(dual / total, 3) if total else None, "timeline_ms": total}
+
+
 def motion_stats(session: dict) -> dict:
     ramps = session.get("deck_automations", []) + session.get("automations", [])
     moving = 0
@@ -167,6 +189,7 @@ def main() -> int:
         "transforms": transform_stats(leads),
         "layers": layer_stats(session),
         "motion": motion_stats(session),
+        "dual_source": dual_source_stats(session),
         "mic_lean_ins": len(session.get("mic_lean_ins", [])),
     }
     if args.history and args.history.exists():
@@ -192,6 +215,9 @@ def main() -> int:
     print(f"layers       : {report['layers']['stem_layers']} stem layers; actions {report['layers']['actions'] or 'none'}")
     m = report["motion"]
     print(f"motion       : {m['moving_ramps']}/{m['automation_ramps']} ramps actually move ({m['params'] or 'none'})")
+    ds = report["dual_source"]
+    if ds["dual_source_pct"] is not None:
+        print(f"dual-source  : {ds['dual_source_pct']:.0%} of the timeline has 2+ records sounding (remix-set feel lives here)")
     print(f"mic          : {report['mic_lean_ins']} lean-ins")
     if "timing" in report:
         print(f"timing       : material selected {report['timing']['material_selected']} → first audio {report['timing']['first_audio']}")
