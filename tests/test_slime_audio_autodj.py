@@ -2131,12 +2131,18 @@ class WovenArrangementTests(unittest.TestCase):
     def test_weave_authors_groove_and_teases(self):
         payload = self.build()
         actions = payload["actions"]
-        grooves = [a for a in actions if a.get("planner_role") == "arrangement-groove"]
+        groove_beds = [a for a in actions if a.get("planner_role") == "arrangement-groove" and a.get("type") == "load_track"]
+        groove_toggles = [a for a in actions if a.get("planner_role") == "arrangement-groove" and a.get("type") == "stem_toggle"]
         teases = [a for a in actions if a.get("planner_role") == "arrangement-tease" and a.get("type") == "load_track"]
         vocal_outs = [a for a in actions if a.get("planner_role") == "arrangement-tease" and a.get("type") == "stem_toggle"]
-        self.assertEqual(len(grooves), 1)
-        self.assertEqual(grooves[0]["play_stems"], ["drums"])
-        self.assertEqual(grooves[0]["deck"], "deck-1")
+        # A drum SWAP per following lead: the foundation's drums carry at an
+        # audible level while the host's drums step out and back.
+        self.assertEqual(len(groove_beds), 2)
+        for bed in groove_beds:
+            self.assertEqual(bed["play_stems"], ["drums"])
+            self.assertEqual(bed["deck"], "deck-1")
+            self.assertGreater(bed["gain_db"], -10.0)
+        self.assertEqual(len(groove_toggles), 4)  # drums out + back per host
         self.assertGreaterEqual(len(teases), 1)
         self.assertEqual(teases[0]["play_stems"], ["vocals"])
         self.assertEqual(len(teases), len(vocal_outs))

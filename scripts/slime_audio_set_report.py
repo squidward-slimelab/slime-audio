@@ -120,7 +120,9 @@ def dual_source_stats(session: dict) -> dict:
     for event in list(session.get("clips", [])) + list(session.get("stem_groups", [])):
         start = int(event.get("start_ms") or 0)
         duration = int(event.get("duration_ms") or 0)
-        if duration > 0:
+        # An inaudible layer is not a second source: quiet stacking must not
+        # inflate the number that defines a remix set.
+        if duration > 0 and float(event.get("gain_db") or 0.0) > -10.0:
             events.append((start, start + duration))
     if not events:
         return {"dual_source_pct": None, "timeline_ms": 0}

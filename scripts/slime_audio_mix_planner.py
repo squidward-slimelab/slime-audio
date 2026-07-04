@@ -440,6 +440,25 @@ def transition_plan_record(
     return record
 
 
+def snap_to_clip_beat(timeline_ms: int, clip: dict[str, Any], analysis: TrackAnalysis | None, *, bars: bool = True) -> int:
+    """Snap a timeline instant onto a rendered clip's beat grid.
+
+    Junctions placed by raw arithmetic land off the beat; an incoming record
+    must arrive on the outgoing record's bar."""
+    grid = getattr(analysis, "beatgrid", None) if analysis else None
+    if grid is None or not grid.bpm or grid.beat_offset_ms is None:
+        return timeline_ms
+    factor = 1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0
+    if factor <= 0:
+        return timeline_ms
+    start = int(clip.get("start_ms") or 0)
+    trim = int(clip.get("trim_start_ms") or 0)
+    step = (60_000.0 / float(grid.bpm)) * (4 if bars else 1)
+    source_pos = trim + (timeline_ms - start) * factor
+    k = round((source_pos - grid.beat_offset_ms) / step)
+    return int(round(start + (grid.beat_offset_ms + k * step - trim) / factor))
+
+
 def author_stem_handoff(
     planner_actions: list[dict[str, Any]],
     *,
@@ -625,6 +644,9 @@ def plan_future_mix(
                 max_pitch_shift_semitones=max_pitch_shift_semitones,
             )
         start_ms = cursor if previous is None else max(lock_before_ms, clip_end(previous) - overlap)
+        if previous is not None:
+            # The incoming record arrives on the outgoing record's bar.
+            start_ms = max(lock_before_ms, snap_to_clip_beat(start_ms, previous, previous_analysis))
         end_ms = start_ms + duration_ms
         deck = choose_deck(rebuilt, start_ms, end_ms, deck_order=deck_order, avoid={previous_deck} if previous_deck else set())
 

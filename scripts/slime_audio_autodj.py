@@ -1116,6 +1116,70 @@ def order_by_key_chain(selected: list[SelectedTrack], analyses: dict[str, TrackA
     return ordered
 
 
+def clip_tempo_factor_for(action: dict[str, Any], analysis: TrackAnalysis | None, args: argparse.Namespace) -> float:
+    """Rendered tempo factor of a lead under the master (mirrors the session
+    layer's warp so beat math can run at authoring time)."""
+    target = getattr(args, "target_bpm", None)
+    if target is None or analysis is None or not analysis.bpm:
+        return 1.0
+    from slime_audio_session import master_tempo_shift_pct
+
+    shift = master_tempo_shift_pct(float(analysis.bpm), float(target), abs(float(getattr(args, "max_tempo_stretch_pct", 16.0))))
+    return 1.0 + (shift or 0.0) / 100.0
+
+
+def snap_to_host_beat(
+    timeline_ms: int,
+    host_action: dict[str, Any],
+    host_analysis: TrackAnalysis | None,
+    args: argparse.Namespace,
+    *,
+    bars: bool = True,
+) -> int:
+    """Snap a timeline instant onto the host record's rendered beat grid.
+
+    Entries and toggles authored at raw millisecond arithmetic land off the
+    beat and sound like stumbles; every woven layer must enter where the host
+    record's grid says beats live.
+    """
+    grid = getattr(host_analysis, "beatgrid", None) if host_analysis else None
+    if grid is None or not grid.bpm or grid.beat_offset_ms is None:
+        return timeline_ms
+    factor = clip_tempo_factor_for(host_action, host_analysis, args)
+    start = int(host_action.get("at_ms") or 0)
+    trim = int(host_action.get("trim_start_ms") or 0)
+    beat_src = 60_000.0 / float(grid.bpm)
+    step = beat_src * (4 if bars else 1)
+    source_pos = trim + (timeline_ms - start) * factor
+    k = round((source_pos - grid.beat_offset_ms) / step)
+    snapped_source = grid.beat_offset_ms + k * step
+    return int(round(start + (snapped_source - trim) / factor))
+
+
+def phase_aligned_trim(
+    entry_timeline_ms: int,
+    host_action: dict[str, Any],
+    host_analysis: TrackAnalysis | None,
+    guest_analysis: TrackAnalysis | None,
+    base_trim_ms: int,
+    args: argparse.Namespace,
+) -> int:
+    """Trim for a guest layer so its beats land on the host's beats.
+
+    Two records at the same rendered BPM but arbitrary phase produce flams;
+    a guest stem layer must start ON one of its own beats at an instant the
+    host is also on a beat. Entry time should already be host-beat-snapped."""
+    grid = getattr(guest_analysis, "beatgrid", None) if guest_analysis else None
+    if grid is None or not grid.bpm or grid.beat_offset_ms is None:
+        return base_trim_ms
+    beat = 60_000.0 / float(grid.bpm)
+    k = max(0, -(-(base_trim_ms - grid.beat_offset_ms) // beat))  # ceil to next beat at/after base trim
+    import math
+
+    k = math.ceil((base_trim_ms - grid.beat_offset_ms) / beat)
+    return int(round(grid.beat_offset_ms + max(0, k) * beat))
+
+
 def weave_arrangement(
     lead_actions: list[dict[str, Any]],
     analyses: dict[str, TrackAnalysis],
@@ -1145,28 +1209,62 @@ def weave_arrangement(
             continue
         foundation = chapter[0]
         foundation_path = str(foundation.get("source_path") or "")
-        chapter_end_ms = max(int(a.get("at_ms") or 0) + int(a.get("duration_ms") or 0) for a in chapter[1:])
-        foundation_end_ms = int(foundation.get("at_ms") or 0) + int(foundation.get("duration_ms") or 0)
-        if foundation_path in ready_paths and chapter_end_ms - foundation_end_ms >= 60_000:
-            analysis = analyses.get(foundation_path)
-            bed = {
-                "type": "load_track",
-                "id": f"{foundation['id']}-groove",
-                "deck": "deck-1",
-                "source_path": foundation_path,
-                "at_ms": foundation_end_ms,
-                "trim_start_ms": foundation.get("trim_start_ms", 0),
-                "duration_ms": chapter_end_ms - foundation_end_ms,
-                "gain_db": -7.0,
-                "play_stems": ["drums"],
-                "fade_in_ms": 2_000,
-                "fade_out_ms": 4_000,
-                "planner_role": "arrangement-groove",
-                "kind": "bed",
-            }
-            if analysis is not None and analysis.bpm:
-                bed["source_bpm"] = float(analysis.bpm)
-            woven.append(bed)
+        foundation_analysis = analyses.get(foundation_path)
+        if foundation_path in ready_paths:
+            # The groove is a DRUM SWAP, per lead: the host record's own drums
+            # step out while the foundation's drums carry — audible by
+            # construction, at real volume, never a -7dB stack a listener
+            # cannot hear. One segment per following lead, beat-snapped to
+            # the host's grid and phase-aligned, kept a phrase clear of the
+            # junction windows on both ends.
+            for host in chapter[1:]:
+                host_path = str(host.get("source_path") or "")
+                if host_path not in ready_paths:
+                    continue
+                host_analysis = analyses.get(host_path)
+                host_start = int(host.get("at_ms") or 0)
+                host_end = host_start + int(host.get("duration_ms") or 0)
+                window_start = snap_to_host_beat(host_start + 40_000, host, host_analysis, args)
+                window_end = snap_to_host_beat(host_end - 40_000, host, host_analysis, args)
+                if window_end - window_start < 32_000:
+                    continue
+                base_trim = int(foundation.get("trim_start_ms") or 0)
+                bed = {
+                    "type": "load_track",
+                    "id": f"{host['id']}-groove-swap",
+                    "deck": "deck-1",
+                    "source_path": foundation_path,
+                    "at_ms": window_start,
+                    "trim_start_ms": phase_aligned_trim(window_start, host, host_analysis, foundation_analysis, base_trim, args),
+                    "duration_ms": window_end - window_start,
+                    "gain_db": -3.0,
+                    "play_stems": ["drums"],
+                    "fade_in_ms": 400,
+                    "fade_out_ms": 400,
+                    "planner_role": "arrangement-groove",
+                    "kind": "bed",
+                }
+                if foundation_analysis is not None and foundation_analysis.bpm:
+                    bed["source_bpm"] = float(foundation_analysis.bpm)
+                woven.append(bed)
+                woven.append({
+                    "type": "stem_toggle",
+                    "id": f"{host['id']}-drums-out-for-groove",
+                    "target": host["id"],
+                    "stem": "drums",
+                    "enabled": False,
+                    "at_ms": window_start,
+                    "planner_role": "arrangement-groove",
+                })
+                woven.append({
+                    "type": "stem_toggle",
+                    "id": f"{host['id']}-drums-back",
+                    "target": host["id"],
+                    "stem": "drums",
+                    "enabled": True,
+                    "at_ms": window_end,
+                    "planner_role": "arrangement-groove",
+                })
         # The tease: next record's vocal over this record's instrumental tail,
         # pitched into the host's tonal center (relative-major alignment, max
         # 2 st) — or skipped when the keys genuinely don't reach.
@@ -1193,6 +1291,7 @@ def weave_arrangement(
             current_end = int(current.get("at_ms") or 0) + int(current.get("duration_ms") or 0)
             tease_ms = 24_000
             tease_at = max(int(current.get("at_ms") or 0), current_end - tease_ms - 8_000)
+            tease_at = snap_to_host_beat(tease_at, current, current_analysis, args)
             if current_end - tease_at < 16_000:
                 continue
             follow_analysis = analyses.get(follow_path)
@@ -1202,7 +1301,7 @@ def weave_arrangement(
                 "deck": "deck-4",
                 "source_path": follow_path,
                 "at_ms": tease_at,
-                "trim_start_ms": following.get("trim_start_ms", 0),
+                "trim_start_ms": phase_aligned_trim(tease_at, current, current_analysis, follow_analysis_key, int(following.get("trim_start_ms") or 0), args),
                 "duration_ms": min(tease_ms, current_end - tease_at),
                 "gain_db": -3.0,
                 "play_stems": ["vocals"],
