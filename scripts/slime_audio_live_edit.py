@@ -14,6 +14,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SESSION = REPO_ROOT / "runtime" / "mix-session.json"
 DEFAULT_STATE = REPO_ROOT / "runtime" / "mix-session-state.json"
 DEFAULT_HISTORY = REPO_ROOT / "runtime" / "play-history.jsonl"
+DEFAULT_ACTIVE_POINTER = REPO_ROOT / "runtime" / "active-set.json"
+
+
+def resolve_live_defaults(args) -> None:
+    """Follow the active set pointer when --session/--state are not given.
+
+    The fixed mix-session.json default silently landed live edits on a
+    dormant session (found in production twice); editing what is actually
+    playing must be the default behavior.
+    """
+    if args.session == DEFAULT_SESSION or args.state == DEFAULT_STATE:
+        try:
+            pointer = json.loads(DEFAULT_ACTIVE_POINTER.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return
+        if args.session == DEFAULT_SESSION and pointer.get("active_session_path"):
+            args.session = Path(str(pointer["active_session_path"]))
+        if args.state == DEFAULT_STATE and pointer.get("active_state_path"):
+            args.state = Path(str(pointer["active_state_path"]))
 
 
 def utc_now() -> str:
@@ -217,6 +236,7 @@ def main() -> int:
     routine_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
 
     args = parser.parse_args()
+    resolve_live_defaults(args)
 
     if args.command == "add-action":
         action_payload = json.loads(args.action_json)
