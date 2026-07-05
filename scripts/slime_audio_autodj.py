@@ -3231,6 +3231,40 @@ def extend_set(args: argparse.Namespace) -> int:
                         lean["start"] = str(new_start)
                         lean.pop("start_ms", None)
                         moved_sign_offs.append({"id": lean.get("id"), "from_ms": lean_start, "to_ms": new_start})
+                # A parked line places the moment its record lands.
+                notes_blob = published.setdefault("notes", {})
+                still_parked = []
+                for entry in notes_blob.get("parked_mic_drops", []) or []:
+                    hint_tokens = {tok for tok in re.sub(r"[^a-z0-9]+", " ", str(entry.get("hint") or "").lower()).split() if len(tok) >= 4}
+                    landed = None
+                    for action in published.get("actions", []) or []:
+                        if action.get("type") != "load_track":
+                            continue
+                        at = int(action.get("at_ms") or 0)
+                        if at < total_ms or at + 4_000 < lock_before_ms:
+                            continue
+                        path_tokens = {tok for tok in re.sub(r"[^a-z0-9]+", " ", str(action.get("source_path") or "").lower()).split() if len(tok) >= 4}
+                        if hint_tokens & path_tokens:
+                            landed = at + 4_000
+                            break
+                    if landed is not None:
+                        published = add_mic_lean_in(
+                            published,
+                            lean_id=str(entry.get("id") or f"mic-parked-{landed}"),
+                            start=str(landed),
+                            text=str(entry.get("text") or ""),
+                            deck=VOCAL_DECK,
+                            voice=None,
+                            rate=None,
+                            volume=1.45,
+                            duck_volume=0.45,
+                            lowpass_hz=1400.0,
+                            duck_ms=3500,
+                        )
+                        moved_sign_offs.append({"id": entry.get("id"), "from_ms": None, "to_ms": landed, "parked": True})
+                    else:
+                        still_parked.append(entry)
+                published.setdefault("notes", {})["parked_mic_drops"] = still_parked
                 write_payload(session_path, published)
                 if args.history is not None:
                     args.history.parent.mkdir(parents=True, exist_ok=True)
@@ -3371,8 +3405,17 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
         if best_site is not None:
             assignments[index] = best_site
             taken_sites.add(best_site)
+    # An EXPLICIT hint that matched nothing means the record is not in the
+    # set (yet) — park the line loudly instead of spread-slotting it (a
+    # September callout once aired at 0:12 because September arrived via a
+    # later extend). Extends place parked lines when their record lands.
+    parked: list[dict[str, str]] = []
+    for index in range(len(texts)):
+        if index not in assignments and targets[index] and index != len(texts) - 1:
+            parked.append({"hint": targets[index], "text": texts[index], "id": f"mic-drop-{index + 1:02d}"})
+    parked_indices = {int(p["id"].split("-")[-1]) - 1 for p in parked}
     remaining_sites = [s for s in spaced if s not in taken_sites]
-    unmatched = [i for i in range(len(texts)) if i not in assignments]
+    unmatched = [i for i in range(len(texts)) if i not in assignments and i not in parked_indices]
     # The FINAL line is the sign-off by convention: if it names no record it
     # takes the LATEST remaining site ("that's the set" once aired three
     # tracks early from even-spread filling).
@@ -3391,7 +3434,11 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
     for i, site in zip(unmatched, fill):
         assignments[i] = site
 
+    if parked:
+        payload.setdefault("notes", {}).setdefault("parked_mic_drops", []).extend(parked)
     placed: list[dict[str, Any]] = []
+    for entry in parked:
+        placed.append({"id": entry["id"], "at_ms": None, "text": entry["text"], "lands_on": f"PARKED — no record matches hint '{entry['hint']}'; it will place if an extend adds that record"})
     for index, text in enumerate(texts):
         if index not in assignments:
             continue
