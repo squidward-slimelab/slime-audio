@@ -3198,6 +3198,10 @@ def extend_set(args: argparse.Namespace) -> int:
                 "extension_at_ms": total_ms,
                 "playhead_ms": playhead_ms,
                 "lock_before_ms": lock_before_ms,
+                # Agents kept extending once and stopping while still short of
+                # the declared bound; the residual gap must stare back.
+                "bound_gap_ms": max(0, effective_target - new_total_ms) if effective_target > 0 else 0,
+                "new_total_ms": new_total_ms,
                 "commentary_slots": block_commentary_slots,
                 "planner": planner,
                 "structural": structural,
