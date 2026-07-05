@@ -3288,6 +3288,13 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
             taken_sites.add(best_site)
     remaining_sites = [s for s in spaced if s not in taken_sites]
     unmatched = [i for i in range(len(texts)) if i not in assignments]
+    # The FINAL line is the sign-off by convention: if it names no record it
+    # takes the LATEST remaining site ("that's the set" once aired three
+    # tracks early from even-spread filling).
+    if unmatched and unmatched[-1] == len(texts) - 1 and remaining_sites:
+        assignments[unmatched[-1]] = remaining_sites[-1]
+        remaining_sites = remaining_sites[:-1]
+        unmatched = unmatched[:-1]
     count = min(len(unmatched), len(remaining_sites))
     if count == 1:
         fill = [remaining_sites[0]]

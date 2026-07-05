@@ -607,11 +607,27 @@ def plan_future_mix(
         next_payload.pop("master_key_automation")
     analyses = {path: coerce_analysis(analysis) for path, analysis in analyses_by_path.items()}
     original_clips = sorted(next_payload.get("clips", []), key=lambda clip: (int(clip.get("start_ms", 0)), str(clip.get("deck")), str(clip.get("id"))))
-    locked = [clip for clip in original_clips if int(clip.get("start_ms", 0)) < lock_before_ms]
+    # Multi-segment loads (stem-toggled records) are IMMOVABLE in replans:
+    # write_back keeps their actions authoritative and discards planner edits
+    # to their segments, so any placement computed against a re-placed segment
+    # never sticks — new leads planned that way landed inside the authoritative
+    # segments and validation crashed (the tail-merge crash of tests 35-37).
+    # Plan around them at their real positions instead.
+    segment_owner_counts: dict[str, int] = {}
+    for event in list(next_payload.get("clips", [])) + list(next_payload.get("stem_groups", []) or []):
+        source = str(event.get("source_action_id") or "")
+        if source and event.get("deck_clock_segment"):
+            segment_owner_counts[source] = segment_owner_counts.get(source, 0) + 1
+
+    def immovable(clip: dict[str, Any]) -> bool:
+        source = str(clip.get("source_action_id") or "")
+        return bool(source) and segment_owner_counts.get(source, 0) > 1
+
+    locked = [clip for clip in original_clips if int(clip.get("start_ms", 0)) < lock_before_ms or immovable(clip)]
     after_horizon = [
         clip
         for clip in original_clips
-        if plan_until_ms is not None and int(clip.get("start_ms", 0)) >= plan_until_ms
+        if plan_until_ms is not None and int(clip.get("start_ms", 0)) >= plan_until_ms and not immovable(clip)
     ]
     protected = [*locked, *after_horizon]
     future = [
@@ -620,6 +636,7 @@ def plan_future_mix(
         if int(clip.get("start_ms", 0)) >= lock_before_ms
         and (plan_until_ms is None or int(clip.get("start_ms", 0)) < plan_until_ms)
         and clip.get("kind") != "planner-double"
+        and not immovable(clip)
     ]
     if not future:
         if has_deck_loads:
