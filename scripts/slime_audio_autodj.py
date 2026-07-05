@@ -3387,6 +3387,27 @@ def continue_set(args: argparse.Namespace) -> int:
             stage = "stem_readiness"
             stem_readiness = stem_readiness_report(selected, args)
             payload = load_session_payload(session_path)
+            # An underbuilt bounded set is the top graded-point sink at longer
+            # formats: agents compose ~20 min against a 30-minute ask, then
+            # the diagnose-and-fill dance eats their edit window. Say it LOUD
+            # at compose time with the exact gap — the sizing extend must be
+            # the DJ's next command, before the lock eats the front.
+            underbuilt_ms = 0
+            declared_ms = int(getattr(args, "set_length_ms", 0) or 0)
+            if declared_ms > 0:
+                composed_ms = session_duration_ms(parse_session(payload))
+                if composed_ms < declared_ms - 90_000:
+                    underbuilt_ms = declared_ms - composed_ms
+                    advisories.append(
+                        {
+                            "guard": "bound",
+                            "warning": (
+                                f"UNDERBUILT: composed {composed_ms}ms of the declared {declared_ms}ms — "
+                                f"run `extend --track ...` sized to ~{underbuilt_ms}ms as your NEXT command, "
+                                "before any live edits or checks; the render lock eats the front while you wait"
+                            ),
+                        }
+                    )
             stage = "session_validate"
             validate = subprocess.run(
                 [sys.executable, "scripts/slime_audio_session.py", "validate", str(session_path)],
@@ -3414,6 +3435,7 @@ def continue_set(args: argparse.Namespace) -> int:
                 "advisories": advisories,
                 "stem_readiness": stem_readiness,
                 "mic_drops_placed": placed_mic_drops,
+                "underbuilt_ms": underbuilt_ms,
                 # The DJ's performance-pass coordinates: never reconstruct
                 # junction timings from raw plan JSON (two cold agents burned
                 # their edit window doing exactly that). Vocal collisions are
