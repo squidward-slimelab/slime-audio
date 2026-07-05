@@ -3332,10 +3332,20 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
     if leads:
         sites.append(int(leads[0].get("start_ms") or 0) + 12_000)
     seen_actions: set[str] = set()
+    intro_site_registered = False
     actions_by_id = {
         str(action.get("id")): action for action in payload.get("actions", []) or [] if action.get("id")
     }
     record_sites: list[tuple[int, str]] = []
+    if leads and not intro_site_registered:
+        # The opener has no junction; the intro slot IS its site — a hint
+        # targeting the first record once parked forever because nothing
+        # matchable existed for it.
+        opener = leads[0]
+        opener_action = str(opener.get("source_action_id") or opener.get("id") or "")
+        opener_path = str(opener.get("path") or "") or str((actions_by_id.get(opener_action) or {}).get("source_path") or "")
+        record_sites.append((int(opener.get("start_ms") or 0) + 12_000, opener_path))
+        intro_site_registered = True
     for clip in leads:
         action = str(clip.get("source_action_id") or clip.get("id") or "")
         start = int(clip.get("start_ms") or 0)
@@ -3388,8 +3398,14 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
     # before any token matching runs (a sign-off that happened to mention a
     # record aired 'that's the set' thirty minutes early).
     if len(texts) > 1 and spaced:
-        assignments[len(texts) - 1] = spaced[-1]
-        taken_sites.add(spaced[-1])
+        # End-of-timeline semantics: composing short then extending is the
+        # NORMAL flow now, so the interim last junction is mid-set by
+        # definition ('that's the cookout' once aired 14 minutes early).
+        # The extend carry then rides end -> end.
+        composed_end_ms = max((int(e.get("start_ms") or 0) + int(e.get("duration_ms") or 0) for coll in ("clips", "stem_groups") for e in compiled.get(coll, [])), default=spaced[-1])
+        sign_off_site = max(spaced[-1], composed_end_ms - 30_000)
+        assignments[len(texts) - 1] = sign_off_site
+        taken_sites.add(sign_off_site)
     for index, text in enumerate(texts):
         if index in assignments:
             continue
