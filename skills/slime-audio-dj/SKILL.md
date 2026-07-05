@@ -31,7 +31,7 @@ python3 scripts/slime_audio_autodj.py continue --track ... --track ... \
   --mic-drop "your sign-off"
 ```
 
-**Write your mic lines AT LAUNCH via `--mic-drop`** (repeatable, in set order): you already know the tracklist, and compose-time is the only moment the front of a short set is still writable — the system places your words into junction gaps (where the choreography has pulled the outgoing vocal) across the whole set. The words must be yours: about the music, never templated, never about talking.
+**Write your mic lines AT LAUNCH via `--mic-drop`** (repeatable, in set order): you already know the tracklist, and compose-time is the only moment the front of a short set is still writable — the system places your words into junction gaps (where the choreography has pulled the outgoing vocal) across the whole set. **Target a specific record with a `record hint::` prefix** — `--mic-drop "uptown funk:: Here it comes, sing loud"` places the line at that record's entrance and speaks only the part after `::`. Untargeted lines place by the records they name (the last line is always the sign-off and takes the ending). ALWAYS check `mic_drops_placed` in the output — each entry names the record it lands on. The words must be yours: about the music, never templated, never about talking.
 
 The instant `continue` returns, in this order:
 

@@ -3332,6 +3332,22 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
         stem = re.sub(r"[^a-z0-9]+", " ", path.lower())
         return {tok for tok in stem.split() if len(tok) >= 4 and tok not in {"music", "flac", "disc", "greatest", "hits", "best"}}
 
+    # A line may carry an explicit target: "record hint:: the spoken words".
+    # Token matching cannot see intent (a line ABOUT a record that never
+    # names it once aired 11 minutes early); the hint names the record, the
+    # part after :: is what airs.
+    targets: list[str] = []
+    spoken: list[str] = []
+    for text in texts:
+        if "::" in text:
+            hint, _, words_part = text.partition("::")
+            targets.append(hint.strip())
+            spoken.append(words_part.strip() or hint.strip())
+        else:
+            targets.append("")
+            spoken.append(text)
+    texts = spoken
+
     assignments: dict[int, int] = {}
     taken_sites: set[int] = set()
     # The FINAL line is the sign-off, unconditionally: it takes the LAST site
@@ -3343,7 +3359,8 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
     for index, text in enumerate(texts):
         if index in assignments:
             continue
-        words = {tok for tok in re.sub(r"[^a-z0-9]+", " ", text.lower()).split() if len(tok) >= 4}
+        match_source = targets[index] or text
+        words = {tok for tok in re.sub(r"[^a-z0-9]+", " ", match_source.lower()).split() if len(tok) >= 4}
         best_site, best_score = None, 0
         for site, path in record_sites:
             if site in taken_sites:

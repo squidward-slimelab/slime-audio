@@ -1027,11 +1027,17 @@ def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any], *, 
         # dropping everything role-tagged erased the locked front junctions'
         # vocal choreography on every extend — five cold sets aired
         # stacked-vocal openings that had been authored correctly at launch.
+        # Immovable (multi-segment) loads are not re-planned, so their
+        # existing choreography must survive the strip too — the lock-only
+        # rule erased every immovable lead's junction toggles on each extend
+        # and nothing re-authored them (four bare junctions aired).
+        immovable_targets = {source for source, count in segment_counts.items() if count > 1}
         original_entries = [
             entry
             for entry in result.get(key, []) or []
             if not str(entry.get("planner_role") or "").startswith(role_prefix)
             or planner_entry_start_ms(entry) < lock_before_ms
+            or str(entry.get("target") or "") in immovable_targets
         ]
         planner_entries = [
             entry
