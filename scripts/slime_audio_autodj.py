@@ -3274,7 +3274,15 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
 
     assignments: dict[int, int] = {}
     taken_sites: set[int] = set()
+    # The FINAL line is the sign-off, unconditionally: it takes the LAST site
+    # before any token matching runs (a sign-off that happened to mention a
+    # record aired 'that's the set' thirty minutes early).
+    if len(texts) > 1 and spaced:
+        assignments[len(texts) - 1] = spaced[-1]
+        taken_sites.add(spaced[-1])
     for index, text in enumerate(texts):
+        if index in assignments:
+            continue
         words = {tok for tok in re.sub(r"[^a-z0-9]+", " ", text.lower()).split() if len(tok) >= 4}
         best_site, best_score = None, 0
         for site, path in record_sites:
