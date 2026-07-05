@@ -728,6 +728,9 @@ function utilityHeader(lane) {
 }
 
 function renderTimeline() {
+  // Never rebuild the stage out from under an active scrub — replaceChildren
+  // would destroy the needle the user is holding.
+  if (state.playheadDragging) { state.timelineRebuildPending = true; return; }
   const dashboard = state.dashboard;
   const scale = timelineScale(dashboard?.session?.duration_ms);
   state.scale = scale;
@@ -828,56 +831,86 @@ function renderTimeline() {
     els.timeline.append(row);
   }
 
-  const playhead = document.createElement("div");
-  playhead.className = "playhead";
-  live.playheadEl = playhead;
-  attachPlayheadScrub(playhead);
+  // Reuse the needle element across rebuilds so its drag state and identity
+  // survive; only wire the scrub handler once.
+  let playhead = live.playheadEl;
+  if (!playhead) {
+    playhead = document.createElement("div");
+    playhead.className = "playhead";
+    live.playheadEl = playhead;
+    attachPlayheadScrub(playhead);
+  }
   els.timeline.append(playhead);
   updatePlayhead();
   updateKnobs(true);
   hydrateWaveforms();
 }
 
-/* The playhead IS the scrub control: grab the needle and drag to seek. */
+/* The playhead IS the scrub control: grab the needle and drag to seek.
+ *
+ * The drag lifecycle lives on `window`, not on the needle element: the
+ * timeline rebuilds itself on every poll that changes the event signature
+ * (replaceChildren destroys the needle), so element-bound listeners and
+ * pointer capture vanished mid-drag — leaving state.playheadDragging stuck
+ * true, so the freshly-built needle then chased the cursor on plain hover.
+ * Window listeners survive the rebuild; the move handler looks up the live
+ * needle fresh each frame; and a zero-button move ends a drag that lost its
+ * pointerup (released off-window). renderTimeline also skips rebuilding
+ * while a drag is active. */
+function playheadMsFromPointer(event) {
+  const scale = state.scale;
+  if (!scale || !scale.stageWidth) return null;
+  const stageRect = els.timeline.getBoundingClientRect();
+  const headerW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--lane-header-w")) || 0;
+  const stageX = event.clientX - stageRect.left - headerW;
+  return clamp((stageX / scale.stageWidth) * scale.duration, 0, scale.duration);
+}
+
+function endPlayheadDrag(event, { seek }) {
+  window.removeEventListener("pointermove", onPlayheadMove);
+  window.removeEventListener("pointerup", onPlayheadUp);
+  window.removeEventListener("pointercancel", onPlayheadCancel);
+  if (!state.playheadDragging) return;
+  state.playheadDragging = false;
+  if (live.playheadEl) live.playheadEl.classList.remove("dragging");
+  if (seek) {
+    const ms = playheadMsFromPointer(event);
+    if (ms !== null) sendTransport("seek", { position_ms: Math.round(ms) });
+  }
+  // Apply any timeline update that arrived (and was deferred) mid-drag.
+  if (state.timelineRebuildPending) {
+    state.timelineRebuildPending = false;
+    renderTimeline();
+  }
+}
+
+function onPlayheadMove(event) {
+  if (!state.playheadDragging) return;
+  // Button released off-window (or the release event never reached us): end
+  // the drag instead of letting hover keep dragging the needle.
+  if (event.buttons === 0) { endPlayheadDrag(event, { seek: true }); return; }
+  const ms = playheadMsFromPointer(event);
+  if (ms === null || !state.scale) return;
+  const playhead = live.playheadEl;
+  if (!playhead) return;
+  const left = clamp((ms / state.scale.duration) * state.scale.stageWidth, 0, state.scale.stageWidth);
+  playhead.style.setProperty("--playhead-x", `${left}px`);
+  if (els.playheadTime) els.playheadTime.textContent = fmtMs(ms);
+  if (els.transportSeek && !els.transportSeek.disabled) els.transportSeek.value = String(Math.round(ms));
+}
+
+function onPlayheadUp(event) { endPlayheadDrag(event, { seek: true }); }
+function onPlayheadCancel(event) { endPlayheadDrag(event, { seek: false }); }
+
 function attachPlayheadScrub(playhead) {
-  const msFromPointer = (event) => {
-    const scale = state.scale;
-    if (!scale) return null;
-    // Measure from the stage element itself (it scrolls with the content, so
-    // no scrollLeft math) and subtract the lane header column: time zero
-    // starts where the tracks start, not at the container's left edge.
-    const stageRect = els.timeline.getBoundingClientRect();
-    const headerW = parseFloat(getComputedStyle(playhead).left) || 0;
-    const stageX = event.clientX - stageRect.left - headerW;
-    return clamp((stageX / scale.stageWidth) * scale.duration, 0, scale.duration);
-  };
   playhead.addEventListener("pointerdown", (event) => {
-    if (!state.scale) return;
+    if (!state.scale || event.button !== 0) return;
     event.preventDefault();
     state.playheadDragging = true;
     playhead.classList.add("dragging");
-    playhead.setPointerCapture(event.pointerId);
-  });
-  playhead.addEventListener("pointermove", (event) => {
-    if (!state.playheadDragging) return;
-    const ms = msFromPointer(event);
-    if (ms === null) return;
-    const left = clamp((ms / state.scale.duration) * state.scale.stageWidth, 0, state.scale.stageWidth);
-    playhead.style.setProperty("--playhead-x", `${left}px`);
-    if (els.playheadTime) els.playheadTime.textContent = fmtMs(ms);
-    if (els.transportSeek && !els.transportSeek.disabled) els.transportSeek.value = String(Math.round(ms));
-  });
-  const finish = (event) => {
-    if (!state.playheadDragging) return;
-    state.playheadDragging = false;
-    playhead.classList.remove("dragging");
-    const ms = msFromPointer(event);
-    if (ms !== null) sendTransport("seek", { position_ms: Math.round(ms) });
-  };
-  playhead.addEventListener("pointerup", finish);
-  playhead.addEventListener("pointercancel", () => {
-    state.playheadDragging = false;
-    playhead.classList.remove("dragging");
+    window.addEventListener("pointermove", onPlayheadMove);
+    window.addEventListener("pointerup", onPlayheadUp);
+    window.addEventListener("pointercancel", onPlayheadCancel);
   });
 }
 
