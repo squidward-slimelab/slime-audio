@@ -240,7 +240,7 @@ def main() -> int:
     instant_double_parser.add_argument(
         "--source-id",
         required=True,
-        help="COMPILED clip/segment id, not a load action id.",
+        help="A load action id, compiled segment id, or raw clip id.",
     )
     instant_double_parser.add_argument("--id", required=True)
     instant_double_parser.add_argument("--start")
@@ -281,7 +281,7 @@ def main() -> int:
     routine_parser.add_argument(
         "--source-id",
         required=True,
-        help="COMPILED clip/segment id (as shown by the dashboard or set report), not a load action id — loads compile into segments and routines target the rendered clip.",
+        help="A load action id, compiled segment id, or raw clip id — loads resolve through the rendered deck clock.",
     )
     routine_parser.add_argument("--id", required=True)
     routine_parser.add_argument("--recipe", required=True)

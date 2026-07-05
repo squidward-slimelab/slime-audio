@@ -3428,12 +3428,29 @@ def add_instant_double_routine(
         known = ", ".join(sorted([*SUPPORTED_INSTANT_DOUBLE_RECIPES, *DEFERRED_ROUTINE_RECIPES]))
         raise ValueError(f"unknown instant-double recipe {recipe}; known recipes: {known}")
     found = find_event(payload, source_id)
-    if found is None:
-        raise ValueError(f"event id does not exist: {source_id}")
-    collection, index = found
-    if collection != "clips":
-        raise ValueError(f"instant-double routine source must be a clip: {source_id}")
-    source = payload[collection][index]
+    source: dict[str, Any] | None = None
+    if found is not None:
+        collection, index = found
+        if collection == "clips":
+            source = payload[collection][index]
+        elif not (collection == "actions" and action_type(payload[collection][index]) == "load_track"):
+            raise ValueError(f"instant-double routine source must be a clip or a load_track action: {source_id}")
+    if source is None:
+        # Loads are how songs play; the routine must reach them. Resolve a
+        # load (or compiled segment id) through the rendered deck clock —
+        # two cold DJs burned their edit windows discovering routines only
+        # took legacy raw clips.
+        compiled = apply_master_tempo(compile_actions_payload(copy.deepcopy(payload)))
+        candidates = [
+            clip
+            for clip in compiled.get("clips", [])
+            if str(clip.get("source_action_id") or "") == source_id or str(clip.get("id") or "") == source_id
+        ]
+        if not candidates:
+            raise ValueError(
+                f"instant-double source {source_id} is neither a raw clip nor a load with compiled segments"
+            )
+        source = min(candidates, key=lambda clip: int(clip.get("start_ms") or 0))
     resolved_cue_kind = cue_kind or str(config.get("cue_kind") or "")
     if start is not None and cue_kind is not None:
         raise ValueError("--start and --cue-kind cannot both be used")
