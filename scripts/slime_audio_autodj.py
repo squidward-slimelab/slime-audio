@@ -3048,6 +3048,24 @@ def extend_set(args: argparse.Namespace) -> int:
                 print(json.dumps({"status": "ok", "reason": "enough runway ahead", **base_status}, sort_keys=True))
                 return 0
             if bound_unmet:
+                # The composing DJ owns the first pass: the mechanical fill
+                # once raced an agent mid-composition and spliced four
+                # off-vibe records into a fresh bounded set. No hand-picked
+                # tracks + a young session = stand down.
+                if not getattr(args, "track", None):
+                    try:
+                        age_s = time.time() - session_path.stat().st_mtime
+                        runner_state = load_json_file(state_path) if state_path.exists() else {}
+                        from slime_audio_session import parse_timestamp
+
+                        started = parse_timestamp(runner_state.get("runner_started_at"))
+                        if started:
+                            age_s = time.time() - started
+                    except Exception:
+                        age_s = 1e9
+                    if age_s < 15 * 60:
+                        print(json.dumps({"status": "ok", "reason": "bounded set is young; deferring mechanical fill to the composing DJ", **base_status}, sort_keys=True))
+                        return 0
                 # Fill toward the declared length, not past it: an unclamped
                 # 5-minute block against a 3.5-minute gap made the heartbeat
                 # trip its own overrun guard every cycle while the set stayed
@@ -3411,11 +3429,15 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
             continue
         match_source = targets[index] or text
         words = {tok for tok in re.sub(r"[^a-z0-9]+", " ", match_source.lower()).split() if len(tok) >= 4}
+        # Short-word hints ("hot fun") have no >=4-char tokens; a normalized
+        # substring match covers them.
+        hint_norm = re.sub(r"[^a-z0-9]+", " ", targets[index].lower()).strip() if targets[index] else ""
         best_site, best_score = None, 0
         for site, path in record_sites:
             if site in taken_sites:
                 continue
-            score = len(words & path_tokens(path))
+            path_norm = re.sub(r"[^a-z0-9]+", " ", path.lower())
+            score = len(words & path_tokens(path)) + (2 if hint_norm and hint_norm in path_norm else 0)
             if score > best_score:
                 best_site, best_score = site, score
         if best_site is not None:

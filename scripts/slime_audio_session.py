@@ -2789,6 +2789,14 @@ def remove_event(
     next_payload["automations"] = [
         automation for automation in next_payload.get("automations", []) if automation.get("target") != event_id
     ]
+    # Planner-authored filter/EQ carves live in a separate top-level
+    # `deck_automations` collection keyed by `related_clip_id` (not
+    # `target`), so they survived a load's removal — orphaned rides past the
+    # removed clip's end silently inflated session_duration_ms and broke
+    # extend's overrun math (found and fixed live by cold test 53's agent).
+    next_payload["deck_automations"] = [
+        automation for automation in next_payload.get("deck_automations", []) if automation.get("related_clip_id") != event_id
+    ]
     for clip in next_payload.get("clips", []):
         clip["automations"] = [
             automation for automation in clip.get("automations", []) if automation.get("target", clip.get("id")) != event_id
