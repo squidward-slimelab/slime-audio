@@ -707,14 +707,27 @@ def apply_master_key(payload: dict[str, Any]) -> dict[str, Any]:
     if not payload.get("master_key") and not payload.get("master_key_automation"):
         return payload
     max_shift = abs(int(payload.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES)))
-    for event in list(payload.get("clips", [])) + list(payload.get("stem_groups", payload.get("stemGroups", []))):
+    events = list(payload.get("clips", [])) + list(payload.get("stem_groups", payload.get("stemGroups", [])))
+    # A RECORD pins the center once, at its first compiled segment: stem
+    # toggles segment a load, and pinning each segment at its own start made
+    # a junction modulation re-pitch the outgoing record's remaining segments
+    # mid-play (an audible key jump inside one song).
+    record_anchor_ms: dict[str, int] = {}
+    for event in events:
+        source = str(event.get("source_action_id") or "")
+        if source:
+            start = int(event.get("start_ms") or 0)
+            record_anchor_ms[source] = min(record_anchor_ms.get(source, start), start)
+    for event in events:
         if not event.get("keymatch", True):
             continue
         tonic = event.get("tonic")
         mode = event.get("mode")
         if tonic is None or mode not in ("major", "minor"):
             continue
-        master = master_key_at(payload, int(event.get("start_ms") or 0))
+        source = str(event.get("source_action_id") or "")
+        anchor_ms = record_anchor_ms.get(source, int(event.get("start_ms") or 0)) if source else int(event.get("start_ms") or 0)
+        master = master_key_at(payload, anchor_ms)
         if master is None:
             continue
         shift = master_key_shift_semitones(int(tonic), str(mode), master, max_shift)
@@ -1124,6 +1137,11 @@ def append_deck_clock_segment(
     )
     group["source_action_id"] = action_id(load_action)
     group["deck_clock_segment"] = True
+    # Stem segments must know their key too, or keymatching (and the harmonic
+    # guard) goes blind exactly where the mixing happens.
+    for field in ("key", "tonic", "mode", "camelot"):
+        if load_action.get(field) is not None and group.get(field) is None:
+            group[field] = load_action[field]
     load_id = action_id(load_action)
     if pending_stem_automations and load_id in pending_stem_automations:
         for stem_name, automations in pending_stem_automations[load_id].items():
@@ -1381,6 +1399,44 @@ def compile_actions_payload_legacy(payload: dict[str, Any]) -> dict[str, Any]:
     return compiled
 
 
+_KEY_METADATA_CACHE: dict[str, tuple[int, str, str] | None] = {}
+
+
+def hydrate_load_key_metadata(actions: Any, db_path: Path | None = None) -> None:
+    """Fill missing tonic/mode/key on load actions from the library analysis."""
+    if not isinstance(actions, list):
+        return
+    db = db_path or DEFAULT_LIBRARY_DB
+    for action in actions:
+        if not isinstance(action, dict) or action_type(action) != "load_track":
+            continue
+        if action.get("tonic") is not None and action.get("mode") in ("major", "minor"):
+            continue
+        source = str(action.get("source_path") or action.get("path") or "").strip()
+        if not source:
+            continue
+        if source not in _KEY_METADATA_CACHE:
+            row = None
+            try:
+                conn = sqlite3.connect(db)
+                row = conn.execute(
+                    "SELECT tonic, mode, key FROM track_dj_analysis WHERE path = ? AND tonic IS NOT NULL",
+                    (source,),
+                ).fetchone()
+                conn.close()
+            except sqlite3.Error:
+                row = None
+            _KEY_METADATA_CACHE[source] = (
+                (int(row[0]), str(row[1]), str(row[2] or "")) if row and row[1] in ("major", "minor") else None
+            )
+        cached = _KEY_METADATA_CACHE[source]
+        if cached is not None:
+            action.setdefault("tonic", cached[0])
+            action.setdefault("mode", cached[1])
+            if cached[2]:
+                action.setdefault("key", cached[2])
+
+
 def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
     actions = payload.get("actions", payload.get("performance_actions", []))
     if not actions:
@@ -1389,6 +1445,11 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("actions must be a list")
 
     compiled = copy.deepcopy(payload)
+    # Keymatching only works on events that KNOW their key: a load authored
+    # without tonic/mode silently skipped apply_master_key and aired native
+    # against the session center. The library usually knows — hydrate here so
+    # every compiled segment carries the key.
+    hydrate_load_key_metadata(compiled.get("actions", compiled.get("performance_actions", [])))
     compiled["stem_groups"] = list(compiled.get("stem_groups", compiled.get("stemGroups", [])))
     stem_groups = compiled["stem_groups"]
     clips = compiled.setdefault("clips", [])

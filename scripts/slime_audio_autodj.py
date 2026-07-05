@@ -46,6 +46,8 @@ from slime_audio_session import (
     VOCAL_DECK,
     add_action,
     add_mic_lean_in,
+    apply_master_key,
+    apply_master_tempo,
     compile_actions_payload,
     DEFAULT_MAX_KEY_SHIFT_SEMITONES,
     master_key_at,
@@ -1192,6 +1194,7 @@ def weave_arrangement(
     args: argparse.Namespace,
     *,
     occupancy: list[dict[str, Any]] | None = None,
+    session_payload: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Weave the set: the body is remixed, not just the junctions.
 
@@ -1248,7 +1251,22 @@ def weave_arrangement(
                 continue
             def _rel(tonic, mode):
                 return (int(tonic) + 3) % 12 if mode == "minor" else int(tonic) % 12
-            tease_delta = (_rel(current_analysis.tonic, current_analysis.mode) - _rel(follow_analysis_key.tonic, follow_analysis_key.mode)) % 12
+            # The tease must land in the host's RENDERED key: keymatching may
+            # have shifted the host toward the session center, and a tease
+            # pitched at the host's native key then airs semitones off (a 24s
+            # off-key vocal aired this way before the guard could see it).
+            host_master_shift = 0
+            if session_payload is not None:
+                center = master_key_at(session_payload, int(current.get("at_ms") or 0))
+                if center is not None:
+                    shift = master_key_shift_semitones(
+                        int(current_analysis.tonic),
+                        str(current_analysis.mode),
+                        center,
+                        abs(int(session_payload.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES))),
+                    )
+                    host_master_shift = int(shift) if shift is not None else 0
+            tease_delta = (_rel(int(current_analysis.tonic) + host_master_shift, current_analysis.mode) - _rel(follow_analysis_key.tonic, follow_analysis_key.mode)) % 12
             if tease_delta > 6:
                 tease_delta -= 12
             if abs(tease_delta) > 2:
@@ -2158,7 +2176,11 @@ def shifted_relative_tonic(tonic: int, mode: str, event: dict[str, Any]) -> int:
 
 def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> dict[str, Any]:
     payload = load_session_payload(session_path)
-    compiled = compile_actions_payload(payload)
+    # Judge RENDERED reality: the renderer applies the master tempo and key
+    # after compiling, overwriting authored pitch shifts (keymatch). Compiling
+    # alone left the guard reading stale planner shifts — an aligned record
+    # carried its pre-master shift and false-failed junction after junction.
+    compiled = apply_master_key(apply_master_tempo(compile_actions_payload(payload)))
     actions_by_id = {
         str(action.get("id")): action
         for action in payload.get("actions", [])
@@ -2170,6 +2192,14 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
         for group in compiled.get("stem_groups", [])
         if group.get("id") and clip_duration_ms(group) > 0
     ]
+    # Record anchors come from EVERY segment (a drums-first entry is filtered
+    # out as non-harmonic below, but it is where the record pinned its key).
+    record_anchor_ms: dict[str, int] = {}
+    for event in [*clips, *stem_groups]:
+        source = str(event.get("source_action_id") or "")
+        if source:
+            start = clip_start_ms(event)
+            record_anchor_ms[source] = min(record_anchor_ms.get(source, start), start)
     events = [event for event in [*clips, *stem_groups] if is_harmonic_layer(event)]
     min_overlap_ms = int(getattr(args, "min_harmonic_overlap_ms", DEFAULT_MIN_HARMONIC_OVERLAP_MS))
     # Already-played music cannot be unplayed: an extend must not fail over an
@@ -2211,37 +2241,47 @@ def validate_harmonic_overlaps(session_path: Path, args: argparse.Namespace) -> 
             right_relative = shifted_relative_tonic(right_tonic, right_mode, right)
             if left_relative != right_relative:
                 # A mismatch that IS the master-key ride is by design, not a
-                # clash: the ride steps the center exactly where the later
-                # record starts (planner junction modulation or an authored
-                # set-key move), that record aligns to the new center, and the
-                # runway choreography keeps the two centers from sounding
-                # tonally together. The guard must not undo the ride by
-                # comparing effective keys across the step — but a layer with
-                # no step at its start (a genuinely clashing bed) still fails.
-                if clip_start_ms(right) >= clip_start_ms(left):
-                    earlier, later = left, right
-                    earlier_relative, later_relative = left_relative, right_relative
-                    earlier_meta = (left_tonic, left_mode)
-                else:
-                    earlier, later = right, left
-                    earlier_relative, later_relative = right_relative, left_relative
-                    earlier_meta = (right_tonic, right_mode)
-                later_center = master_key_at(compiled, clip_start_ms(later))
-                earlier_center = master_key_at(compiled, clip_start_ms(earlier))
-                later_aligned = later_center is not None and relative_major_tonic(*later_center) == later_relative
-                earlier_aligned = earlier_center is not None and relative_major_tonic(*earlier_center) == earlier_relative
-                earlier_native_out_of_reach = (
-                    earlier_center is not None
-                    and int(earlier.get("pitch_shift_semitones") or 0) == 0
-                    and master_key_shift_semitones(
-                        earlier_meta[0],
-                        earlier_meta[1],
-                        earlier_center,
-                        abs(int(compiled.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES))),
+                # clash: a junction modulation steps the center with the
+                # incoming record while the runway choreography keeps the two
+                # centers from sounding tonally together. Each event judges
+                # against the center at its RECORD's anchor (a load's segments
+                # all pin where the load began — segments created after a
+                # mid-record step must not be judged against the new center).
+                # An event is consistent when it aligns to its own center or
+                # plays unshifted native out of that center's reach; both
+                # consistent = the authored ride. A layer matching neither (a
+                # genuinely clashing bed, a mispitched tease) still fails.
+                max_key_shift = abs(int(compiled.get("max_key_shift_semitones", DEFAULT_MAX_KEY_SHIFT_SEMITONES)))
+
+                def ride_consistent(event: dict[str, Any], relative: int, tonic: int, mode: str) -> bool:
+                    source = str(event.get("source_action_id") or "")
+                    anchor = record_anchor_ms.get(source, clip_start_ms(event)) if source else clip_start_ms(event)
+                    center = master_key_at(compiled, anchor)
+                    if center is None:
+                        return False
+                    if relative_major_tonic(*center) == relative:
+                        return True
+                    # Unshifted native out of the center's reach is the
+                    # documented design for LEAD records only ("plays native —
+                    # the cue to modulate"); an out-of-reach overlay (bed,
+                    # tease, hand add) sounding native over a host is exactly
+                    # the clash this guard exists to catch.
+                    if not event.get("keymatch", True):
+                        return False
+                    if source:
+                        role = str((actions_by_id.get(source) or {}).get("planner_role") or "")
+                        if role != "lead":
+                            return False
+                    elif event.get("play_stems"):
+                        return False
+                    return (
+                        int(event.get("pitch_shift_semitones") or 0) == 0
+                        and master_key_shift_semitones(tonic, mode, center, max_key_shift) is None
                     )
-                    is None
-                )
-                if later_aligned and (earlier_aligned or earlier_native_out_of_reach):
+
+                if ride_consistent(left, left_relative, left_tonic, left_mode) and ride_consistent(
+                    right, right_relative, right_tonic, right_mode
+                ):
                     continue
                 failures.append(
                     {
@@ -3290,7 +3330,7 @@ def continue_set(args: argparse.Namespace) -> int:
                 [a for a in planned_payload.get("actions", []) if a.get("type") == "load_track" and a.get("planner_role") == "lead"],
                 key=lambda a: int(a.get("at_ms") or 0),
             )
-            woven = weave_arrangement(planned_leads, analyses, args, occupancy=planned_payload.get("actions", []))
+            woven = weave_arrangement(planned_leads, analyses, args, occupancy=planned_payload.get("actions", []), session_payload=planned_payload)
             if woven:
                 planned_payload.setdefault("actions", []).extend(woven)
                 write_payload(session_path, planned_payload)
