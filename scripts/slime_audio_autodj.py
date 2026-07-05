@@ -3029,6 +3029,12 @@ def extend_set(args: argparse.Namespace) -> int:
             if remaining_ms >= args.ahead_ms and not bound_unmet:
                 print(json.dumps({"status": "ok", "reason": "enough runway ahead", **base_status}, sort_keys=True))
                 return 0
+            if bound_unmet:
+                # Fill toward the declared length, not past it: an unclamped
+                # 5-minute block against a 3.5-minute gap made the heartbeat
+                # trip its own overrun guard every cycle while the set stayed
+                # short. One phrase of slack keeps full songs viable.
+                args.block_ms = max(60_000, min(args.block_ms, effective_target - total_ms + 45_000))
 
         args.min_runway_ms = args.block_ms
         work_path = args.runtime / f"{args.slug}.json"
