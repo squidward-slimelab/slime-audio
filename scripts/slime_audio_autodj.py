@@ -3171,7 +3171,24 @@ def extend_set(args: argparse.Namespace) -> int:
                     raise SystemExit(
                         "live session changed while the extension was being built; rerun autodj extend"
                     )
-                write_payload(session_path, load_session_payload(work_path))
+                published = load_session_payload(work_path)
+                # Growing a set past its sign-off strands it mid-set: any
+                # mic line sitting at the OLD tail rides to the new ending
+                # (the final line's positional intent is unambiguous; five
+                # cold sets aired or barely-caught a stale sign-off).
+                new_total_ms = session_duration_ms(parse_session(published))
+                moved_sign_offs = []
+                for lean in published.get("mic_lean_ins", []) or []:
+                    try:
+                        lean_start = parse_ms(lean.get("start", lean.get("start_ms", 0)), "lean start")
+                    except Exception:
+                        continue
+                    if total_ms - 90_000 <= lean_start <= total_ms and new_total_ms > total_ms:
+                        new_start = max(lock_before_ms, new_total_ms - 30_000)
+                        lean["start"] = str(new_start)
+                        lean.pop("start_ms", None)
+                        moved_sign_offs.append({"id": lean.get("id"), "from_ms": lean_start, "to_ms": new_start})
+                write_payload(session_path, published)
                 if args.history is not None:
                     args.history.parent.mkdir(parents=True, exist_ok=True)
                     with args.history.open("a", encoding="utf-8") as handle:
@@ -3333,7 +3350,15 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
             lowpass_hz=1400.0,
             duck_ms=3500,
         )
-        placed.append({"id": lean_id, "at_ms": at_ms, "text": text})
+        landing = next((path for site, path in record_sites if site == at_ms), "")
+        placed.append(
+            {
+                "id": lean_id,
+                "at_ms": at_ms,
+                "text": text,
+                "lands_on": Path(landing).stem if landing else "(intro/spread slot)",
+            }
+        )
     write_payload(session_path, payload)
     return placed
 
