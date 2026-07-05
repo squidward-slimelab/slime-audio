@@ -731,6 +731,9 @@ function renderTimeline() {
   // Never rebuild the stage out from under an active scrub — replaceChildren
   // would destroy the needle the user is holding.
   if (state.playheadDragging) { state.timelineRebuildPending = true; return; }
+  // Preserve horizontal scroll: a rebuild that momentarily changes stage
+  // width clamps scrollLeft, lurching the view (worst right after a seek).
+  const prevScroll = els.timelineScroll ? els.timelineScroll.scrollLeft : 0;
   const dashboard = state.dashboard;
   const scale = timelineScale(dashboard?.session?.duration_ms);
   state.scale = scale;
@@ -841,6 +844,9 @@ function renderTimeline() {
     attachPlayheadScrub(playhead);
   }
   els.timeline.append(playhead);
+  if (els.timelineScroll && els.timelineScroll.scrollLeft !== prevScroll) {
+    els.timelineScroll.scrollLeft = prevScroll;
+  }
   updatePlayhead();
   updateKnobs(true);
   hydrateWaveforms();
@@ -875,9 +881,23 @@ function endPlayheadDrag(event, { seek }) {
   if (live.playheadEl) live.playheadEl.classList.remove("dragging");
   if (seek) {
     const ms = playheadMsFromPointer(event);
-    if (ms !== null) sendTransport("seek", { position_ms: Math.round(ms) });
+    if (ms !== null) {
+      // Optimistic hold: keep the needle exactly where it was dropped (and
+      // freeze follow-scroll) until the runner's reported position converges
+      // there. Otherwise the instant the drag flag clears, the needle snaps
+      // back to the pre-seek position the runner is still reporting while it
+      // renders the new window, and the view lurches with it.
+      state.pendingSeek = { ms, since: performance.now() };
+      const playhead = live.playheadEl;
+      if (playhead && state.scale) {
+        const left = clamp((ms / state.scale.duration) * state.scale.stageWidth, 0, state.scale.stageWidth);
+        playhead.style.setProperty("--playhead-x", `${left}px`);
+      }
+      sendTransport("seek", { position_ms: Math.round(ms) });
+    }
   }
-  // Apply any timeline update that arrived (and was deferred) mid-drag.
+  // Apply any timeline update that arrived (and was deferred) mid-drag,
+  // preserving scroll so the release does not lurch the view.
   if (state.timelineRebuildPending) {
     state.timelineRebuildPending = false;
     renderTimeline();
@@ -924,7 +944,21 @@ function updatePlayhead() {
   const scale = state.scale;
   const playhead = live.playheadEl;
   if (state.playheadDragging) return; // the hand on the needle wins
-  const ms = livePlayheadMs();
+  let ms = livePlayheadMs();
+  // While a seek is settling, hold the needle at the requested position and
+  // suppress follow-scroll; release the hold once the runner reports a
+  // position near it (converged) or after a timeout (seek did not take).
+  let holding = false;
+  if (state.pendingSeek) {
+    const converged = ms !== null && Math.abs(ms - state.pendingSeek.ms) < 2000;
+    const expired = performance.now() - state.pendingSeek.since > 12000;
+    if (converged || expired) {
+      state.pendingSeek = null;
+    } else {
+      ms = state.pendingSeek.ms;
+      holding = true;
+    }
+  }
   if (els.playheadTime) els.playheadTime.textContent = fmtMs(ms);
   if (!scale || !playhead) return;
   if (ms === null || ms === undefined) {
@@ -944,7 +978,7 @@ function updatePlayhead() {
   if (els.sessionProgress && duration) {
     els.sessionProgress.style.width = `${clamp((ms / duration) * 100, 0, 100)}%`;
   }
-  if (state.follow) {
+  if (state.follow && !holding) {
     const viewportStart = els.timelineScroll.scrollLeft;
     const viewportEnd = viewportStart + els.timelineScroll.clientWidth;
     if (left < viewportStart + 120 || left > viewportEnd - 180) {
