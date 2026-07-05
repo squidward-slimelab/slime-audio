@@ -3222,6 +3222,9 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
     if leads:
         sites.append(int(leads[0].get("start_ms") or 0) + 12_000)
     seen_actions: set[str] = set()
+    actions_by_id = {
+        str(action.get("id")): action for action in payload.get("actions", []) or [] if action.get("id")
+    }
     record_sites: list[tuple[int, str]] = []
     for clip in leads:
         action = str(clip.get("source_action_id") or clip.get("id") or "")
@@ -3232,7 +3235,11 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
         # 4s into the junction: the outgoing vocal has stepped out, the
         # incoming record's vocals are still held by the runway choreography.
         sites.append(start + 4_000)
-        record_sites.append((start + 4_000, str(clip.get("path") or "")))
+        # A drums-first entrance compiles as a stem group with no path; the
+        # record's identity lives on its load action (a Parliament callout
+        # once aired five minutes before Parliament because of this).
+        source_path = str(clip.get("path") or "") or str((actions_by_id.get(action) or {}).get("source_path") or "")
+        record_sites.append((start + 4_000, source_path))
     sites = sorted(set(sites))
     spaced: list[int] = []
     for site in sites:
