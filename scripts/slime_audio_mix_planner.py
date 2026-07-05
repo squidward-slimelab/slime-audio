@@ -933,7 +933,19 @@ def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any], *, 
             continue
         kept_clips.append(clip)
     result["clips"] = kept_clips
-    for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner"), ("actions", "mix-planner"), ("master_key_automation", "mix-planner")):
+    for key, role_prefix in (
+        ("transition_plans", "mix-planner"),
+        ("deck_automations", "mix-planner"),
+        ("automations", "mix-planner"),
+        ("actions", "mix-planner"),
+        # Weave teases pin to a host's position; a replan re-times the hosts
+        # but kept the teases verbatim, so they landed over different records
+        # in different keys (extend's guard caught two 24s clashes). Post-lock
+        # arrangement entries drop with the replan — a missing tease beats a
+        # stale one.
+        ("actions", "arrangement-"),
+        ("master_key_automation", "mix-planner"),
+    ):
         # The planner may only rewrite its OWN entries at or beyond the lock:
         # dropping everything role-tagged erased the locked front junctions'
         # vocal choreography on every extend — five cold sets aired
