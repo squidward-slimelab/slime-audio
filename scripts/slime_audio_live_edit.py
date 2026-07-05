@@ -122,6 +122,19 @@ def harmonic_check_after_edit(args: argparse.Namespace, after: dict[str, Any], e
                 db=args.db,
             ),
         )
+    except SystemExit as error:
+        # A refusal must name the way forward, not just the wall: a cold DJ
+        # burned its bed budget retrying out-of-reach material blind.
+        center = session.master_key_at(after, earliest_ms)
+        hint = ""
+        if center is not None:
+            names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+            hint = (
+                f" || session key center at {earliest_ms}ms is {names[center[0] % 12]} {center[1]}: "
+                "layered material must sit within 2 semitones of its relative major after keymatch. "
+                "Pick material in a compatible key (browse shows keys) instead of retrying this add."
+            )
+        raise SystemExit(str(error) + hint) from None
     finally:
         temp_path.unlink(missing_ok=True)
 
