@@ -584,6 +584,7 @@ def plan_future_mix(
         automation
         for automation in next_payload.get("deck_automations", [])
         if automation.get("planner_role") not in {"mix-planner-filter-carve", "mix-planner-eq-carve"}
+        or planner_entry_start_ms(automation) < lock_before_ms
     ]
     next_payload["transition_plans"] = [
         plan
@@ -622,7 +623,7 @@ def plan_future_mix(
     ]
     if not future:
         if has_deck_loads:
-            return write_back_deck_loads(original_payload, next_payload), []
+            return write_back_deck_loads(original_payload, next_payload, lock_before_ms=lock_before_ms), []
         return next_payload, []
     declared_decks = [str(deck) for deck in next_payload.get("decks", [])]
     deck_order = [deck for deck in DECK_ORDER if deck in declared_decks] + [deck for deck in declared_decks if deck not in DECK_ORDER]
@@ -843,7 +844,7 @@ def plan_future_mix(
         # them next to the loads they target (validated there).
         next_payload["actions"] = planner_actions
     if has_deck_loads:
-        return write_back_deck_loads(original_payload, next_payload), planned
+        return write_back_deck_loads(original_payload, next_payload, lock_before_ms=lock_before_ms), planned
     return next_payload, planned
 
 
@@ -859,7 +860,26 @@ PLANNED_LOAD_WRITEBACK_FIELDS = (
 )
 
 
-def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any]) -> dict[str, Any]:
+def planner_entry_start_ms(entry: dict[str, Any]) -> int:
+    for key in ("start_ms", "start", "at_ms", "at"):
+        value = entry.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                try:
+                    return parse_ms(value, key)
+                except Exception:
+                    return 0
+    points = entry.get("points")
+    if isinstance(points, list) and points:
+        starts = [planner_entry_start_ms(p) for p in points if isinstance(p, dict)]
+        if starts:
+            return min(starts)
+    return 0
+
+
+def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any], *, lock_before_ms: int = 0) -> dict[str, Any]:
     """Planned corrections flow back into the load_track actions owning the leads.
 
     The planner computes on the compiled deck clock; the session's canonical
@@ -897,15 +917,21 @@ def write_back_deck_loads(original: dict[str, Any], planned: dict[str, Any]) -> 
         kept_clips.append(clip)
     result["clips"] = kept_clips
     for key, role_prefix in (("transition_plans", "mix-planner"), ("deck_automations", "mix-planner"), ("automations", "mix-planner"), ("actions", "mix-planner"), ("master_key_automation", "mix-planner")):
+        # The planner may only rewrite its OWN entries at or beyond the lock:
+        # dropping everything role-tagged erased the locked front junctions'
+        # vocal choreography on every extend — five cold sets aired
+        # stacked-vocal openings that had been authored correctly at launch.
         original_entries = [
             entry
             for entry in result.get(key, []) or []
             if not str(entry.get("planner_role") or "").startswith(role_prefix)
+            or planner_entry_start_ms(entry) < lock_before_ms
         ]
         planner_entries = [
             entry
             for entry in planned.get(key, []) or []
             if str(entry.get("planner_role") or "").startswith(role_prefix)
+            and planner_entry_start_ms(entry) >= lock_before_ms
         ]
         result[key] = original_entries + planner_entries
     parse_session(result)
