@@ -561,53 +561,46 @@ def author_stem_handoff(
 
     out_ready = ready(outgoing)
     in_ready = ready(incoming)
-    if in_ready and overlap_end_ms - overlap_start_ms >= 24_000:
-        # The extended double-deck runway, staged in quarters: incoming enters
-        # drums-only under the outgoing (vocal already out); at 1/2 the bass
-        # swaps hands (one low end at a time) and the outgoing strips its
-        # melodics; at 3/4 the incoming opens melodics over the outgoing's
-        # bare drum tail; full song on the boundary as the outgoing ends.
-        # Every layered element is the record's OWN material — feel-safe.
-        in_id = str(incoming["source_action_id"])
-        span = overlap_end_ms - overlap_start_ms
-        half_ms = overlap_start_ms + span // 2
-        three_quarter_ms = overlap_start_ms + (3 * span) // 4
-        if out_ready:
-            out_id = str(outgoing["source_action_id"])
-            toggle(out_id, "vocals", False, overlap_start_ms, "out")
-            toggle(out_id, "bass", False, half_ms, "swap")
-            toggle(out_id, "other", False, half_ms, "strip")
-        toggle(in_id, "vocals", False, overlap_start_ms, "intro")
-        toggle(in_id, "other", False, overlap_start_ms, "intro")
-        toggle(in_id, "bass", False, overlap_start_ms, "intro")
-        if modulated and not out_ready:
-            # A modulated junction over an unsplit outgoing: the incoming's
-            # tonal stems (in the NEW center) must not sound under the
-            # outgoing's full song (old center) — drums carry the whole
-            # runway and everything opens where the outgoing ends.
-            toggle(in_id, "bass", True, overlap_end_ms, "swap")
-            toggle(in_id, "other", True, overlap_end_ms, "melodics")
-            notes.append("modulated runway: drums-only entry, full song opens with the new key on the boundary")
-        else:
-            toggle(in_id, "bass", True, half_ms, "swap")
-            toggle(in_id, "other", True, three_quarter_ms, "melodics")
-            notes.append(
-                ("modulated " if modulated else "") + "extended runway: drums-first entry, bass swap at half, melodics at three-quarters, open on the boundary"
-                + ("" if out_ready else " (incoming-only: outgoing unsplit)")
-            )
-        toggle(in_id, "vocals", True, overlap_end_ms, "open")
+    if not in_ready:
         return notes
+    in_id = str(incoming["source_action_id"])
+    span = overlap_end_ms - overlap_start_ms
+    # THE ONE INVARIANT: never two drum kits at once. Two different
+    # drummers playing simultaneously flams no matter how well the tempos
+    # match — this stacked two full kits for the whole overlap and was the
+    # real cause of "offbeat drums when multiple tracks play". The groove is
+    # OWNED by one record at a time and swapped at a single instant; the
+    # other record weaves melodics ("other") over it, so two records stay
+    # audible with only ever one kit sounding.
+    #
+    # Incoming always begins as a melodics-only layer (no kit, no bass, no
+    # vocal) over whatever groove is playing.
+    toggle(in_id, "drums", False, overlap_start_ms, "hold-kit")
+    toggle(in_id, "bass", False, overlap_start_ms, "hold-low")
+    toggle(in_id, "vocals", False, overlap_start_ms, "hold-vox")
+
     if out_ready:
         out_id = str(outgoing["source_action_id"])
-        toggle(out_id, "vocals", False, overlap_start_ms, "out")
-        notes.append("outgoing vocal steps out for the overlap")
-    if in_ready:
-        in_id = str(incoming["source_action_id"])
-        toggle(in_id, "vocals", False, overlap_start_ms, "intro")
-        toggle(in_id, "other", False, overlap_start_ms, "intro")
+        # Outgoing owns the groove up to the swap, then hands the whole
+        # rhythm section (kit + low end) to the incoming at one instant.
+        swap_ms = overlap_start_ms + span // 2
+        three_quarter_ms = overlap_start_ms + (3 * span) // 4
+        toggle(out_id, "vocals", False, overlap_start_ms, "out")  # no stacked vocals
+        toggle(out_id, "drums", False, swap_ms, "kit-out")
+        toggle(out_id, "bass", False, swap_ms, "low-out")
+        toggle(out_id, "other", False, three_quarter_ms, "melodics-out")
+        toggle(in_id, "drums", True, swap_ms, "kit-in")   # exactly one kit at the swap
+        toggle(in_id, "bass", True, swap_ms, "low-in")
         toggle(in_id, "vocals", True, overlap_end_ms, "open")
-        toggle(in_id, "other", True, overlap_end_ms, "open")
-        notes.append("incoming enters drums+bass, opens at the phrase")
+        notes.append("groove swap: outgoing owns the kit, incoming weaves melodics, rhythm section changes hands at the midpoint (never two kits)")
+    else:
+        # Unsplit outgoing (full track, kit can't be stripped): its drums play
+        # the whole overlap, so the incoming's kit and low end must wait for
+        # the boundary — only its melodics weave over the outgoing groove.
+        toggle(in_id, "drums", True, overlap_end_ms, "open-kit")
+        toggle(in_id, "bass", True, overlap_end_ms, "open-low")
+        toggle(in_id, "vocals", True, overlap_end_ms, "open")
+        notes.append("incoming weaves melodics over the outgoing groove; its kit opens only at the boundary (outgoing unsplit — one kit throughout)")
     return notes
 
 

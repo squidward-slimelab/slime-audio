@@ -399,12 +399,21 @@ class SlimeAudioMixPlannerTests(unittest.TestCase):
                 modulated=True,
             )
 
-        self.assertTrue(any("modulated runway" in note for note in notes))
+        # Unsplit outgoing keeps its kit the whole overlap, so the incoming's
+        # KIT, low end, and vocals must wait for the boundary (never a second
+        # kit); only its melodics ("other") weave over the outgoing groove.
         opens = {(a["stem"], a["at_ms"]) for a in actions if a["target"] == "load-in" and a["enabled"]}
+        self.assertIn(("drums", 160_000), opens)
         self.assertIn(("bass", 160_000), opens)
-        self.assertIn(("other", 160_000), opens)
         self.assertIn(("vocals", 160_000), opens)
-        self.assertFalse(any(a["enabled"] and a["at_ms"] < 160_000 for a in actions if a["target"] == "load-in"))
+        # drums/bass/vocals are held off at overlap start and only opened at
+        # the boundary — no incoming kit sounds while the outgoing kit plays.
+        for stem in ("drums", "bass", "vocals"):
+            enabled_times = sorted(a["at_ms"] for a in actions if a["target"] == "load-in" and a["stem"] == stem and a["enabled"])
+            self.assertEqual(enabled_times, [160_000], f"{stem} should only open at the boundary")
+        # 'other' is never force-toggled: it plays from the load default, so
+        # the incoming melodics weave from the overlap start.
+        self.assertFalse(any(a["stem"] == "other" for a in actions if a["target"] == "load-in"))
 
     def test_planner_can_rewrite_only_a_bounded_future_block(self):
         payload = {
