@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import re
 import sqlite3
 import json
 import os
@@ -3221,6 +3222,7 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
     if leads:
         sites.append(int(leads[0].get("start_ms") or 0) + 12_000)
     seen_actions: set[str] = set()
+    record_sites: list[tuple[int, str]] = []
     for clip in leads:
         action = str(clip.get("source_action_id") or clip.get("id") or "")
         start = int(clip.get("start_ms") or 0)
@@ -3230,6 +3232,7 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
         # 4s into the junction: the outgoing vocal has stepped out, the
         # incoming record's vocals are still held by the runway choreography.
         sites.append(start + 4_000)
+        record_sites.append((start + 4_000, str(clip.get("path") or "")))
     sites = sorted(set(sites))
     spaced: list[int] = []
     for site in sites:
@@ -3237,14 +3240,47 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
             spaced.append(site)
     if not spaced:
         return []
-    count = min(len(texts), len(spaced))
+
+    # Placement must not contradict the words: a line naming a record lands at
+    # THAT record's entrance (blind index-order placement once fired an Isley
+    # callout mid-EWF). Token-match each text against the tracklist paths;
+    # unmatched texts fill the remaining sites in order.
+    def path_tokens(path: str) -> set[str]:
+        stem = re.sub(r"[^a-z0-9]+", " ", path.lower())
+        return {tok for tok in stem.split() if len(tok) >= 4 and tok not in {"music", "flac", "disc", "greatest", "hits", "best"}}
+
+    assignments: dict[int, int] = {}
+    taken_sites: set[int] = set()
+    for index, text in enumerate(texts):
+        words = {tok for tok in re.sub(r"[^a-z0-9]+", " ", text.lower()).split() if len(tok) >= 4}
+        best_site, best_score = None, 0
+        for site, path in record_sites:
+            if site in taken_sites:
+                continue
+            score = len(words & path_tokens(path))
+            if score > best_score:
+                best_site, best_score = site, score
+        if best_site is not None:
+            assignments[index] = best_site
+            taken_sites.add(best_site)
+    remaining_sites = [s for s in spaced if s not in taken_sites]
+    unmatched = [i for i in range(len(texts)) if i not in assignments]
+    count = min(len(unmatched), len(remaining_sites))
     if count == 1:
-        chosen = [spaced[0]]
+        fill = [remaining_sites[0]]
+    elif count > 1:
+        indices = sorted({round(i * (len(remaining_sites) - 1) / (count - 1)) for i in range(count)})
+        fill = [remaining_sites[i] for i in indices]
     else:
-        indices = sorted({round(i * (len(spaced) - 1) / (count - 1)) for i in range(count)})
-        chosen = [spaced[i] for i in indices]
+        fill = []
+    for i, site in zip(unmatched, fill):
+        assignments[i] = site
+
     placed: list[dict[str, Any]] = []
-    for index, (text, at_ms) in enumerate(zip(texts, chosen)):
+    for index, text in enumerate(texts):
+        if index not in assignments:
+            continue
+        at_ms = assignments[index]
         lean_id = f"mic-drop-{index + 1:02d}"
         payload = add_mic_lean_in(
             payload,
@@ -3265,6 +3301,8 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
 
 
 def continue_set(args: argparse.Namespace) -> int:
+    from slime_audio_session_mixdown import session_duration_ms
+
     args.runtime.mkdir(parents=True, exist_ok=True)
     # Short bounded sets render in smaller windows: the live-edit lock covers
     # the current window plus one prerendered window, and on a 15-minute set a
@@ -3405,6 +3443,17 @@ def continue_set(args: argparse.Namespace) -> int:
                                 f"UNDERBUILT: composed {composed_ms}ms of the declared {declared_ms}ms — "
                                 f"run `extend --track ...` sized to ~{underbuilt_ms}ms as your NEXT command, "
                                 "before any live edits or checks; the render lock eats the front while you wait"
+                            ),
+                        }
+                    )
+                elif composed_ms > declared_ms + 120_000:
+                    advisories.append(
+                        {
+                            "guard": "bound",
+                            "warning": (
+                                f"OVERBUILT: composed {composed_ms}ms against the declared {declared_ms}ms — "
+                                "a '30 minute set' that runs 36 is loose; tighten a tail (remove-event is "
+                                "cascade-atomic) or re-pick before the lock bakes the overage"
                             ),
                         }
                     )
