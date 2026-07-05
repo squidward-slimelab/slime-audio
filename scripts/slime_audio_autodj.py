@@ -365,7 +365,15 @@ def playback_healthy() -> bool:
     health = state.get("dashboard", {}).get("health") or {}
     status = transport.get("status") or health.get("runner_status") or ""
     stale = bool(transport.get("stale"))
-    return audio_process_alive() and not stale and status not in {"completed", "stopped"}
+    # Connected receivers with no runner is a SILENT room, not a healthy one:
+    # this check once refused to start music into 30 minutes of dead air
+    # because the snapclients were still attached to an unfed stream.
+    return (
+        audio_process_alive()
+        and bool(live_session_runner_pids())
+        and not stale
+        and status not in {"completed", "stopped"}
+    )
 
 
 def live_session_runner_pids() -> list[int]:
@@ -3206,9 +3214,18 @@ def extend_set(args: argparse.Namespace) -> int:
                         anchor_at = int(published_actions[anchor].get("at_ms") or 0) + 4_000
                         if abs(anchor_at - lean_start) > 10_000:
                             new_start = anchor_at
-                    elif total_ms - 90_000 <= lean_start <= total_ms and new_total_ms > total_ms:
-                        # An unanchored old-tail line (the sign-off) rides to
-                        # the new ending.
+                    elif new_total_ms > total_ms and lean_start == max(
+                        (
+                            parse_ms(other.get("start", other.get("start_ms", 0)), "lean start")
+                            for other in published.get("mic_lean_ins", []) or []
+                            if not other.get("anchor_action_id")
+                        ),
+                        default=-1,
+                    ) and lean_start >= total_ms - 300_000:
+                        # The LAST unanchored line is the sign-off wherever it
+                        # sits in the old tail (a long closer once left it
+                        # 3 minutes before the old end and the 90s window
+                        # missed it); it rides to the new ending.
                         new_start = new_total_ms - 30_000
                     if new_start is not None and new_start >= lock_before_ms:
                         lean["start"] = str(new_start)
