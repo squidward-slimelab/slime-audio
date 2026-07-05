@@ -1499,7 +1499,17 @@ def run_planner(session_path: Path, args: argparse.Namespace, *, lock_before_ms:
         "--cached-analysis-only",
         "--apply",
     ]
-    if getattr(args, "target_bpm", None) is not None:
+    session_owns_tempo = False
+    try:
+        session_owns_tempo = bool(load_json_file(session_path).get("master_bpm"))
+    except Exception:
+        session_owns_tempo = False
+    # The session owns tempo: when master_bpm is already stamped, the planner
+    # derives the lock from it, and re-declaring --target-bpm on a replan
+    # recomputed warped durations against a different estimate — extension
+    # leads landed inside locked clips and validation crashed (two cold tests
+    # hit it; dropping the flag was the confirmed fix).
+    if getattr(args, "target_bpm", None) is not None and not session_owns_tempo:
         command.extend(["--target-bpm", str(args.target_bpm)])
     if lock_before_ms is not None:
         command.extend(["--lock-before-ms", str(lock_before_ms)])
