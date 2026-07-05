@@ -3156,6 +3156,7 @@ def extend_set(args: argparse.Namespace) -> int:
                     f"extend overruns the declared set length by {planned_total_ms - effective_target}ms after planning "
                     f"(bound {effective_target}ms); size the addition to the remaining runway or pass --force"
                 )
+            final_total_ms = planned_total_ms
             stage = "structural_beds"
             structural = add_structural_beds(work_path, selected, args, min_start_ms=total_ms)
             stage = "harmonic_guard"
@@ -3200,8 +3201,8 @@ def extend_set(args: argparse.Namespace) -> int:
                 "lock_before_ms": lock_before_ms,
                 # Agents kept extending once and stopping while still short of
                 # the declared bound; the residual gap must stare back.
-                "bound_gap_ms": max(0, effective_target - new_total_ms) if effective_target > 0 else 0,
-                "new_total_ms": new_total_ms,
+                "bound_gap_ms": max(0, effective_target - final_total_ms) if effective_target > 0 else 0,
+                "new_total_ms": final_total_ms,
                 "commentary_slots": block_commentary_slots,
                 "planner": planner,
                 "structural": structural,
@@ -3222,6 +3223,7 @@ def extend_set(args: argparse.Namespace) -> int:
                 # (the final line's positional intent is unambiguous; five
                 # cold sets aired or barely-caught a stale sign-off).
                 new_total_ms = session_duration_ms(parse_session(published))
+                final_total_ms = new_total_ms
                 published_actions = {
                     str(a.get("id")): a for a in published.get("actions", []) or [] if a.get("id")
                 }
