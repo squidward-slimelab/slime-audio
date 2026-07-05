@@ -3020,7 +3020,12 @@ def extend_set(args: argparse.Namespace) -> int:
             if effective_target > 0 and total_ms >= effective_target - 45_000:
                 print(json.dumps({"status": "ok", "reason": "target length reached (session-declared)" if session_bound is not None else "target length reached", **base_status}, sort_keys=True))
                 return 0
-            if remaining_ms >= args.ahead_ms:
+            # A declared bound the set hasn't reached outranks the runway
+            # heuristic: "give me a 30 minute set" that composed 26 minutes is
+            # UNDERBUILT, and extend must be allowed to finish the job (a cold
+            # DJ was refused with "enough runway ahead" and shipped short).
+            bound_unmet = effective_target > 0 and total_ms < effective_target - 45_000
+            if remaining_ms >= args.ahead_ms and not bound_unmet:
                 print(json.dumps({"status": "ok", "reason": "enough runway ahead", **base_status}, sort_keys=True))
                 return 0
 
