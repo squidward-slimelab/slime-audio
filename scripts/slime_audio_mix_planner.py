@@ -845,6 +845,16 @@ def plan_future_mix(
         previous = clip
         previous_analysis = analysis
         previous_deck = deck
+        # The NEXT record blends into whatever actually ends last: an
+        # immovable (stem-toggled) load can outlast the clip just placed, and
+        # ignoring it left replans planning against the wrong tail — a moved
+        # lead landed 375ms over an immovable one as an accidental near-cut.
+        in_play = [c for c in rebuilt if int(c.get("start_ms", 0)) <= end_ms]
+        latest = max(in_play + [clip], key=clip_end)
+        if latest is not clip and clip_end(latest) > clip_end(clip):
+            previous = latest
+            previous_analysis = analyses.get(str(latest.get("path")))
+            previous_deck = str(latest.get("deck") or "")
         cursor = end_ms
 
     next_payload["clips"] = sorted(rebuilt, key=lambda clip: (int(clip.get("start_ms", 0)), str(clip.get("deck")), str(clip.get("id"))))

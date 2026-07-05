@@ -3190,14 +3190,27 @@ def extend_set(args: argparse.Namespace) -> int:
                 # (the final line's positional intent is unambiguous; five
                 # cold sets aired or barely-caught a stale sign-off).
                 new_total_ms = session_duration_ms(parse_session(published))
+                published_actions = {
+                    str(a.get("id")): a for a in published.get("actions", []) or [] if a.get("id")
+                }
                 moved_sign_offs = []
                 for lean in published.get("mic_lean_ins", []) or []:
                     try:
                         lean_start = parse_ms(lean.get("start", lean.get("start_ms", 0)), "lean start")
                     except Exception:
                         continue
-                    if total_ms - 90_000 <= lean_start <= total_ms and new_total_ms > total_ms:
-                        new_start = max(lock_before_ms, new_total_ms - 30_000)
+                    new_start = None
+                    anchor = str(lean.get("anchor_action_id") or "")
+                    if anchor and anchor in published_actions:
+                        # A line rides with the record it names.
+                        anchor_at = int(published_actions[anchor].get("at_ms") or 0) + 4_000
+                        if abs(anchor_at - lean_start) > 10_000:
+                            new_start = anchor_at
+                    elif total_ms - 90_000 <= lean_start <= total_ms and new_total_ms > total_ms:
+                        # An unanchored old-tail line (the sign-off) rides to
+                        # the new ending.
+                        new_start = new_total_ms - 30_000
+                    if new_start is not None and new_start >= lock_before_ms:
                         lean["start"] = str(new_start)
                         lean.pop("start_ms", None)
                         moved_sign_offs.append({"id": lean.get("id"), "from_ms": lean_start, "to_ms": new_start})
@@ -3364,6 +3377,23 @@ def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[
             duck_ms=3500,
         )
         landing = next((path for site, path in record_sites if site == at_ms), "")
+        if landing:
+            # Anchor the line to its record so replans that move the record
+            # carry the words with it (an extend once reordered a lead and
+            # stranded its callout over the wrong song).
+            anchor_action = next(
+                (
+                    str(clip.get("source_action_id") or "")
+                    for clip in leads
+                    if str(clip.get("source_action_id") or "") in actions_by_id
+                    and str((actions_by_id.get(str(clip.get("source_action_id") or "")) or {}).get("source_path") or "") == landing
+                ),
+                "",
+            )
+            if anchor_action:
+                for lean in payload.get("mic_lean_ins", []):
+                    if str(lean.get("id")) == lean_id:
+                        lean["anchor_action_id"] = anchor_action
         placed.append(
             {
                 "id": lean_id,
