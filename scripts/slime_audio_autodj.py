@@ -3075,10 +3075,16 @@ def extend_set(args: argparse.Namespace) -> int:
             # `--set-length-ms` never truncates full songs, so the addition
             # must be SIZED to the remaining runway (a musical ending may
             # run one phrase past the border, nothing more).
+            # Pre-planner totals are serial; the planner's deep overlaps
+            # compress ~85s per junction, so checking here over-estimated the
+            # final length and pushed DJs to --force legitimate fills. A rough
+            # pre-check with overlap credit catches gross overshoot early; the
+            # REAL check runs after the planner on the compressed timeline.
             merged_total_ms = session_duration_ms(parse_session(merged))
-            if not args.force and effective_target > 0 and merged_total_ms > effective_target + 90_000:
+            overlap_credit_ms = 85_000 * max(0, len(selected))
+            if not args.force and effective_target > 0 and merged_total_ms - overlap_credit_ms > effective_target + 90_000:
                 raise SystemExit(
-                    f"extend would overrun the declared set length by {merged_total_ms - effective_target}ms "
+                    f"extend would overrun the declared set length by ~{merged_total_ms - overlap_credit_ms - effective_target}ms even after blend compression "
                     f"(bound {effective_target}ms, runway to it {max(0, effective_target - total_ms)}ms); "
                     "size the addition to the remaining runway or pass --force to overrun deliberately"
                 )
@@ -3115,6 +3121,13 @@ def extend_set(args: argparse.Namespace) -> int:
             planner = run_planner(work_path, args, lock_before_ms=min(lock_before_ms, total_ms))
             if planner["returncode"] != 0:
                 raise SystemExit(planner["stderr"] or planner["stdout"] or "mix planner failed")
+            stage = "bound_check"
+            planned_total_ms = session_duration_ms(parse_session(load_session_payload(work_path)))
+            if not args.force and effective_target > 0 and planned_total_ms > effective_target + 90_000:
+                raise SystemExit(
+                    f"extend overruns the declared set length by {planned_total_ms - effective_target}ms after planning "
+                    f"(bound {effective_target}ms); size the addition to the remaining runway or pass --force"
+                )
             stage = "structural_beds"
             structural = add_structural_beds(work_path, selected, args, min_start_ms=total_ms)
             stage = "harmonic_guard"
