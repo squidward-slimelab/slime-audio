@@ -41,6 +41,7 @@ from slime_audio_dj import (
     has_full_track_key_metadata,
     load_analysis_from_db,
     major_equivalent_tonic,
+    select_cue,
     transition_plan,
 )
 from slime_audio_session import (
@@ -58,6 +59,7 @@ from slime_audio_session import (
     playhead_ms_from_state,
     prepare_load_track_action_stems,
     probe_duration_ms,
+    ready_stem_artifacts,
     relative_major_tonic,
     write_payload,
 )
@@ -3326,6 +3328,74 @@ def load_json_file(path: Path) -> dict[str, Any]:
         return {}
 
 
+def author_mid_track_breakdowns(
+    session_path: Path,
+    analyses: dict[str, TrackAnalysis],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """One mechanical vocal breakdown per long untouched lead, at its own drop.
+
+    Cold DJs consistently lose the front third to the render lock, and the
+    rubric's vanilla-lead advisories land exactly there. A vocal-out over the
+    eight bars into a record's OWN drop cue, vocals back on the drop, is the
+    classic radio move built from the record's own material — the same
+    feel-safe principle as the junction runways. One per lead, only where no
+    other stem move already lives, snapped to the record's rendered grid."""
+    from slime_audio_session import DEFAULT_LIBRARY_DB as _stems_db
+
+    payload = load_session_payload(session_path)
+    added: list[dict[str, Any]] = []
+    actions = payload.get("actions", []) or []
+    toggles_by_target: dict[str, list[int]] = {}
+    for action in actions:
+        if action.get("type") == "stem_toggle":
+            toggles_by_target.setdefault(str(action.get("target") or ""), []).append(int(action.get("at_ms") or 0))
+    for action in list(actions):
+        if action.get("type") != "load_track" or str(action.get("planner_role") or "") != "lead":
+            continue
+        load_id = str(action.get("id") or "")
+        source_path = str(action.get("source_path") or "")
+        analysis = analyses.get(source_path)
+        duration_ms = int(action.get("duration_ms") or 0)
+        at_ms = int(action.get("at_ms") or 0)
+        if analysis is None or duration_ms < 180_000:
+            continue
+        if ready_stem_artifacts(_stems_db, source_path) is None:
+            continue
+        grid = getattr(analysis, "beatgrid", None)
+        if grid is None or not grid.bpm:
+            continue
+        trim = int(action.get("trim_start_ms") or 0)
+        cue = select_cue(analysis, {"drop", "hook", "build"}, before_ms=trim + int(duration_ms * 0.75), after_ms=trim + 90_000)
+        if cue is None:
+            continue
+        factor = clip_tempo_factor_for(action, analysis, args)
+        cue_tl = at_ms + int(round((int(cue.at_ms) - trim) / factor))
+        bar_ms = (60_000.0 / float(grid.bpm)) * 4 / factor
+        start_tl = snap_to_host_beat(int(round(cue_tl - 8 * bar_ms)), action, analysis, args)
+        end_tl = snap_to_host_beat(cue_tl, action, analysis, args)
+        if end_tl - start_tl < 8_000 or start_tl <= at_ms + 45_000 or end_tl >= at_ms + duration_ms - 45_000:
+            continue
+        if [t for t in toggles_by_target.get(load_id, []) if start_tl - 12_000 <= t <= end_tl + 12_000]:
+            continue
+        for enabled, when, suffix in ((False, start_tl, "breakdown"), (True, end_tl, "drop")):
+            actions.append(
+                {
+                    "type": "stem_toggle",
+                    "id": f"mix-{load_id}-vocals-{suffix}",
+                    "target": load_id,
+                    "stem": "vocals",
+                    "enabled": enabled,
+                    "at_ms": int(when),
+                    "planner_role": "mix-planner-breakdown",
+                }
+            )
+        added.append({"load": load_id, "from_ms": start_tl, "to_ms": end_tl, "cue": cue.kind})
+    if added:
+        write_payload(session_path, payload)
+    return added
+
+
 def place_authored_mic_drops(session_path: Path, texts: list[str]) -> list[dict[str, Any]]:
     """Schedule the DJ's own mic lines across the whole set at compose time.
 
@@ -3602,6 +3672,8 @@ def continue_set(args: argparse.Namespace) -> int:
             if woven:
                 planned_payload.setdefault("actions", []).extend(woven)
                 write_payload(session_path, planned_payload)
+            stage = "mid_track_breakdowns"
+            breakdowns = author_mid_track_breakdowns(session_path, analyses, args)
             stage = "mic_drops"
             placed_mic_drops: list[dict[str, Any]] = []
             if getattr(args, "mic_drop", None):
@@ -3709,6 +3781,7 @@ def continue_set(args: argparse.Namespace) -> int:
                 "advisories": advisories,
                 "stem_readiness": stem_readiness,
                 "mic_drops_placed": placed_mic_drops,
+                "mid_track_breakdowns": breakdowns,
                 "underbuilt_ms": underbuilt_ms,
                 # The DJ's performance-pass coordinates: never reconstruct
                 # junction timings from raw plan JSON (two cold agents burned
