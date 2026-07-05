@@ -98,11 +98,46 @@ def add_mic_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--duck-ms", type=int, default=2500)
 
 
-def apply_edit(args: argparse.Namespace, edit: Callable[[dict[str, Any], int | None], dict[str, Any]]) -> None:
+def harmonic_check_after_edit(args: argparse.Namespace, after: dict[str, Any], earliest_ms: int) -> None:
+    """Fail a live add THAT CLASHES at author time, while it is still fixable.
+
+    A hand-authored vocal revival once aired dissonant against the session's
+    post-modulation key center: the harmonic guard only ran at the next
+    validate/extend, by which point the lock had baked the clash. The same
+    guard now runs on the edited payload before it is written.
+    """
+    import tempfile
+
+    import slime_audio_autodj as autodj
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(after, handle)
+        temp_path = Path(handle.name)
+    try:
+        autodj.validate_harmonic_overlaps(
+            temp_path,
+            argparse.Namespace(
+                min_harmonic_overlap_ms=autodj.DEFAULT_MIN_HARMONIC_OVERLAP_MS,
+                harmonic_guard_after_ms=max(0, earliest_ms - 1_000),
+                db=args.db,
+            ),
+        )
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def apply_edit(
+    args: argparse.Namespace,
+    edit: Callable[[dict[str, Any], int | None], dict[str, Any]],
+    *,
+    harmonic_check_from_ms: int | None = None,
+) -> None:
     state_path = None if args.no_state_lock else args.state
     lock_ms = state_lock_ms(state_path, args.lock_before)
     before = session.load_payload(args.session)
     after = edit(before, lock_ms)
+    if harmonic_check_from_ms is not None:
+        harmonic_check_after_edit(args, after, harmonic_check_from_ms)
     session.write_payload(args.session, after)
     affected_ids = [value for value in getattr(args, "affected_ids", []) if value]
     append_history(
@@ -252,6 +287,9 @@ def main() -> int:
                 lock_before_ms=lock_ms,
                 force=args.force,
             ),
+            harmonic_check_from_ms=session.event_start_ms(action_payload) or 0
+            if str(action_payload.get("type") or "") in ("load_track", "stem_toggle")
+            else None,
         )
     elif args.command == "add-mic":
         args.affected_ids = [args.id]
