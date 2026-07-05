@@ -406,17 +406,34 @@ def event_is_vocal_bearing(event: dict, *, target_role: str = "vocal-hook") -> b
 
 
 def vocal_overlap_events(payload: dict, *, target_role: str = "vocal-hook") -> list[dict[str, object]]:
+    # Raw load spans are stem-blind: every choreographed junction (outgoing
+    # vocal pulled, incoming vocal held) flagged as a dual-vocal stack, and
+    # cold DJs kept believing it — burning edit windows rebuilding junctions
+    # that were already correct and self-docking for phantom defects. Audit
+    # the COMPILED deck clock instead: segments carry their enabled stems.
+    working = payload
+    compiled_ok = False
+    if payload.get("actions"):
+        try:
+            import copy as _copy
+
+            from slime_audio_session import compile_actions_payload
+
+            working = compile_actions_payload(_copy.deepcopy(payload))
+            compiled_ok = True
+        except Exception:
+            working = payload
     events: list[dict[str, object]] = []
     for collection, kind in (("clips", "clip"), ("actions", "action"), ("stem_groups", "stem-group")):
-        items = payload.get(collection, [])
+        items = working.get(collection, [])
         if not isinstance(items, list):
             continue
         for item in items:
             if not isinstance(item, dict):
                 continue
-            if collection == "actions" and item.get("type") != "load_track":
+            if collection == "actions" and (compiled_ok or item.get("type") != "load_track"):
                 continue
-            if collection == "stem_groups" and payload.get("actions"):
+            if collection == "stem_groups" and not compiled_ok and payload.get("actions"):
                 continue
             if not event_is_vocal_bearing(item, target_role=target_role):
                 continue

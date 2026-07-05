@@ -3222,7 +3222,8 @@ def extend_set(args: argparse.Namespace) -> int:
                     str(a.get("id")): a for a in published.get("actions", []) or [] if a.get("id")
                 }
                 moved_sign_offs = []
-                for lean in published.get("mic_lean_ins", []) or []:
+                lean_snapshot_list = [dict(lean) for lean in published.get("mic_lean_ins", []) or []]
+                for lean in lean_snapshot_list:
                     try:
                         lean_start = parse_ms(lean.get("start", lean.get("start_ms", 0)), "lean start")
                     except Exception:
@@ -3237,7 +3238,7 @@ def extend_set(args: argparse.Namespace) -> int:
                     elif new_total_ms > total_ms and lean_start == max(
                         (
                             parse_ms(other.get("start", other.get("start_ms", 0)), "lean start")
-                            for other in published.get("mic_lean_ins", []) or []
+                            for other in lean_snapshot_list
                             if not other.get("anchor_action_id")
                         ),
                         default=-1,
@@ -3248,9 +3249,35 @@ def extend_set(args: argparse.Namespace) -> int:
                         # missed it); it rides to the new ending.
                         new_start = new_total_ms - 30_000
                     if new_start is not None and new_start >= lock_before_ms:
-                        lean["start"] = str(new_start)
-                        lean.pop("start_ms", None)
-                        moved_sign_offs.append({"id": lean.get("id"), "from_ms": lean_start, "to_ms": new_start})
+                        # Re-add rather than mutate: a lean's ducking/lowpass
+                        # automation is keyed to its ORIGINAL position, and a
+                        # moved start left the line un-ducked plus a phantom
+                        # volume dip at the old spot (cold test 56 caught it
+                        # live). remove_event cascades the stale automation;
+                        # add_mic_lean_in authors fresh ducking at the new
+                        # position.
+                        from slime_audio_session import remove_event
+
+                        lean_snapshot = dict(lean)
+                        published = remove_event(published, str(lean.get("id")), lock_before_ms=None)
+                        published = add_mic_lean_in(
+                            published,
+                            lean_id=str(lean_snapshot.get("id")),
+                            start=str(new_start),
+                            text=str(lean_snapshot.get("text") or ""),
+                            deck=str(lean_snapshot.get("deck") or VOCAL_DECK),
+                            voice=lean_snapshot.get("voice"),
+                            rate=lean_snapshot.get("rate"),
+                            volume=float(lean_snapshot.get("volume") or 1.45),
+                            duck_volume=lean_snapshot.get("duck_volume") if lean_snapshot.get("duck_volume") is not None else 0.45,
+                            lowpass_hz=lean_snapshot.get("lowpass_hz") if lean_snapshot.get("lowpass_hz") is not None else 1400.0,
+                            duck_ms=int(lean_snapshot.get("duck_ms") or 3500),
+                        )
+                        if lean_snapshot.get("anchor_action_id"):
+                            for fresh in published.get("mic_lean_ins", []):
+                                if str(fresh.get("id")) == str(lean_snapshot.get("id")):
+                                    fresh["anchor_action_id"] = lean_snapshot["anchor_action_id"]
+                        moved_sign_offs.append({"id": lean_snapshot.get("id"), "from_ms": lean_start, "to_ms": new_start})
                 # A parked line places the moment its record lands.
                 notes_blob = published.setdefault("notes", {})
                 still_parked = []
