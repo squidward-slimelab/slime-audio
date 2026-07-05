@@ -237,7 +237,11 @@ def main() -> int:
     beat_jump_parser.add_argument("--min-confidence", type=float, default=session.DEFAULT_MIN_BEATGRID_CONFIDENCE)
 
     instant_double_parser = sub.add_parser("instant-double", parents=[common])
-    instant_double_parser.add_argument("--source-id", required=True)
+    instant_double_parser.add_argument(
+        "--source-id",
+        required=True,
+        help="COMPILED clip/segment id, not a load action id.",
+    )
     instant_double_parser.add_argument("--id", required=True)
     instant_double_parser.add_argument("--start")
     instant_double_parser.add_argument("--deck")
@@ -274,7 +278,11 @@ def main() -> int:
     )
 
     routine_parser = sub.add_parser("instant-double-routine", parents=[common])
-    routine_parser.add_argument("--source-id", required=True)
+    routine_parser.add_argument(
+        "--source-id",
+        required=True,
+        help="COMPILED clip/segment id (as shown by the dashboard or set report), not a load action id — loads compile into segments and routines target the rendered clip.",
+    )
     routine_parser.add_argument("--id", required=True)
     routine_parser.add_argument("--recipe", required=True)
     routine_parser.add_argument("--start")
