@@ -443,15 +443,43 @@ def transition_plan_record(
     return record
 
 
-def snap_to_clip_beat(timeline_ms: int, clip: dict[str, Any], analysis: TrackAnalysis | None, *, bars: bool = True) -> int:
+def rendered_clip_factor(payload: dict[str, Any], clip: dict[str, Any], analysis: TrackAnalysis | None) -> float:
+    """The rate the renderer actually consumes this clip's source at.
+
+    Under a master tempo the warp lives in the knob, not tempo_shift_pct —
+    beat math run at the authored shift (usually 0) drifted off the real grid
+    by seconds at mid-record junctions."""
+    if clip.get("warp", True):
+        source_bpm = clip.get("source_bpm") or (analysis.bpm if analysis and analysis.bpm else None)
+        if source_bpm:
+            master = master_bpm_at(payload, int(clip.get("start_ms") or 0))
+            if master:
+                max_stretch = abs(float(payload.get("max_tempo_stretch_pct", DEFAULT_MAX_WARP_STRETCH_PCT)))
+                shift = master_tempo_shift_pct(float(source_bpm), float(master), max_stretch)
+                if shift is not None:
+                    return 1.0 + shift / 100.0
+    factor = 1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0
+    return factor if factor > 0 else 1.0
+
+
+def snap_to_clip_beat(
+    timeline_ms: int,
+    clip: dict[str, Any],
+    analysis: TrackAnalysis | None,
+    *,
+    bars: bool = True,
+    factor: float | None = None,
+) -> int:
     """Snap a timeline instant onto a rendered clip's beat grid.
 
     Junctions placed by raw arithmetic land off the beat; an incoming record
-    must arrive on the outgoing record's bar."""
+    must arrive on the outgoing record's bar. Callers under a master tempo
+    must pass the rendered factor (rendered_clip_factor)."""
     grid = getattr(analysis, "beatgrid", None) if analysis else None
     if grid is None or not grid.bpm or grid.beat_offset_ms is None:
         return timeline_ms
-    factor = 1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0
+    if factor is None:
+        factor = 1.0 + float(clip.get("tempo_shift_pct") or 0.0) / 100.0
     if factor <= 0:
         return timeline_ms
     start = int(clip.get("start_ms") or 0)
@@ -460,6 +488,37 @@ def snap_to_clip_beat(timeline_ms: int, clip: dict[str, Any], analysis: TrackAna
     source_pos = trim + (timeline_ms - start) * factor
     k = round((source_pos - grid.beat_offset_ms) / step)
     return int(round(start + (grid.beat_offset_ms + k * step - trim) / factor))
+
+
+def align_incoming_beat_phase(
+    start_ms: int,
+    incoming: dict[str, Any],
+    incoming_analysis: TrackAnalysis | None,
+    incoming_factor: float,
+    outgoing: dict[str, Any],
+    outgoing_analysis: TrackAnalysis | None,
+    outgoing_factor: float,
+) -> int:
+    """Micro-shift the incoming record so its BEATS interlock with the
+    outgoing's grid.
+
+    Bar-snapping the file start is not enough: the incoming's first beat
+    sits beat_offset_ms into the file, so its drums rode the whole runway up
+    to half a beat off the outgoing's grid (heard live as 'simply very
+    offbeat drums whenever multiple tracks play'). Both records render at
+    the master tempo, so aligning one beat aligns them all."""
+    import math
+
+    grid = getattr(incoming_analysis, "beatgrid", None) if incoming_analysis else None
+    if grid is None or not grid.bpm or grid.beat_offset_ms is None or incoming_factor <= 0:
+        return start_ms
+    trim = int(incoming.get("trim_start_ms") or 0)
+    beat_src = 60_000.0 / float(grid.bpm)
+    k = math.ceil((trim - float(grid.beat_offset_ms)) / beat_src)
+    first_beat_src = float(grid.beat_offset_ms) + k * beat_src
+    first_beat_tl = int(round(start_ms + (first_beat_src - trim) / incoming_factor))
+    snapped = snap_to_clip_beat(first_beat_tl, outgoing, outgoing_analysis, bars=False, factor=outgoing_factor)
+    return start_ms + (snapped - first_beat_tl)
 
 
 def author_stem_handoff(
@@ -724,8 +783,16 @@ def plan_future_mix(
             )
         start_ms = cursor if previous is None else max(lock_before_ms, clip_end(previous) - overlap)
         if previous is not None:
-            # The incoming record arrives on the outgoing record's bar.
-            start_ms = max(lock_before_ms, snap_to_clip_beat(start_ms, previous, previous_analysis))
+            # The incoming record arrives on the outgoing record's bar — at
+            # the RENDERED rate — and then micro-shifts so its beats (not its
+            # file start) interlock with the outgoing's grid.
+            out_factor = rendered_clip_factor(next_payload, previous, previous_analysis)
+            in_factor = rendered_clip_factor(next_payload, clip, analysis)
+            start_ms = max(lock_before_ms, snap_to_clip_beat(start_ms, previous, previous_analysis, factor=out_factor))
+            start_ms = max(
+                lock_before_ms,
+                align_incoming_beat_phase(start_ms, clip, analysis, in_factor, previous, previous_analysis, out_factor),
+            )
         end_ms = start_ms + duration_ms
         deck = choose_deck(rebuilt + stem_occupancy, start_ms, end_ms, deck_order=deck_order, avoid={previous_deck} if previous_deck else set())
 
