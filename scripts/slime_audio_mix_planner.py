@@ -521,6 +521,71 @@ def align_incoming_beat_phase(
     return start_ms + (snapped - first_beat_tl)
 
 
+_VOCAL_PRESENT_CACHE: dict[str, list[tuple[int, int]]] = {}
+
+
+def vocal_present_windows(source_path: str) -> list[tuple[int, int]]:
+    """Source-time windows where the vocal stem is singing (from analysis)."""
+    if source_path in _VOCAL_PRESENT_CACHE:
+        return _VOCAL_PRESENT_CACHE[source_path]
+    windows: list[tuple[int, int]] = []
+    artifacts = ready_stem_artifacts(SESSION_LIBRARY_DB, source_path)
+    if artifacts:
+        try:
+            import sqlite3
+
+            conn = sqlite3.connect(SESSION_LIBRARY_DB)
+            windows = [
+                (int(a), int(b))
+                for a, b in conn.execute(
+                    "SELECT start_ms, end_ms FROM track_stem_windows "
+                    "WHERE stem_set_id = ? AND stem_name = 'vocals' AND kind = 'vocal_present' ORDER BY start_ms",
+                    (artifacts["stem_set_id"],),
+                ).fetchall()
+            ]
+            conn.close()
+        except Exception:
+            windows = []
+    _VOCAL_PRESENT_CACHE[source_path] = windows
+    return windows
+
+
+def _timeline_to_source_ms(timeline_ms: int, clip: dict[str, Any], factor: float) -> float:
+    return int(clip.get("trim_start_ms") or 0) + (timeline_ms - int(clip.get("start_ms") or 0)) * factor
+
+
+def _source_to_timeline_ms(source_ms: float, clip: dict[str, Any], factor: float) -> int:
+    if factor <= 0:
+        return int(clip.get("start_ms") or 0)
+    return int(round(int(clip.get("start_ms") or 0) + (source_ms - int(clip.get("trim_start_ms") or 0)) / factor))
+
+
+def snap_vocal_toggle(timeline_ms: int, clip: dict[str, Any], factor: float, *, turning_on: bool, max_shift_ms: int = 3500) -> int:
+    """Move a vocal toggle off the middle of a sung word.
+
+    Turning vocals OFF while a phrase is mid-word chops it ("mincing words");
+    turning them ON mid-word starts on a fragment. Snap OFF to the end of the
+    phrase it lands in (let the line finish) and ON to the nearest phrase
+    start, both bounded so the choreography keeps its shape."""
+    windows = vocal_present_windows(str(clip.get("path") or ""))
+    if not windows or factor <= 0:
+        return timeline_ms
+    src = _timeline_to_source_ms(timeline_ms, clip, factor)
+    if turning_on:
+        # Nearest phrase start (a vocal_present window start) to src.
+        best = min((w[0] for w in windows), key=lambda a: abs(a - src), default=None)
+        if best is None:
+            return timeline_ms
+        snapped = _source_to_timeline_ms(best, clip, factor)
+        return snapped if abs(snapped - timeline_ms) <= max_shift_ms else timeline_ms
+    # Turning OFF: if src is inside a phrase, let it finish (snap to phrase end).
+    for start, end in windows:
+        if start <= src < end:
+            snapped = _source_to_timeline_ms(end, clip, factor)
+            return snapped if snapped - timeline_ms <= max_shift_ms else timeline_ms
+    return timeline_ms
+
+
 def author_stem_handoff(
     planner_actions: list[dict[str, Any]],
     *,
@@ -529,6 +594,8 @@ def author_stem_handoff(
     overlap_start_ms: int,
     overlap_end_ms: int,
     modulated: bool = False,
+    outgoing_factor: float = 1.0,
+    incoming_factor: float = 1.0,
 ) -> list[str]:
     """The remix handoff, authored by default on every blend with split material.
 
@@ -585,13 +652,16 @@ def author_stem_handoff(
         # rhythm section (kit + low end) to the incoming at one instant.
         swap_ms = overlap_start_ms + span // 2
         three_quarter_ms = overlap_start_ms + (3 * span) // 4
-        toggle(out_id, "vocals", False, overlap_start_ms, "out")  # no stacked vocals
+        # Let the outgoing line finish before its vocal cuts (no minced word).
+        out_vox_off = snap_vocal_toggle(overlap_start_ms, outgoing, outgoing_factor, turning_on=False)
+        toggle(out_id, "vocals", False, out_vox_off, "out")  # no stacked vocals
         toggle(out_id, "drums", False, swap_ms, "kit-out")
         toggle(out_id, "bass", False, swap_ms, "low-out")
         toggle(out_id, "other", False, three_quarter_ms, "melodics-out")
         toggle(in_id, "drums", True, swap_ms, "kit-in")   # exactly one kit at the swap
         toggle(in_id, "bass", True, swap_ms, "low-in")
-        toggle(in_id, "vocals", True, overlap_end_ms, "open")
+        # Bring the incoming vocal in on a phrase start, not mid-word.
+        toggle(in_id, "vocals", True, snap_vocal_toggle(overlap_end_ms, incoming, incoming_factor, turning_on=True), "open")
         notes.append("groove swap: outgoing owns the kit, incoming weaves melodics, rhythm section changes hands at the midpoint (never two kits)")
     else:
         # Unsplit outgoing (full track, kit can't be stripped): its drums play
@@ -599,7 +669,7 @@ def author_stem_handoff(
         # the boundary — only its melodics weave over the outgoing groove.
         toggle(in_id, "drums", True, overlap_end_ms, "open-kit")
         toggle(in_id, "bass", True, overlap_end_ms, "open-low")
-        toggle(in_id, "vocals", True, overlap_end_ms, "open")
+        toggle(in_id, "vocals", True, snap_vocal_toggle(overlap_end_ms, incoming, incoming_factor, turning_on=True), "open")
         notes.append("incoming weaves melodics over the outgoing groove; its kit opens only at the boundary (outgoing unsplit — one kit throughout)")
     return notes
 
@@ -871,6 +941,8 @@ def plan_future_mix(
                     overlap_start_ms=start_ms,
                     overlap_end_ms=start_ms + actual_overlap_ms,
                     modulated=modulation_key is not None,
+                    outgoing_factor=rendered_clip_factor(next_payload, previous, previous_analysis),
+                    incoming_factor=rendered_clip_factor(next_payload, clip, analysis),
                 )
 
         if double_every > 0 and previous is not None and overlap and plan is not None and index % double_every == 0:
