@@ -177,12 +177,14 @@ class SlimeAudioSessionMixdownTests(unittest.TestCase):
 
         # Toggles segment the deck clock: silent preload, bass punched in for
         # 2s-8s, silent tail — the same audible result the old persistent mute
-        # windows produced, expressed as segments.
+        # windows produced, expressed as segments. Toggle-closed segments
+        # extend by the crossfade (180ms) so each boundary blends instead of
+        # hard-cutting; the natural-end segment is not extended.
         segments = [
             (group.start_ms, group.duration_ms, [name for name, stem in sorted(group.stems.items()) if stem.enabled])
             for group in sorted(session.stem_groups, key=lambda g: g.start_ms)
         ]
-        self.assertEqual(segments, [(0, 2_000, []), (2_000, 6_000, ["bass"]), (8_000, 2_000, [])])
+        self.assertEqual(segments, [(0, 2_180, []), (2_000, 6_180, ["bass"]), (8_000, 2_000, [])])
         live = next(group for group in session.stem_groups if group.start_ms == 2_000)
         self.assertEqual([(name, path) for name, _stem, path in stem_group_inputs(live)], [("bass", "/stems/bass.wav")])
 

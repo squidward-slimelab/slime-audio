@@ -409,7 +409,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         self.assertEqual(group.id, "lead-load")
         self.assertEqual(group.start_ms, 8_000)
         self.assertEqual(group.trim_start_ms, 16_000)
-        self.assertEqual(group.duration_ms, 16_000)
+        self.assertEqual(group.duration_ms, 16_180)  # extended by the crossfade into the toggle
         self.assertEqual(group.tempo_shift_pct, 2.5)
         self.assertEqual(group.pitch_shift_semitones, -1)
         self.assertFalse(group.stems["vocals"].enabled)
@@ -596,7 +596,7 @@ class SlimeAudioSessionTests(unittest.TestCase):
         )
         self.assertEqual(
             [(seg.start_ms, seg.trim_start_ms, seg.duration_ms) for seg in deck_segments(session)],
-            [(0, 0, 4_000), (4_000, 4_000, 4_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)],
+            [(0, 0, 4_180), (4_000, 4_000, 4_000), (8_000, 24_000, 4_000), (12_000, 24_000, 4_000), (16_000, 28_000, 12_000)],
         )
         self.assertTrue(all(not group.stems["vocals"].enabled for group in session.stem_groups))
 
@@ -2417,11 +2417,13 @@ class AlwaysOnStemsTests(unittest.TestCase):
         self.assertEqual(compiled["clips"], [])
         self.assertEqual([group["id"] for group in compiled["stem_groups"]], ["lead-load"])
 
-    def test_mid_load_segments_carry_no_authored_fades(self):
-        # Fades belong to a load's REAL ends: a toggle boundary must not
-        # replay the fade_in (heard live as a cut-to-zero at every stems
-        # handoff). First segment keeps fade_in, last keeps fade_out,
-        # everything between is fadeless.
+    def test_mid_load_segments_crossfade_and_keep_real_end_fades(self):
+        # A stem toggle CROSSFADES instead of hard-cutting: the real track
+        # fade_in/fade_out belong to the load's true ends, and every toggle
+        # boundary between them gets a short crossfade fade on both sides so
+        # only the toggled stem fades (continuous stems reconstruct to unity).
+        from slime_audio_session import STEM_TOGGLE_CROSSFADE_MS as CF
+
         artifacts = {"stem_set_id": "x", "manifest_path": "/stems/m.json", "stems": dict(self.STEMS)}
         with patch("slime_audio_session.ready_stem_artifacts", return_value=artifacts):
             compiled = self.compile(
@@ -2434,9 +2436,12 @@ class AlwaysOnStemsTests(unittest.TestCase):
         first = next(c for c in compiled["clips"] if c["id"] == "lead-load")
         middle = compiled["stem_groups"][0]
         last = next(c for c in compiled["clips"] if c["id"] == "lead-load-segment-03")
-        self.assertEqual((first["fade_in_ms"], first.get("fade_out_ms", 0)), (4_000, 0))
-        self.assertEqual((middle.get("fade_in_ms", 0), middle.get("fade_out_ms", 0)), (0, 0))
-        self.assertEqual((last.get("fade_in_ms", 0), last["fade_out_ms"]), (0, 6_000))
+        # first: real fade_in kept, crossfade_out into the middle segment.
+        self.assertEqual((first["fade_in_ms"], first.get("fade_out_ms", 0)), (4_000, CF))
+        # middle: crossfades on both sides.
+        self.assertEqual((middle.get("fade_in_ms", 0), middle.get("fade_out_ms", 0)), (CF, CF))
+        # last: crossfade_in, real fade_out kept.
+        self.assertEqual((last.get("fade_in_ms", 0), last["fade_out_ms"]), (CF, 6_000))
 
     def test_same_instant_toggle_compiles_regardless_of_list_order(self):
         # A stem_toggle at its load's own start must compile even when it
@@ -2466,15 +2471,17 @@ class AlwaysOnStemsTests(unittest.TestCase):
                     {"type": "stem_toggle", "target": "lead-load", "stem": "vocals", "enabled": True, "at_ms": 40_000},
                 ]
             )
+        # Toggle-closed segments extend by the crossfade so they overlap the
+        # next; the segment reaching the natural end is not extended.
         self.assertEqual(
             [(clip["id"], clip["start_ms"], clip["duration_ms"], clip["path"]) for clip in compiled["clips"]],
             [
-                ("lead-load", 0, 20_000, "/music/lead.flac"),
+                ("lead-load", 0, 20_180, "/music/lead.flac"),
                 ("lead-load-segment-03", 40_000, 20_000, "/music/lead.flac"),
             ],
         )
         group = compiled["stem_groups"][0]
-        self.assertEqual((group["id"], group["start_ms"], group["duration_ms"]), ("lead-load-segment-02", 20_000, 20_000))
+        self.assertEqual((group["id"], group["start_ms"], group["duration_ms"]), ("lead-load-segment-02", 20_000, 20_180))
         self.assertFalse(group["stems"]["vocals"].get("enabled", True))
         self.assertTrue(group["stems"]["drums"].get("enabled", True))
 

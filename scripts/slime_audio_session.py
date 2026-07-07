@@ -54,6 +54,11 @@ AUTOMATABLE_PARAMS = {
     "solo",
 }
 STEM_NAMES = {"vocals", "drums", "bass", "other"}
+# A stem toggle crossfades over this long instead of hard-cutting: the closing
+# segment overlaps the next with matching linear fades, so continuous stems
+# reconstruct exactly (same record, same source position) and only the toggled
+# stem fades. Short enough to feel like a switch, long enough to kill the click.
+STEM_TOGGLE_CROSSFADE_MS = 180
 SOURCE_ARTIFACT_PATH_MARKERS = (
     "/separated/",
     "/isolated/",
@@ -171,6 +176,7 @@ class StemGroup:
     fade_out_ms: int = 0
     reverse: bool = False
     playback_rate: float = 1.0
+    source_action_id: str | None = None
     stems: dict[str, StemState] = field(default_factory=dict)
     automations: list[Automation] = field(default_factory=list)
 
@@ -493,6 +499,7 @@ def parse_stem_group(payload: dict[str, Any]) -> StemGroup:
         fade_out_ms=parse_ms(payload.get("fade_out_ms", 0), f"stem group {group_id} fade_out_ms"),
         reverse=bool(payload.get("reverse", False)),
         playback_rate=float(payload.get("playback_rate", 1.0)),
+        source_action_id=str(payload["source_action_id"]) if payload.get("source_action_id") else None,
         stems={
             stem_name: parse_stem_state(group_id, stem_name, stem_payload)
             for stem_name, stem_payload in stems_payload.items()
@@ -1092,18 +1099,30 @@ def append_deck_clock_segment(
     stems_enabled: set[str] | None = None,
     keep_fade_in: bool = True,
     keep_fade_out: bool = True,
+    crossfade_in_ms: int = 0,
+    crossfade_out_ms: int = 0,
 ) -> dict[str, Any] | None:
     if duration_ms <= 0:
         return None
     # Fades belong to a load's REAL ends. A mid-load segment boundary (a
     # toggle) inheriting the authored fade_in played every stems handoff as
     # a cut-to-zero-and-fade-back (heard live on 2026-07-04).
-    if not keep_fade_in or not keep_fade_out:
+    #
+    # A stem toggle now CROSSFADES instead of hard-cutting: the closing
+    # segment gets a short fade_out and overlaps the opening segment's
+    # matching fade_in. Because the two segments are the same record at the
+    # same source position, the linear crossfade reconstructs the continuous
+    # stems exactly (no dip) and smoothly fades only the stem that changed.
+    if not keep_fade_in or not keep_fade_out or crossfade_in_ms or crossfade_out_ms:
         load_action = dict(load_action)
         if not keep_fade_in:
             load_action["fade_in_ms"] = 0
         if not keep_fade_out:
             load_action["fade_out_ms"] = 0
+        if crossfade_in_ms:
+            load_action["fade_in_ms"] = int(crossfade_in_ms)
+        if crossfade_out_ms:
+            load_action["fade_out_ms"] = int(crossfade_out_ms)
     load_id = action_id(load_action)
     segment_all_on = stems_enabled is None or {str(stem) for stem in stems_enabled} == STEM_NAMES
     if stems_enabled is not None and segment_all_on and not action_stems_untouched(load_action):
@@ -1515,7 +1534,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
         remaining_ms = max(0, int(round(total_duration_ms - timeline_consumed_ms)))
         return int(active["start_ms"]) + remaining_ms
 
-    def close_active(deck: str, end_ms: int) -> None:
+    def close_active(deck: str, end_ms: int, crossfade_out_ms: int = 0) -> None:
         active = deck_active.get(deck)
         if not active:
             return
@@ -1525,9 +1544,21 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             end_ms = min(end_ms, natural_end)
         if end_ms - start_ms <= 0:
             # Nothing aired (e.g. a toggle at the load's own start): drop the
-            # empty span without consuming a segment id.
+            # empty span without consuming a segment id — and never crossfade
+            # a segment that never played.
             deck_active.pop(deck, None)
             return
+        # A stem toggle extends the closing segment PAST the boundary so it can
+        # crossfade with the next one (which starts at the boundary). Clamp the
+        # extension to the track's real end. Only real (already-aired) segments
+        # extend, so a toggle at the load's own start makes no phantom sliver.
+        cf_out = 0
+        if crossfade_out_ms > 0:
+            extended = end_ms + crossfade_out_ms
+            if natural_end is not None:
+                extended = min(extended, natural_end)
+            cf_out = max(0, extended - end_ms)
+            end_ms = extended
         first_segment = segment_counts.get(str(active["load_id"]), 0) == 0
         reaches_natural_end = natural_end is not None and end_ms >= natural_end
         append_deck_clock_segment(
@@ -1544,6 +1575,8 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             stems_enabled=active.get("stems_enabled"),
             keep_fade_in=first_segment,
             keep_fade_out=reaches_natural_end,
+            crossfade_in_ms=int(active.get("crossfade_in_ms") or 0),
+            crossfade_out_ms=cf_out,
         )
         deck_active.pop(deck, None)
 
@@ -1833,15 +1866,18 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         else:
                             enabled_before = set(STEM_NAMES)
                 source_pos = active_source_position(active, at_ms)
-                close_active(toggle_deck, at_ms)
                 next_state = set(enabled_before)
                 (next_state.add if enabled else next_state.discard)(stem_name)
+                # No-op toggles (state unchanged) don't segment or crossfade.
+                changed = next_state != set(enabled_before)
+                close_active(toggle_deck, at_ms, crossfade_out_ms=STEM_TOGGLE_CROSSFADE_MS if changed else 0)
                 deck_active[toggle_deck] = {
                     "action": active["action"],
                     "load_id": group_id,
                     "start_ms": at_ms,
                     "trim_start_ms": source_pos,
                     "stems_enabled": next_state,
+                    "crossfade_in_ms": STEM_TOGGLE_CROSSFADE_MS if changed else 0,
                 }
             else:
                 # Not the live load on any deck (e.g. a directly-authored bed
@@ -1925,6 +1961,7 @@ def compile_actions_payload(payload: dict[str, Any]) -> dict[str, Any]:
             stems_enabled=active.get("stems_enabled"),
             keep_fade_in=segment_counts.get(str(active["load_id"]), 0) == 0,
             keep_fade_out=True,
+            crossfade_in_ms=int(active.get("crossfade_in_ms") or 0),
         )
     compiled["decks"] = decks
     return compiled
@@ -2271,6 +2308,13 @@ def validate_session(session: MixSession) -> None:
         )
         for left, right in zip(deck_events, deck_events[1:]):
             if left.end_ms is not None and left.end_ms > right.start_ms:
+                overlap_ms = left.end_ms - right.start_ms
+                left_src = getattr(left, "source_action_id", None)
+                right_src = getattr(right, "source_action_id", None)
+                # A stem toggle overlaps two segments of the SAME record for a
+                # short crossfade — deliberate, not a scheduling collision.
+                if left_src and left_src == right_src and overlap_ms <= STEM_TOGGLE_CROSSFADE_MS + 40:
+                    continue
                 errors.append(f"clips {left.id} and {right.id} overlap on {deck}")
 
     for lean_in in session.mic_lean_ins:
