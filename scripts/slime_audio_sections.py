@@ -126,19 +126,21 @@ def detect_sections(path: str, db_path: Path = DEFAULT_LIBRARY_DB) -> list[dict[
     ]
     drums = per_band_bars["drums"]
 
-    # Thresholds RELATIVE to each signal's own dynamic range, not percentiles
-    # of the distribution: a funk track that grooves at a steady level and an
-    # EDM track with a silent intro and a massive drop both get a threshold
-    # scaled to how far this track actually swings, so the sustained groove
-    # always reads as "full" and only genuine dips read as "break".
+    # A "break" is a SIGNIFICANT dip below the track's own groove level, not
+    # merely below average: a funk track with three levels (quiet intro,
+    # steady verse, climax vamp) must not read every verse as a breakdown just
+    # because the vamp is louder. The reference is the groove the track spends
+    # most of its "on" time at (upper-median energy); a break is a few dB
+    # under it, or the drums genuinely thinning out. This also handles EDM,
+    # where the breakdown dips far below the groove and the drop returns to it.
+    groove = max(0.15, percentile(energy, 0.60))
     e_lo, e_hi = percentile(energy, 0.05), percentile(energy, 0.92)
-    e_rng = max(0.05, e_hi - e_lo)
-    break_thr = e_lo + 0.38 * e_rng
-    d_lo, d_hi = percentile(drums, 0.05), percentile(drums, 0.92)
-    drums_break = d_lo + 0.35 * max(0.05, d_hi - d_lo)
+    break_thr = min(groove * 0.72, e_lo + 0.55 * max(0.05, e_hi - e_lo))
+    drums_groove = max(0.15, percentile(drums, 0.60))
+    drums_break = drums_groove * 0.55
     low_thr = break_thr  # kept for breakdown-depth confidence below
 
-    # Per-bar regime: BREAK (drums out or energy dipped below the groove) vs
+    # Per-bar regime: BREAK (a real dip below the groove, or drums thinned) vs
     # FULL (the groove is driving).
     def is_break(i: int) -> bool:
         return energy[i] < break_thr or drums[i] < drums_break
