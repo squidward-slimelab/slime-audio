@@ -838,6 +838,18 @@ def command_backfill(args: argparse.Namespace) -> int:
         try:
             command_split(split_args)
             summary["split"] += 1
+            # Stems just became available: read the stem-aware sections
+            # (intros/breakdowns/drops on the grid) so phrasing improves the
+            # moment a track is split. Best-effort — never fail a split on it.
+            try:
+                import slime_audio_sections as sections
+
+                found = sections.detect_sections(str(source), args.db)
+                if found:
+                    sections.store_sections(str(source), found, args.db)
+                    summary["sections"] = summary.get("sections", 0) + 1
+            except Exception:
+                pass
         except Exception as exc:  # noqa: BLE001 - queue must survive one bad track
             attempts = int(entry.get("attempts") or 0) + 1
             summary["failed"] += 1
