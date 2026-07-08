@@ -586,6 +586,67 @@ def snap_vocal_toggle(timeline_ms: int, clip: dict[str, Any], factor: float, *, 
     return timeline_ms
 
 
+_SECTION_CACHE: dict[tuple[str, str], list[int]] = {}
+
+
+def section_source_starts(source_path: str, kind: str) -> list[int]:
+    """Source-time starts of a section kind (drop/breakdown/...) for a track."""
+    key = (source_path, kind)
+    if key in _SECTION_CACHE:
+        return _SECTION_CACHE[key]
+    starts: list[int] = []
+    try:
+        import sqlite3
+
+        conn = sqlite3.connect(SESSION_LIBRARY_DB)
+        starts = [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT start_ms FROM track_dj_structure WHERE path = ? AND kind = ? ORDER BY start_ms",
+                (source_path, kind),
+            ).fetchall()
+        ]
+        conn.close()
+    except Exception:
+        starts = []
+    _SECTION_CACHE[key] = starts
+    return starts
+
+
+def choose_swap_ms(
+    overlap_start_ms: int,
+    overlap_end_ms: int,
+    outgoing: dict[str, Any],
+    incoming: dict[str, Any],
+    outgoing_factor: float,
+    incoming_factor: float,
+) -> tuple[int, str]:
+    """Land the kit swap on a musical moment, not the geometric midpoint.
+
+    The groove changes hands at ONE instant (never two kits), so put that
+    instant where it means something: the incoming record's drop — the new
+    groove takes over exactly as it slams in — else the outgoing's breakdown
+    (the old groove winds down), else the midpoint."""
+    span = overlap_end_ms - overlap_start_ms
+    lo = overlap_start_ms + max(8_000, span // 5)
+    hi = overlap_end_ms - 4_000
+    if hi <= lo:
+        return overlap_start_ms + span // 2, "midpoint (overlap too short)"
+
+    def to_timeline(source_ms: int, clip: dict[str, Any], factor: float) -> int:
+        return _source_to_timeline_ms(source_ms, clip, factor) if factor > 0 else -1
+
+    for drop_src in section_source_starts(str(incoming.get("path") or ""), "drop"):
+        tl = to_timeline(drop_src, incoming, incoming_factor)
+        if lo <= tl <= hi:
+            return tl, "incoming drop"
+    for brk_src in section_source_starts(str(outgoing.get("path") or ""), "breakdown"):
+        tl = to_timeline(brk_src, outgoing, outgoing_factor)
+        if lo <= tl <= hi:
+            return tl, "outgoing breakdown"
+    return overlap_start_ms + span // 2, "midpoint"
+
+
 def author_stem_handoff(
     planner_actions: list[dict[str, Any]],
     *,
@@ -649,9 +710,12 @@ def author_stem_handoff(
     if out_ready:
         out_id = str(outgoing["source_action_id"])
         # Outgoing owns the groove up to the swap, then hands the whole
-        # rhythm section (kit + low end) to the incoming at one instant.
-        swap_ms = overlap_start_ms + span // 2
-        three_quarter_ms = overlap_start_ms + (3 * span) // 4
+        # rhythm section (kit + low end) to the incoming at one instant — on
+        # the incoming's drop when there is one in the window.
+        swap_ms, swap_reason = choose_swap_ms(
+            overlap_start_ms, overlap_end_ms, outgoing, incoming, outgoing_factor, incoming_factor
+        )
+        three_quarter_ms = swap_ms + (overlap_end_ms - swap_ms) // 2
         # Let the outgoing line finish before its vocal cuts (no minced word).
         out_vox_off = snap_vocal_toggle(overlap_start_ms, outgoing, outgoing_factor, turning_on=False)
         toggle(out_id, "vocals", False, out_vox_off, "out")  # no stacked vocals
@@ -660,9 +724,10 @@ def author_stem_handoff(
         toggle(out_id, "other", False, three_quarter_ms, "melodics-out")
         toggle(in_id, "drums", True, swap_ms, "kit-in")   # exactly one kit at the swap
         toggle(in_id, "bass", True, swap_ms, "low-in")
-        # Bring the incoming vocal in on a phrase start, not mid-word.
-        toggle(in_id, "vocals", True, snap_vocal_toggle(overlap_end_ms, incoming, incoming_factor, turning_on=True), "open")
-        notes.append("groove swap: outgoing owns the kit, incoming weaves melodics, rhythm section changes hands at the midpoint (never two kits)")
+        # Incoming vocal opens on a phrase start, but never before its kit.
+        in_vox_on = max(swap_ms, snap_vocal_toggle(overlap_end_ms, incoming, incoming_factor, turning_on=True))
+        toggle(in_id, "vocals", True, in_vox_on, "open")
+        notes.append(f"groove swap on {swap_reason}: outgoing owns the kit, incoming weaves melodics, rhythm section changes hands at one instant (never two kits)")
     else:
         # Unsplit outgoing (full track, kit can't be stripped): its drums play
         # the whole overlap, so the incoming's kit and low end must wait for
