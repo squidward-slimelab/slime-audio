@@ -715,19 +715,22 @@ def author_stem_handoff(
         swap_ms, swap_reason = choose_swap_ms(
             overlap_start_ms, overlap_end_ms, outgoing, incoming, outgoing_factor, incoming_factor
         )
-        three_quarter_ms = swap_ms + (overlap_end_ms - swap_ms) // 2
         # Let the outgoing line finish before its vocal cuts (no minced word).
         out_vox_off = snap_vocal_toggle(overlap_start_ms, outgoing, outgoing_factor, turning_on=False)
         toggle(out_id, "vocals", False, out_vox_off, "out")  # no stacked vocals
         toggle(out_id, "drums", False, swap_ms, "kit-out")
         toggle(out_id, "bass", False, swap_ms, "low-out")
-        toggle(out_id, "other", False, three_quarter_ms, "melodics-out")
+        # The outgoing's melodics (horns/keys) are NOT toggled off — they ring
+        # over the incoming's new groove and fade out with the track's own
+        # ending. Hard-cutting them here left a silent all-stems-off tail
+        # segment (shown as "full-track fallback"); letting them ring is both
+        # cleaner and the more musical blend.
         toggle(in_id, "drums", True, swap_ms, "kit-in")   # exactly one kit at the swap
         toggle(in_id, "bass", True, swap_ms, "low-in")
         # Incoming vocal opens on a phrase start, but never before its kit.
         in_vox_on = max(swap_ms, snap_vocal_toggle(overlap_end_ms, incoming, incoming_factor, turning_on=True))
         toggle(in_id, "vocals", True, in_vox_on, "open")
-        notes.append(f"groove swap on {swap_reason}: outgoing owns the kit, incoming weaves melodics, rhythm section changes hands at one instant (never two kits)")
+        notes.append(f"groove swap on {swap_reason}: outgoing owns the kit then hands it over at one instant (never two kits); its melodics ring out over the incoming groove")
     else:
         # Unsplit outgoing (full track, kit can't be stripped): its drums play
         # the whole overlap, so the incoming's kit and low end must wait for

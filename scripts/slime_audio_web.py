@@ -484,7 +484,7 @@ def display_meta_for_event(event: dict[str, Any]) -> str:
             for name, stem in stems.items()
             if isinstance(stem, dict) and stem.get("enabled", True)
         ]
-        mix = ", ".join(active) if active else "full-track fallback"
+        mix = ", ".join(active) if active else "silent (all stems off)"
         transform = mix_transform_text(event)
         return " | ".join(part for part in (f"stem deck | {mix}", transform) if part)
     if event.get("routine_recipe"):
